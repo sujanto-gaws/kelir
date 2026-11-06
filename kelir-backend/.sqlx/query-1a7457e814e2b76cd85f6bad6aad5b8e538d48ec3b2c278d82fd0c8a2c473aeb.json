@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        SELECT id FROM departments\n                        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n                        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1a7457e814e2b76cd85f6bad6aad5b8e538d48ec3b2c278d82fd0c8a2c473aeb"
+}

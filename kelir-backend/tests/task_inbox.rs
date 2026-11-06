@@ -9496,7 +9496,7 @@ async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed(
 // | M6 the owner branch's `dep.tenant_id` dropped | AC8, AC11 |
 // | M6 the code branch's `dep.tenant_id` dropped | AC4, AC11 |
 // | M7 the `ROLE` carve-out dropped | AC6, through its stray projection scope |
-// | M8 `REQUESTED_DEPARTMENT` given a liveness join | AC10, AC11 |
+// | ~~M8 `REQUESTED_DEPARTMENT` given a liveness join~~ | ~~AC10, AC11~~ M8 is the implementation since #763 (2026-11-06), and its inverse is #763's N3 below |
 // | M9 hidden when **any** edge is unresolved, not **all** | AC5, and four of #530's tests |
 // | M10 the `IS NULL` branch dropped | AC5, AC11, and two of #530's tests |
 // | M11 the clause dropped from `list_for_caller` | AC13, and 13 of the 26 |
@@ -9507,6 +9507,33 @@ async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed(
 // | M14 the department read from the task's snapshot | AC1, AC2, AC3, AC6, AC7, AC8, AC10, AC11 |
 // | M15 the reserved words tested after the code lookup | AC9 |
 // | M16 the live-role `AND` made `OR` | AC1-AC5, AC7-AC9, AC11, and four of #530's tests |
+//
+// ## #763 — a requested department must be live (2026-11-06)
+//
+// Against `7fa2ae2`'s `assignment.rs` and `inbox.rs`, before the fix, these
+// were red: AC10 (flipped; the deleted department's task was still listed),
+// the two-tenant test (this tenant's task pointed abroad was still listed),
+// AC11 ("requested deleted" and "requested abroad" resolved), the #762 oracle
+// ("requested department deleted" and "of another tenant" were decided), and
+// `workflow_engine.rs`'s four #763 tests (each submit, resubmit or decision
+// answered 200 where 422 is pinned).
+//
+// Each mutant was then applied alone and reverted. The #635 and #763 tests
+// here that the filters `requested_department`, `the_inbox_and_the_engine_agree`
+// and `a_claimed_task_with_a_resolving` select were run, and for the five in
+// `direct` and `normalize` also `workflow_engine.rs`'s `requested_department`
+// tests. Every one reddened something:
+//
+// | Mutant | Reddened here | Reddened in `workflow_engine.rs` |
+// |---|---|---|
+// | N1 `direct`'s `Id` arm, `deleted_at IS NULL` dropped | AC10, AC11, the #762 oracle | the submit, resubmit and decision tests |
+// | N2 `direct`'s `Id` arm, the tenant predicate dropped | the two-tenant test, AC11, the #762 oracle | `a_requested_department_is_read_in_this_tenant_only` |
+// | N3 the inbox arm's live join dropped, back to `IS NOT NULL` | AC10, the two-tenant test, AC11, the #762 oracle | — |
+// | N4 the inbox arm's `dep.tenant_id` dropped | the two-tenant test, AC11, the #762 oracle | — |
+// | N5 `direct` refusing an `INACTIVE` department | AC10 (its control), AC11, the #762 oracle | the submit, resubmit and decision tests (their controls) |
+// | N6 the `Id` check skipped, so only a code is looked up | AC10, the two-tenant test, AC11, the #762 oracle | all four #763 tests |
+// | N7 the code arm matched before `REQUESTED_DEPARTMENT` | all six selected, AC6 among them | all five selected |
+// | N8 (extra) the inbox arm's `dep.deleted_at` alone dropped | AC10, AC11, the #762 oracle | — |
 
 /// The role every #635 edge names and every #635 task is offered to.
 ///
@@ -10459,22 +10486,34 @@ async fn a_department_coded_owner_department_does_not_rescue_the_scope() {
     .await;
 }
 
-/// **A requested department that is deleted still resolves, as `normalize`
-/// says** ([#635] AC10).
+/// **A requested department that is deleted no longer resolves** ([#635]
+/// AC10, flipped by [#763]).
 ///
-/// `normalize` takes the document's `requested_for_department_id` as it is,
-/// and checks no liveness (filed apart). The clause matches it, so the task
-/// stays, and it is approved.
+/// Until #763 `normalize` took the document's `requested_for_department_id`
+/// as it was, and this test pinned the task staying and being approved. Now
+/// `direct` asks for a live department of the tenant, and the clause asks the
+/// same, so the task leaves every surface and each decision is refused as
+/// `ASSIGNMENT_UNRESOLVED`. A reassign, to a user or to the role, is refused
+/// as `TARGET_CANNOT_DECIDE`, the task keeps its holder, and the document
+/// keeps its status. The delete goes through the API, which does not count
+/// the document ([#902]). The control's requested department is `INACTIVE`;
+/// it stays and is approved. So does a task whose `ROLE` edges carry a stray
+/// `REQUESTED_DEPARTMENT` scope naming the deleted department ([#763] AC7).
 ///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+/// [#902]: https://github.com/sujanto-gaws/kelir/issues/902
 #[tokio::test]
-async fn a_requested_department_that_is_deleted_still_resolves_as_normalize_says() {
+async fn a_requested_department_that_is_deleted_no_longer_resolves() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
     let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
     let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.req.gone", edge).await;
+    let (target_id, _) = department_holder(&app, "TI-763-DASH", "ti.763.target", edge).await;
     let gone = department(&app, "TI-635-REQ-GONE").await;
+    let asleep = department(&app, "TI-763-REQ-ASLEEP").await;
+    set_department_status(&app, asleep, "INACTIVE").await;
 
     let task = owned_late_claim(
         &app,
@@ -10486,19 +10525,205 @@ async fn a_requested_department_that_is_deleted_still_resolves_as_normalize_says
         Some(gone),
     )
     .await;
+    let control = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_763_req_asleep",
+        department_scoped("ti_763_req_asleep", Some("REQUESTED_DEPARTMENT")),
+        Some(asleep),
+    )
+    .await;
+    // A `ROLE` edge carrying a stray `REQUESTED_DEPARTMENT` scope, on a
+    // document requested for the department deleted below. JWSS refuses the
+    // scope at publish (R-16), so it is put on the definition and its
+    // projection by SQL. `normalize` ignores a scope on `ROLE` and so does the
+    // clause, so the edge resolves tenant-wide and the task stays (AC7).
+    let stray = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_763_req_stray",
+        workflow_for("ti_763_req_stray", DEPT_EDGE_ROLE),
+        Some(gone),
+    )
+    .await;
+    let definition: Uuid = sqlx::query_scalar(
+        "SELECT i.workflow_definition_id FROM workflow_tasks t
+           JOIN workflow_instances i ON i.id = t.workflow_instance_id
+          WHERE t.id = $1",
+    )
+    .bind(stray)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the stray task's definition");
+    sqlx::query(
+        "UPDATE workflow_definitions
+            SET definition_json = jsonb_set(
+                    jsonb_set(definition_json, '{transitions,0,allowedBy}',
+                              jsonb_build_object('assigneeType', 'ROLE', 'roleCode', $2::text,
+                                                 'departmentScope', 'REQUESTED_DEPARTMENT')),
+                    '{transitions,1,allowedBy}',
+                    jsonb_build_object('assigneeType', 'ROLE', 'roleCode', $2::text,
+                                       'departmentScope', 'REQUESTED_DEPARTMENT'))
+          WHERE id = $1",
+    )
+    .bind(definition)
+    .bind(DEPT_EDGE_ROLE)
+    .execute(&app.pool)
+    .await
+    .expect("put a stray scope on the ROLE edges");
+    let strayed = sqlx::query(
+        "UPDATE workflow_transitions
+            SET allowed_by_json = allowed_by_json || '{\"departmentScope\": \"REQUESTED_DEPARTMENT\"}'
+          WHERE workflow_definition_id = $1",
+    )
+    .bind(definition)
+    .execute(&app.pool)
+    .await
+    .expect("put a stray scope on the ROLE edges' projection");
+    assert_eq!(
+        strayed.rows_affected(),
+        2,
+        "both ROLE edges carry the scope"
+    );
     delete_department_through_the_api(&app, &token, gone).await;
 
     assert_waiting(
         &app,
         holder_id,
         &holder,
+        &[control, stray],
         &[task],
-        &[],
         "a requested department deleted after the raise",
     )
     .await;
+    assert_decided(&app, &holder, stray, "APPROVE").await;
 
-    assert_decided(&app, &holder, task, "APPROVE").await;
+    let before = task_holder(&app, task).await;
+    let to_user = reassign(&app, &token, task, json!({ "userId": target_id })).await;
+    cannot_decide(&to_user, "userId");
+    let to_role = reassign(&app, &token, task, json!({ "roleCode": DEPT_EDGE_ROLE })).await;
+    cannot_decide(&to_role, "roleCode");
+    assert_eq!(
+        task_holder(&app, task).await,
+        before,
+        "a refused reassign moved the task"
+    );
+    let status: String = sqlx::query_scalar(
+        "SELECT d.status FROM documents d JOIN workflow_tasks t ON t.document_id = d.id
+          WHERE t.id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the document's status");
+    assert_eq!(status, "PENDING_APPROVAL");
+
+    assert_decided(&app, &holder, control, "APPROVE").await;
+}
+
+/// **Another tenant's department, named as the requested department by SQL,
+/// does not resolve, and that tenant's own task is unaffected** ([#763]
+/// criterion 4).
+///
+/// `documents.requested_for_department_id` has no tenant key, so its foreign
+/// key admits another tenant's department. The other tenant's administrator
+/// raises and claims a task of their own, scoped to `REQUESTED_DEPARTMENT` on
+/// that same department. This tenant's task, pointed at it after the raise,
+/// leaves every surface and is refused; the control, requested for this
+/// tenant's live department, stays. The other tenant's task stays on its
+/// holder's surfaces and is approved.
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+#[tokio::test]
+async fn a_requested_department_of_another_tenant_does_not_resolve_and_spares_that_tenant() {
+    // Multi-tenant, so the other tenant's administrator can sign in; every
+    // sign-in then names its tenant.
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let token = app
+        .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await;
+
+    let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
+    let base = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "TI-763-DASH",
+        WAITING_PERMISSIONS,
+    )
+    .await;
+    let holder_id = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.763.abroad",
+        "ti.763.abroad@example.test",
+        common::ADMIN_PASSWORD,
+        &[base, edge],
+    )
+    .await;
+    let holder = app
+        .sign_in_to("SYSTEM", "ti.763.abroad", common::ADMIN_PASSWORD)
+        .await;
+    let home = department(&app, "TI-763-HOME").await;
+
+    let (elsewhere, other_admin) = tenant_administrator(&app, "TNT-763", "ti.763.other").await;
+    let foreign = department_in(&app, elsewhere, "TI-763-FOREIGN").await;
+    let their_rule = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": "TI-ALL",
+        "departmentScope": "REQUESTED_DEPARTMENT",
+    });
+    let theirs = owned_late_claim(
+        &app,
+        &other_admin,
+        &other_admin,
+        &other_admin,
+        "ti_763_theirs",
+        two_edge_workflow("ti_763_theirs", "TI-ALL", their_rule.clone(), their_rule),
+        Some(foreign),
+    )
+    .await;
+
+    let ours = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_763_ours",
+        department_scoped("ti_763_ours", Some("REQUESTED_DEPARTMENT")),
+        Some(home),
+    )
+    .await;
+    let control = owned_late_claim(
+        &app,
+        &token,
+        &token,
+        &holder,
+        "ti_763_home",
+        department_scoped("ti_763_home", Some("REQUESTED_DEPARTMENT")),
+        Some(home),
+    )
+    .await;
+    set_requested_department(&app, ours, Some(foreign)).await;
+
+    assert_waiting(
+        &app,
+        holder_id,
+        &holder,
+        &[control],
+        &[ours],
+        "a requested department of another tenant",
+    )
+    .await;
+
+    surfaces_of(&app, &other_admin)
+        .await
+        .assert_all(&[theirs], "the other tenant's own task");
+    assert_decided(&app, &other_admin, theirs, "APPROVE").await;
+    assert_decided(&app, &holder, control, "APPROVE").await;
 }
 
 /// **The inbox and the engine agree on which department edges resolve**
@@ -10519,10 +10744,14 @@ async fn a_requested_department_that_is_deleted_still_resolves_as_normalize_says
 /// `""`, a lowercased reserved word, a code of another case or with a space
 /// all refuse; an owner since deactivated still resolves (Q4); a document
 /// with no creator, or one whose creator is another tenant's user, does not;
-/// and a requested department of another tenant resolves, because `normalize`
-/// takes the id as it is (pinned as-is, like AC10).
+/// and a requested department that is deleted, or another tenant's, does not
+/// either, while an `INACTIVE` one does. Until [#763] the deleted and the
+/// foreign requested department were pinned as resolving, because `normalize`
+/// took the id as it was; both rows flipped with it, and the `INACTIVE` row
+/// was added.
 ///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
 #[tokio::test]
 async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
     let app = TestApp::spawn().await;
@@ -10589,6 +10818,13 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
             token.as_str(),
             Some("REQUESTED_DEPARTMENT"),
             Some(requested_gone),
+            false,
+        ),
+        (
+            "requested inactive",
+            token.as_str(),
+            Some("REQUESTED_DEPARTMENT"),
+            Some(asleep),
             true,
         ),
         (
@@ -10720,7 +10956,7 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
             token.as_str(),
             Some("REQUESTED_DEPARTMENT"),
             Some(live),
-            true,
+            false,
         ),
     ];
 
@@ -10977,6 +11213,15 @@ const PERSON_EDGE_QUEUE: &str = "TI-762-QUEUE";
 const NUMBER_ROW: &str = "user id, a JSON number of a live user's digits";
 const ALL_DIGITS: &str = "76212345678901234567890123456789";
 
+/// The oracle's `REQUESTED_DEPARTMENT` rows ([#763]), whose document's
+/// requested department is set by SQL after the raise.
+///
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+const REQUESTED_GONE: &str = "requested department deleted";
+const REQUESTED_ABROAD: &str = "requested department of another tenant";
+const REQUESTED_ASLEEP: &str = "requested department inactive";
+const REQUESTED_GONE_BESIDE_A_ROLE: &str = "requested department deleted, beside a live role";
+
 /// A `USER` rule naming `user_id`, spelled exactly as given.
 fn user_rule(user_id: &str) -> Value {
     json!({ "assigneeType": "USER", "userId": user_id })
@@ -11178,7 +11423,15 @@ async fn delete_user_through_the_api(app: &TestApp, token: &str, user: Uuid) {
 /// `ROLE` edge keeps the task, and decision edges that are all unresolvable,
 /// of any two kinds, hide it.
 ///
+/// **The requested department** ([#763]): a `DEPARTMENT_ROLE` edge scoped to
+/// `REQUESTED_DEPARTMENT` on a document whose requested department is deleted,
+/// or another tenant's, does not resolve, and one whose department is
+/// `INACTIVE` does. The deleted one beside a live `ROLE` edge keeps the task.
+/// Each task leaves or stays on the inbox, its count, the gate, the task page
+/// and both dashboard counts as the engine answers.
+///
 /// [#762]: https://github.com/sujanto-gaws/kelir/issues/762
+/// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
 #[tokio::test]
 async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() {
     let app = TestApp::spawn().await;
@@ -11273,6 +11526,14 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
         "roleCode": PERSON_EDGE_QUEUE,
         "departmentScope": "TI-762-NEVER",
     });
+    let requested = json!({
+        "assigneeType": "DEPARTMENT_ROLE",
+        "roleCode": PERSON_EDGE_QUEUE,
+        "departmentScope": "REQUESTED_DEPARTMENT",
+    });
+    let requested_gone = department(&app, "TI-763-REQ-GONE").await;
+    let requested_asleep = department(&app, "TI-763-REQ-ASLEEP").await;
+    let requested_abroad = department_in(&app, elsewhere, "TI-763-REQ-ABROAD").await;
 
     use EdgeAnswer::{Decided, Forbidden, Unresolved};
 
@@ -11616,6 +11877,37 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
             })),
             Unresolved,
         ),
+        // A requested department, as `direct` reads it since #763: a live
+        // department of the tenant, whatever its `status`. Each is set by SQL
+        // after the raise, below.
+        add(
+            REQUESTED_GONE,
+            &token,
+            ACTIVE,
+            same(requested.clone()),
+            Unresolved,
+        ),
+        add(
+            REQUESTED_ABROAD,
+            &token,
+            ACTIVE,
+            same(requested.clone()),
+            Unresolved,
+        ),
+        add(
+            REQUESTED_ASLEEP,
+            &token,
+            ACTIVE,
+            same(requested.clone()),
+            Decided,
+        ),
+        add(
+            REQUESTED_GONE_BESIDE_A_ROLE,
+            &token,
+            ACTIVE,
+            (requested.clone(), role_live.clone()),
+            Decided,
+        ),
     ];
 
     let mut tasks = Vec::new();
@@ -11657,6 +11949,16 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     set_creator(&app, task_of("owner of another tenant"), Some(foreigner)).await;
     set_user_status(&app, asleep_id, "INACTIVE").await;
     set_user_status(&app, locked_id, "LOCKED").await;
+    for (name, department) in [
+        (REQUESTED_GONE, requested_gone),
+        (REQUESTED_ABROAD, requested_abroad),
+        (REQUESTED_ASLEEP, requested_asleep),
+        (REQUESTED_GONE_BESIDE_A_ROLE, requested_gone),
+    ] {
+        set_requested_department(&app, task_of(name), Some(department)).await;
+    }
+    soft_delete_department(&app, requested_gone).await;
+    set_department_status(&app, requested_asleep, "INACTIVE").await;
 
     // Every holder's lists, each count against its rows. No surface may
     // answer anything but 200, whatever an edge's `userId` says.
