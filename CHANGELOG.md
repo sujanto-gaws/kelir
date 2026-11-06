@@ -640,9 +640,30 @@ While the major version is `0`, the public API may change in any release.
   are scoped to it answers `TARGET_CANNOT_DECIDE` for every target, and once
   claimed such a task leaves its holder's inbox, its count, both dashboard
   cards and its page, as #635's tasks do. A task already raised keeps the
-  department it stored, and its claim is unchanged; that a department delete
+  department it stored, and its claim is unchanged unless no decision edge
+  resolves (#761, below); that a department delete
   counts no document or task naming it is
   [#902](https://github.com/sujanto-gaws/kelir/issues/902). JWSS takes R-21,
+  which changes no shape. No migration.
+- **An unclaimed task nobody can decide is not offered, and its claim is
+  refused** ([#761](https://github.com/sujanto-gaws/kelir/issues/761),
+  construction plan 21 row 29, the product owner's option A). An open task
+  whose state has at least one `APPROVE`, `REJECT` or `RETURN` edge, none of
+  which resolves (a deleted role, a department scope that does not resolve,
+  a `USER` or `OWNER` that is not a live user of the tenant), was hidden only
+  from the holder who had claimed it (#530, #635, #762). Unclaimed, it stayed
+  on every holder of its role's inbox, and the first to claim it then lost
+  sight of it. It is now left off every caller's inbox, its count, both
+  dashboard cards and its page, which answers 404, and a claim of it answers
+  422 `VALIDATION_ERROR` with a detail coded `ASSIGNMENT_UNRESOLVED` at
+  `allowedBy` and writes nothing. The claim asks, under the instance lock, the
+  same SQL clause the inbox reads. A task with one resolving decision edge, or
+  with none, such as a correction task that only `RESUBMIT` leaves, is offered
+  and claimable as before. An administrator finds the department kind on the
+  Roles page's open tasks of the edges' role, and an unclaimed task of any
+  kind under the role it is offered to; a claimed task whose edges name a
+  person still has no finder
+  ([#893](https://github.com/sujanto-gaws/kelir/issues/893)). JWSS takes R-22,
   which changes no shape. No migration.
 
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
@@ -844,7 +865,8 @@ While the major version is `0`, the public API may change in any release.
   `allowedBy` `OWNER` on a document with no live creator, had every decision
   refused as `ASSIGNMENT_UNRESOLVED`, and once claimed it stayed on its holder's inbox,
   its count, both dashboard cards and its page. It is now left off them as
-  #530's tasks are, and its page answers 404; an unclaimed one is unchanged.
+  #530's tasks are, and its page answers 404; an unclaimed one is unchanged
+  (until #761, under *Changed*).
   A `userId` resolves exactly when the engine's parse takes it, so a spelling
   only PostgreSQL accepts, or one with a space, hides the task, and none of
   them makes the inbox answer 500. A user who is `INACTIVE` or `LOCKED` and
@@ -1302,7 +1324,7 @@ While the major version is `0`, the public API may change in any release.
   cannot resolve is refused at the submit, as before. Once claimed, it stayed
   on its holder's inbox, its count, both dashboard cards and its page. It is
   now left off them as #530's tasks are, and its page answers 404; an
-  unclaimed one is unchanged.
+  unclaimed one is unchanged (until #761, under *Changed*).
   The edge reads its department live, so the task returns when the
   department resolves. A reassign is refused for every target, so the remedy
   is the data (Installation and Deployment §9). No migration, and no schema

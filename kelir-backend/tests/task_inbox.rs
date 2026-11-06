@@ -3324,6 +3324,62 @@ async fn claim(app: &TestApp, token: &str, task: Uuid) {
     assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
 }
 
+/// Claims `task` as `token`'s user, and **places the claim by SQL when the
+/// API refuses it because nobody can decide the task** ([#761]).
+///
+/// Since #761 such a claim answers 422 `ASSIGNMENT_UNRESOLVED`, so the #530,
+/// #635 and #762 fixtures whose edges never resolved at the raise can no
+/// longer claim through the API. The state they test is still reached: a
+/// task claimed while an edge resolved, whose role, department or user was
+/// deleted since, and every task claimed before #761 shipped. So the claim is
+/// written as `repository::task::claim` writes it, the assignee and
+/// `ASSIGNED`, and any other refusal fails the test. The strict [`claim`] is
+/// for the tests that mean a claim the API takes.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+async fn claim_or_place(app: &TestApp, token: &str, task: Uuid) {
+    let claimed = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    if claimed.status == StatusCode::OK {
+        return;
+    }
+    assert_eq!(
+        (
+            claimed.status,
+            claimed.body["error"]["details"][0]["code"].as_str()
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("ASSIGNMENT_UNRESOLVED")
+        ),
+        "{}",
+        claimed.body
+    );
+
+    let me = app.get("/api/v1/auth/me", Some(token)).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    let placed = sqlx::query(
+        "UPDATE workflow_tasks SET assignee_user_id = $2, status = 'ASSIGNED',
+                updated_by = $2, updated_at = now()
+          WHERE id = $1 AND assignee_user_id IS NULL AND status = 'CREATED'",
+    )
+    .bind(task)
+    .bind(id_of(me.data()))
+    .execute(&app.pool)
+    .await
+    .expect("place the claim");
+    assert_eq!(
+        placed.rows_affected(),
+        1,
+        "the task was not open to a claim"
+    );
+}
+
 /// **The stranded-task query lists what nobody can decide, and says whose it
 /// is** ([#529], [#533]).
 ///
@@ -3652,7 +3708,7 @@ fn two_edge_workflow(key: &str, queue: &str, approve: Value, reject: Value) -> V
 }
 
 /// Submits a document of a new type on `definition`, claims its task as
-/// `holder`, and dates the task a day late. Returns the task.
+/// `holder` ([`claim_or_place`]), and dates the task a day late. Returns the task.
 async fn claimed_late_task(
     app: &TestApp,
     admin: &str,
@@ -3665,14 +3721,7 @@ async fn claimed_late_task(
     let document = submitted_document(app, admin, type_id, key).await;
     let task = open_task_of(app, document).await;
 
-    let claim = app
-        .post(
-            &format!("/api/v1/workflow/tasks/{task}/claim"),
-            Some(holder),
-            json!({}),
-        )
-        .await;
-    assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
+    claim_or_place(app, holder, task).await;
 
     sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
         .bind(task)
@@ -4499,20 +4548,18 @@ async fn a_conditioned_live_edge_keeps_a_claimed_task_waiting() {
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
 }
 
-/// **An unclaimed task follows #507's arm, not this clause** ([#530]). Two
-/// tasks on the same shape, offered to a live role whose edges name a deleted
-/// one: the claimed task stops waiting, and the unclaimed one stays on every
-/// surface of the role's holder and passes the detail gate. #507 judges an
-/// unclaimed task by its offered role, which lives, and #530's clause is for
-/// the claimed arm alone.
-///
-/// **Seen red, 2026-09-27**: with the claimed condition,
-/// `t.assignee_user_id IS DISTINCT FROM $2`, set to `false` in all three
-/// copies, the unclaimed task leaves every list too.
+/// **An unclaimed task is judged by the clause as a claimed one is** ([#530],
+/// flipped by [#761]). Two tasks on the same shape, offered to a live role
+/// whose edges name a deleted one: both stop waiting. Until #761 the
+/// unclaimed one stayed on every surface of the role's holder, judged by
+/// #507's arm alone, by its offered role, which lives. The product owner chose
+/// on 2026-11-06 that a task nobody can decide is not offered, and the
+/// unclaimed task's claim is refused as `ASSIGNMENT_UNRESOLVED`.
 ///
 /// [#530]: https://github.com/sujanto-gaws/kelir/issues/530
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 #[tokio::test]
-async fn an_unclaimed_task_is_judged_by_its_offered_role_and_not_by_the_clause() {
+async fn an_unclaimed_task_is_judged_by_the_clause_as_a_claimed_one_is() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
@@ -4555,13 +4602,15 @@ async fn an_unclaimed_task_is_judged_by_its_offered_role_and_not_by_the_clause()
 
     soft_delete_role(&app, gone).await;
 
-    surfaces_of(&app, &approver)
-        .await
-        .assert_all(&[unclaimed], "the clause reached past the claimed arm");
-    assert!(
-        is_visible_to(&app, approver_id, unclaimed).await,
-        "the detail gate refuses an unclaimed task on a live offered role"
-    );
+    let approver = (approver_id, approver);
+    assert_not_offered(
+        &app,
+        &[&approver],
+        unclaimed,
+        &[],
+        "an unclaimed task whose every edge names a deleted role",
+    )
+    .await;
     assert!(!is_visible_to(&app, approver_id, claimed).await);
 }
 
@@ -9503,7 +9552,7 @@ async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed(
 // | M11 the clause dropped from `count_for_caller` | AC13, and 13 of the 26 |
 // | M11 the clause dropped from `is_visible_to` | AC13, and 12 of the 26 |
 // | M12 `hold_deciding_roles` refuses, at the raise, a scope `normalize` refuses | AC12, `an_owner_department_edge_with_no_live_department_refuses_the_decision`, and the nine tests here that raise such a task |
-// | M13 the clause applied to the unclaimed arm | AC14, and #530's unclaimed-arm test |
+// | ~~M13 the clause applied to the unclaimed arm~~ | ~~AC14, and #530's unclaimed-arm test~~ M13 is the implementation since #761 (2026-11-06), and its inverse is #761's M1 and M2 below |
 // | M14 the department read from the task's snapshot | AC1, AC2, AC3, AC6, AC7, AC8, AC10, AC11 |
 // | M15 the reserved words tested after the code lookup | AC9 |
 // | M16 the live-role `AND` made `OR` | AC1-AC5, AC7-AC9, AC11, and four of #530's tests |
@@ -9534,6 +9583,34 @@ async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed(
 // | N6 the `Id` check skipped, so only a code is looked up | AC10, the two-tenant test, AC11, the #762 oracle | all four #763 tests |
 // | N7 the code arm matched before `REQUESTED_DEPARTMENT` | all six selected, AC6 among them | all five selected |
 // | N8 (extra) the inbox arm's `dep.deleted_at` alone dropped | AC10, AC11, the #762 oracle | — |
+//
+// ## #761 — an unclaimed task nobody can decide is not offered (2026-11-06)
+//
+// Against `36a8055`'s `src/`, before the fix, these were red: the flipped
+// `USER` test and its department twin, and the flipped #530 unclaimed-arm
+// test (each still listed the task on both candidates' surfaces), the #762
+// oracle (its four unclaimed `Unresolved` rows, one per edge kind, were on the
+// inbox), and `workflow_engine.rs`'s #763 decision test (the claim answered
+// 200 where 422 is pinned). The criterion-5 test, an unclaimed task with one
+// resolving edge or with no decision edge, was green, as a regression case
+// must be; M6 reddens it.
+//
+// The fix's claim refusal broke the fixtures of ten tests here that claimed
+// a task whose edges never resolved. They now go through `claim_or_place`,
+// which places such a claim by SQL, and pass unchanged otherwise.
+//
+// Each mutant was applied alone, `--lib workflow::` and the tests `an_unclaimed`
+// and `the_inbox_and_the_engine_agree_on_which_user_and_owner` select were
+// run, and the mutant reverted and compared with the fixed file:
+//
+// | Mutant | Reddened |
+// |---|---|
+// | M1 the first disjunct restored, `t.assignee_user_id IS DISTINCT FROM $2` | the three flipped tests, the #762 oracle, and both of `inbox.rs`'s source tests |
+// | M2 only claimed tasks judged, `t.assignee_user_id IS NULL` exempting the unclaimed arm | the three flipped tests, the #762 oracle, and both of `inbox.rs`'s source tests |
+// | M3 the clause dropped from `count_for_caller`, kept on the list | the three flipped tests, the #762 oracle (counts against lists), and the four-statement source test |
+// | M4 the clause dropped from `is_visible_to`, kept on the count | the three flipped tests, the #762 oracle (gate against inbox), and the four-statement source test |
+// | M5 the claim check skipped in `claim_task` | the three flipped tests, the #762 oracle (claimable against inbox), and `workflow_engine.rs`'s #763 decision test |
+// | M6 the no-decision-edge branch dropped, hiding such a task | the criterion-5 test, and #530's `a_claimed_task_stays_waiting_while_a_person_can_decide_it` |
 
 /// The role every #635 edge names and every #635 task is offered to.
 ///
@@ -9689,6 +9766,23 @@ async fn owned_late_claim(
     definition: Value,
     requested: Option<Uuid>,
 ) -> Uuid {
+    let task = owned_late_offer(app, admin, owner, key, definition, requested).await;
+    claim_or_place(app, holder, task).await;
+    task
+}
+
+/// [`owned_late_claim`] without the claim: the task is left offered to its
+/// role, unclaimed, and late ([#761]).
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+async fn owned_late_offer(
+    app: &TestApp,
+    admin: &str,
+    owner: &str,
+    key: &str,
+    definition: Value,
+    requested: Option<Uuid>,
+) -> Uuid {
     let workflow = publish_workflow_definition(app, admin, key, definition).await;
     let type_id = document_type(app, admin, &key.to_uppercase(), workflow).await;
 
@@ -9715,7 +9809,6 @@ async fn owned_late_claim(
     assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
 
     let task = open_task_of(app, document).await;
-    claim(app, holder, task).await;
     sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
         .bind(task)
         .execute(&app.pool)
@@ -11187,27 +11280,35 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
     );
 }
 
-/// **An unclaimed task with unresolvable department edges is still offered**
-/// ([#635] AC14). A characterization, pinned as-is and not endorsed: the
-/// unclaimed arm is #507's, judged by the offered role, and this row does not
-/// change it (filed apart). Both candidates see the task on every surface and
-/// through the gate, and the first claims it.
+/// **An unclaimed task with unresolvable department edges is not offered,
+/// and not claimable** ([#635] AC14, flipped by [#761]), the department twin
+/// of the `USER` test.
+///
+/// Until #761 this pinned the task as still offered, as a characterization
+/// not endorsed. Both edges are scoped to a department code that is live at
+/// the submit, so both candidates see the task. The department is deleted,
+/// and at the next read the task leaves both candidates' every surface, and a
+/// claim by either answers 422 `ASSIGNMENT_UNRESOLVED` and writes nothing. The
+/// Roles screen's open-tasks list of the edges' role still finds it, which is
+/// the finder Installation and Deployment §9 names for the department kind.
 ///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 #[tokio::test]
-async fn an_unclaimed_task_with_unresolvable_department_edges_is_still_offered() {
+async fn an_unclaimed_task_with_unresolvable_department_edges_is_not_offered() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
     let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
     let first = department_holder(&app, "TI-635-DASH-1", "ti.635.first", edge).await;
     let second = department_holder(&app, "TI-635-DASH-2", "ti.635.second", edge).await;
+    let scoped = department(&app, "TI-761-SCOPED").await;
 
     let workflow = publish_workflow_definition(
         &app,
         &token,
         "ti_635_unclaimed",
-        department_scoped("ti_635_unclaimed", Some("OWNER_DEPARTMENT")),
+        department_scoped("ti_635_unclaimed", Some("TI-761-SCOPED")),
     )
     .await;
     let type_id = document_type(&app, &token, "TI_635_UNCLAIMED", workflow).await;
@@ -11222,13 +11323,33 @@ async fn an_unclaimed_task_with_unresolvable_department_edges_is_still_offered()
     for (id, candidate) in [&first, &second] {
         surfaces_of(&app, candidate)
             .await
-            .assert_all(&[task], "an unclaimed task offered to the role");
+            .assert_all(&[task], "an unclaimed task whose department is live");
         assert!(is_visible_to(&app, *id, task).await);
         let page = app.get(&format!("{TASKS}/{task}"), Some(candidate)).await;
         assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     }
 
-    claim(&app, &first.1, task).await;
+    soft_delete_department(&app, scoped).await;
+
+    assert_not_offered(
+        &app,
+        &[&first, &second],
+        task,
+        &[],
+        "unclaimed, with no department edge that resolves",
+    )
+    .await;
+    assert_every_decision_refused(&app, &first.1, task).await;
+
+    let listed = open_tasks(&app, &token, edge, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"][0]["id"],
+        task.to_string(),
+        "{}",
+        listed.body
+    );
 }
 
 /// **A task with only unresolvable department edges cannot be reassigned**
@@ -11324,6 +11445,99 @@ const REQUESTED_GONE: &str = "requested department deleted";
 const REQUESTED_ABROAD: &str = "requested department of another tenant";
 const REQUESTED_ASLEEP: &str = "requested department inactive";
 const REQUESTED_GONE_BESIDE_A_ROLE: &str = "requested department deleted, beside a live role";
+
+/// The oracle's unclaimed rows set by SQL after the raise ([#761]), and the
+/// role the unclaimed `ROLE` row's edges name, soft-deleted after the raise.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+const UNCLAIMED_OWNER_NONE: &str = "unclaimed, owner none";
+const UNCLAIMED_REQUESTED_ASLEEP: &str = "unclaimed, requested department inactive";
+const UNCLAIMED_GONE_ROLE: &str = "TI-761-GONE";
+
+/// How many history rows the task has.
+async fn history_count(app: &TestApp, task: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM workflow_task_history WHERE task_id = $1")
+        .bind(task)
+        .fetch_one(&app.pool)
+        .await
+        .expect("count the task's history")
+}
+
+/// A claim of `task` as `token`: `true` when it is taken, `false` when it is
+/// refused as nobody can decide it ([#761]), which also asserts that the
+/// refusal wrote nothing. Any other answer is a failure of the harness.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+async fn claim_answer(app: &TestApp, token: &str, task: Uuid, context: &str) -> bool {
+    let before = (task_holder(app, task).await, history_count(app, task).await);
+    let answered = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/claim"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    match answered.status {
+        StatusCode::OK => true,
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            assert_eq!(
+                detail_paths_and_codes(&answered),
+                vec![("allowedBy".to_owned(), "ASSIGNMENT_UNRESOLVED".to_owned())],
+                "{context}: {}",
+                answered.body
+            );
+            assert_eq!(
+                (task_holder(app, task).await, history_count(app, task).await),
+                before,
+                "{context}: a refused claim wrote something"
+            );
+            false
+        }
+        other => panic!("{context}: a claim answered {other}: {}", answered.body),
+    }
+}
+
+/// Asserts that `task` is offered to none of `candidates` ([#761]): off every
+/// surface, refused by the gate, its page 404, and its claim refused as
+/// `ASSIGNMENT_UNRESOLVED` with nothing written. Each candidate's surfaces
+/// must otherwise hold exactly `others`.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+async fn assert_not_offered(
+    app: &TestApp,
+    candidates: &[&(Uuid, String)],
+    task: Uuid,
+    others: &[Uuid],
+    context: &str,
+) {
+    for (id, candidate) in candidates {
+        surfaces_of(app, candidate)
+            .await
+            .assert_all(others, context);
+        assert!(
+            !is_visible_to(app, *id, task).await,
+            "{context}: the detail gate admits a task nobody can decide"
+        );
+        let page = app.get(&format!("{TASKS}/{task}"), Some(candidate)).await;
+        assert_eq!(
+            page.status,
+            StatusCode::NOT_FOUND,
+            "{context}: the page of a task nobody can decide opens: {}",
+            page.body
+        );
+    }
+    for (_, candidate) in candidates {
+        assert!(
+            !claim_answer(app, candidate, task, context).await,
+            "{context}: a task nobody can decide was claimed"
+        );
+    }
+    assert_eq!(
+        task_holder(app, task).await.0,
+        None,
+        "{context}: the task was claimed"
+    );
+}
 
 /// A `USER` rule naming `user_id`, spelled exactly as given.
 fn user_rule(user_id: &str) -> Value {
@@ -11533,6 +11747,15 @@ async fn delete_user_through_the_api(app: &TestApp, token: &str, user: Uuid) {
 /// Each task leaves or stays on the inbox, its count, the gate, the task page
 /// and both dashboard counts as the engine answers.
 ///
+/// **The unclaimed rows** ([#761]): a task of each edge kind, `USER`, `OWNER`,
+/// `ROLE` and `DEPARTMENT_ROLE`, left offered to the queue and claimed by
+/// nobody, once with edges that do not resolve and once with edges that do,
+/// and one with an unresolvable edge beside a live role. Each is judged as a
+/// claimed task is, and its claim is asked before its decision: 200 where the
+/// task is on the inbox, and 422 `ASSIGNMENT_UNRESOLVED` with nothing written
+/// where it is not.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 /// [#762]: https://github.com/sujanto-gaws/kelir/issues/762
 /// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
 #[tokio::test]
@@ -11637,6 +11860,9 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     let requested_gone = department(&app, "TI-763-REQ-GONE").await;
     let requested_asleep = department(&app, "TI-763-REQ-ASLEEP").await;
     let requested_abroad = department_in(&app, elsewhere, "TI-763-REQ-ABROAD").await;
+    // A role the unclaimed `ROLE` row's edges name, live at the publish and
+    // soft-deleted after the raise, as D-89's refusal leaves no route to.
+    let role_gone = bare_role(&app, UNCLAIMED_GONE_ROLE).await;
 
     use EdgeAnswer::{Decided, Forbidden, Unresolved};
 
@@ -12013,20 +12239,96 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
         ),
     ];
 
-    let mut tasks = Vec::new();
-    for (index, (case, owner, holder, approve, reject, answer)) in cases.iter().enumerate() {
-        let key = format!("ti_762_or_{index}");
-        let task = owned_late_claim(
-            &app,
+    // The unclaimed rows (#761): one of each edge kind that does not resolve,
+    // one that does, and a mixed one. Nobody claims them before the reads.
+    let unclaimed: Vec<Case> = vec![
+        add(
+            "unclaimed, user not a uuid",
             &token,
-            owner,
-            &holders[*holder].1,
-            &key,
-            two_edge_workflow(&key, PERSON_EDGE_QUEUE, approve.clone(), reject.clone()),
-            None,
-        )
-        .await;
-        tasks.push((*case, *holder, task, *answer));
+            ACTIVE,
+            same(user_garbage.clone()),
+            Unresolved,
+        ),
+        add(
+            "unclaimed, user live",
+            &token,
+            ACTIVE,
+            same(user_rule(&hyphenated)),
+            Decided,
+        ),
+        add(
+            UNCLAIMED_OWNER_NONE,
+            &token,
+            ACTIVE,
+            same(owner_rule()),
+            Unresolved,
+        ),
+        add(
+            "unclaimed, owner live",
+            active,
+            ACTIVE,
+            same(owner_rule()),
+            Decided,
+        ),
+        add(
+            "unclaimed, role deleted",
+            &token,
+            ACTIVE,
+            same(json!(format!("ROLE:{UNCLAIMED_GONE_ROLE}"))),
+            Unresolved,
+        ),
+        add(
+            "unclaimed, role live",
+            &token,
+            ACTIVE,
+            same(role_live.clone()),
+            Decided,
+        ),
+        add(
+            "unclaimed, department never",
+            &token,
+            ACTIVE,
+            same(department_never.clone()),
+            Unresolved,
+        ),
+        add(
+            UNCLAIMED_REQUESTED_ASLEEP,
+            &token,
+            ACTIVE,
+            same(requested.clone()),
+            Decided,
+        ),
+        add(
+            "unclaimed, user unresolvable beside a live role",
+            &token,
+            ACTIVE,
+            (user_garbage.clone(), role_live.clone()),
+            Decided,
+        ),
+    ];
+
+    let mut tasks = Vec::new();
+    let rows =
+        (cases.iter().map(|case| (case, true))).chain(unclaimed.iter().map(|case| (case, false)));
+    for (index, ((case, owner, holder, approve, reject, answer), claimed)) in rows.enumerate() {
+        let key = format!("ti_762_or_{index}");
+        let definition =
+            two_edge_workflow(&key, PERSON_EDGE_QUEUE, approve.clone(), reject.clone());
+        let task = if claimed {
+            owned_late_claim(
+                &app,
+                &token,
+                owner,
+                &holders[*holder].1,
+                &key,
+                definition,
+                None,
+            )
+            .await
+        } else {
+            owned_late_offer(&app, &token, owner, &key, definition, None).await
+        };
+        tasks.push((*case, *holder, task, *answer, claimed));
     }
 
     // The states no publish or submit reaches, made after the raise.
@@ -12034,7 +12336,7 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
         tasks
             .iter()
             .find(|(case, ..)| *case == name)
-            .map(|(_, _, task, _)| *task)
+            .map(|(_, _, task, ..)| *task)
             .expect("the case")
     };
     delete_user_through_the_api(&app, &token, gone_user).await;
@@ -12046,9 +12348,11 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
         "owner none",
         "owner unresolvable beside a live role",
         "user and owner both unresolvable",
+        UNCLAIMED_OWNER_NONE,
     ] {
         set_creator(&app, task_of(name), None).await;
     }
+    soft_delete_role(&app, role_gone).await;
     set_creator(&app, task_of("owner of another tenant"), Some(foreigner)).await;
     set_user_status(&app, asleep_id, "INACTIVE").await;
     set_user_status(&app, locked_id, "LOCKED").await;
@@ -12057,6 +12361,7 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
         (REQUESTED_ABROAD, requested_abroad),
         (REQUESTED_ASLEEP, requested_asleep),
         (REQUESTED_GONE_BESIDE_A_ROLE, requested_gone),
+        (UNCLAIMED_REQUESTED_ASLEEP, requested_asleep),
     ] {
         set_requested_department(&app, task_of(name), Some(department)).await;
     }
@@ -12096,7 +12401,7 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     }
 
     let mut disagreements = Vec::new();
-    for (case, holder, task, expected) in tasks {
+    for (case, holder, task, expected, claimed) in tasks {
         let (holder_id, token) = (holders[holder].0, holders[holder].1.as_str());
         let on_the_inbox = listed[holder].contains(&task);
         let through_the_gate = is_visible_to(&app, holder_id, task).await;
@@ -12106,6 +12411,17 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
             StatusCode::NOT_FOUND => false,
             other => panic!("{case}: the task's page answered {other}: {}", page.body),
         };
+
+        // An unclaimed row's claim, asked before its decision (#761): taken
+        // where the task is offered, refused with nothing written where not.
+        if !claimed {
+            let claimable = claim_answer(&app, token, task, case).await;
+            if claimable != on_the_inbox {
+                disagreements.push(format!(
+                    "{case}: claimable {claimable}, on the inbox {on_the_inbox}"
+                ));
+            }
+        }
 
         let answered = engine_answer(&app, token, task, case).await;
         let resolves = answered != EdgeAnswer::Unresolved;
@@ -12135,21 +12451,42 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     );
 }
 
-/// **An unclaimed task with unresolvable `USER` edges is still offered**
-/// ([#762]). The unclaimed arm is #507's, judged by the offered role, and
-/// this row does not change it (#761). Both candidates see the task on every
-/// surface and through the gate, and the first claims it, which is when it
-/// leaves.
+/// **An unclaimed task with unresolvable `USER` edges is not offered, and not
+/// claimable** ([#762], flipped by [#761]).
 ///
+/// Until #761 the unclaimed arm was #507's alone, judged by the offered role:
+/// both candidates saw such a task, and the first to claim it lost sight of
+/// it. The product owner chose option A on 2026-11-06.
+///
+/// Its `APPROVE` names a live user and its `REJECT` a `userId` that is not a
+/// uuid, so both candidates see it on every surface while the first resolves
+/// (#761 criterion 5). Once that user is deleted no decision edge resolves,
+/// and at the next read (criterion 3) it leaves both candidates' inbox, its
+/// count, the gate, the page and both dashboard widgets, and a claim by either
+/// answers 422 `ASSIGNMENT_UNRESOLVED` and writes nothing (criterion 4). Every
+/// decision is refused, as the engine refused it before. It stays on the
+/// Roles screen's open-tasks list of the role it is offered to, its only
+/// finder, which Installation and Deployment §9 names.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 /// [#762]: https://github.com/sujanto-gaws/kelir/issues/762
 #[tokio::test]
-async fn an_unclaimed_task_with_unresolvable_user_edges_is_still_offered() {
+async fn an_unclaimed_task_with_unresolvable_user_edges_is_not_offered() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
     let queue = bare_role(&app, PERSON_EDGE_QUEUE).await;
     let first = waiting_holder(&app, "TI-762-UN-1", "ti.762.first", &[queue]).await;
     let second = waiting_holder(&app, "TI-762-UN-2", "ti.762.second", &[queue]).await;
+    let named = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ti.761.named",
+        "ti.761.named@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
 
     let workflow = publish_workflow_definition(
         &app,
@@ -12158,8 +12495,8 @@ async fn an_unclaimed_task_with_unresolvable_user_edges_is_still_offered() {
         two_edge_workflow(
             "ti_762_unclaimed",
             PERSON_EDGE_QUEUE,
+            user_rule(&named.to_string()),
             user_rule("not-a-uuid"),
-            user_rule(&Uuid::now_v7().to_string()),
         ),
     )
     .await;
@@ -12175,20 +12512,147 @@ async fn an_unclaimed_task_with_unresolvable_user_edges_is_still_offered() {
     for (id, candidate) in [&first, &second] {
         surfaces_of(&app, candidate)
             .await
-            .assert_all(&[task], "an unclaimed task offered to the role");
+            .assert_all(&[task], "an unclaimed task one live user can decide");
         assert!(is_visible_to(&app, *id, task).await);
         let page = app.get(&format!("{TASKS}/{task}"), Some(candidate)).await;
         assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     }
 
-    claim(&app, &first.1, task).await;
-    assert_waiting(
+    delete_user_through_the_api(&app, &token, named).await;
+
+    assert_not_offered(
         &app,
-        first.0,
-        &first.1,
+        &[&first, &second],
+        task,
         &[],
-        &[task],
-        "claimed, with no edge that resolves",
+        "unclaimed, with no USER edge that resolves",
     )
     .await;
+    assert_every_decision_refused(&app, &first.1, task).await;
+
+    let listed = open_tasks(&app, &token, queue, "").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["meta"]["total"], 1, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"][0]["id"],
+        task.to_string(),
+        "{}",
+        listed.body
+    );
+}
+
+/// **An unclaimed task some edge can decide, or with no decision edge, is
+/// offered and claimable** ([#761] criterion 5).
+///
+/// * **One resolving edge is enough.** `APPROVE` names a `userId` that is not
+///   a uuid and `REJECT` a live role: both candidates see the task, and the
+///   first claims it.
+/// * **No decision edge keeps it.** A return sends the document to `RETURNED`,
+///   whose correction task is offered to a role and whose only edge is
+///   `RESUBMIT`, which `decide()` never fires. There is nothing to judge, so
+///   the corrector sees it and claims it.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+#[tokio::test]
+async fn an_unclaimed_task_some_edge_decides_or_with_no_decision_edge_is_claimable() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, PERSON_EDGE_QUEUE).await;
+    let corrector_role = bare_role(&app, "TI-761-CORRECTOR").await;
+    let first = waiting_holder(&app, "TI-761-KEEP-1", "ti.761.first", &[queue]).await;
+    let second = waiting_holder(&app, "TI-761-KEEP-2", "ti.761.second", &[queue]).await;
+    let corrector =
+        waiting_holder(&app, "TI-761-KEEP-C", "ti.761.corrector", &[corrector_role]).await;
+
+    let mixed = owned_late_offer(
+        &app,
+        &token,
+        &token,
+        "ti_761_mixed",
+        two_edge_workflow(
+            "ti_761_mixed",
+            PERSON_EDGE_QUEUE,
+            user_rule("not-a-uuid"),
+            json!(format!("ROLE:{PERSON_EDGE_QUEUE}")),
+        ),
+        None,
+    )
+    .await;
+
+    let definition = json!({
+        "workflowKey": "ti_761_return",
+        "version": "1.0.0",
+        "name": "Corrected by a role, with no decision out of RETURNED",
+        "initialState": "MANAGER_APPROVAL",
+        "states": [
+            { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+              "mapsToDocumentStatus": "PENDING_APPROVAL",
+              "task": { "taskDefinitionKey": "manager_approval", "taskName": "Decide",
+                        "assignment": { "assigneeType": "ROLE",
+                                        "roleCode": PERSON_EDGE_QUEUE } } },
+            { "code": "RETURNED", "name": "Returned for correction",
+              "mapsToDocumentStatus": "RETURNED",
+              "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct the request",
+                        "assignment": { "assigneeType": "ROLE",
+                                        "roleCode": "TI-761-CORRECTOR" } } },
+            { "code": "COMPLETED", "name": "Completed", "mapsToDocumentStatus": "COMPLETED",
+              "isFinal": true }
+        ],
+        "transitions": [
+            { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+              "allowedBy": format!("ROLE:{PERSON_EDGE_QUEUE}") },
+            { "from": "MANAGER_APPROVAL", "to": "RETURNED", "action": "RETURN",
+              "allowedBy": format!("ROLE:{PERSON_EDGE_QUEUE}") },
+            { "from": "RETURNED", "to": "MANAGER_APPROVAL", "action": "RESUBMIT",
+              "allowedBy": "OWNER" }
+        ]
+    });
+    let workflow = publish_workflow_definition(&app, &token, "ti_761_return", definition).await;
+    let type_id = document_type(&app, &token, "TI_761_RETURN", workflow).await;
+    let document = submitted_document(&app, &token, type_id, "ti_761_return").await;
+    let manager = open_task_of(&app, document).await;
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{manager}/decision"),
+            Some(&first.1),
+            json!({ "action": "RETURN", "comment": "Fix the amount" }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+    let correction = open_task_of(&app, document).await;
+    assert_ne!(correction, manager);
+    assert_eq!(
+        task_holder(&app, correction).await,
+        (None, Some(corrector_role), "CREATED".to_owned()),
+        "the correction task is offered to the role, and unclaimed"
+    );
+    sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
+        .bind(correction)
+        .execute(&app.pool)
+        .await
+        .expect("date the correction task a day late");
+
+    for (id, candidate) in [&first, &second] {
+        surfaces_of(&app, candidate)
+            .await
+            .assert_all(&[mixed], "an unclaimed task one live role can decide");
+        assert!(is_visible_to(&app, *id, mixed).await);
+    }
+    surfaces_of(&app, &corrector.1)
+        .await
+        .assert_all(&[correction], "an unclaimed task with no decision edge");
+    assert!(is_visible_to(&app, corrector.0, correction).await);
+
+    assert!(claim_answer(&app, &first.1, mixed, "mixed").await);
+    assert!(claim_answer(&app, &corrector.1, correction, "no decision edge").await);
+    surfaces_of(&app, &first.1)
+        .await
+        .assert_all(&[mixed], "claimed, with an edge that resolves");
+    surfaces_of(&app, &second.1)
+        .await
+        .assert_all(&[], "claimed by somebody else");
+    surfaces_of(&app, &corrector.1)
+        .await
+        .assert_all(&[correction], "claimed, with no decision edge");
 }
