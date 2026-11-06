@@ -5007,3 +5007,360 @@ async fn a_publish_a_role_delete_and_a_department_delete_together_never_deadlock
     let after = common::deadlocks_once_settled(&app).await;
     assert_eq!(after, before, "a publish and two deletes deadlocked");
 }
+
+// ---------------------------------------------------------------------------
+// D-142 (#764) — test-engineer's campaign
+// ---------------------------------------------------------------------------
+//
+// The builder's section above proves both race orders. These pin what it left
+// open: where in the publish the department lock is taken (#764 AC3's order),
+// that it is a key-share lock and nothing stronger, what the delete's
+// `FOR UPDATE` does to a record being written against the department, and
+// that a code is matched as written.
+
+/// Answers whether `running` finished without any session being seen waiting
+/// on `blocker`. A wait seen on `blocker` answers its statement as the error.
+/// Gives up after ten seconds, which is an error too.
+async fn finished_without_waiting_on(
+    app: &TestApp,
+    blocker: i32,
+    running: &tokio::task::JoinHandle<common::TestResponse>,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let blocked: Option<String> = sqlx::query_scalar(
+            "SELECT query FROM pg_stat_activity \
+             WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(blocker)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read pg_stat_activity");
+        if let Some(statement) = blocked {
+            return Err(format!("waited on the publish at: {statement}"));
+        }
+        if running.is_finished() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("neither finished nor was seen waiting".to_owned());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// **#764 AC3: the departments are locked after the revision row and after
+/// the roles.** A publish held at either earlier lock holds no department yet,
+/// so a delete of the department it names does not wait on it, and the
+/// publish, let go, finds the department gone and is refused.
+///
+/// Two stagings, each holding a lock the publish takes before its department
+/// read, as the code that also takes it does: the revision row `FOR UPDATE`,
+/// as a draft edit does, and the role row `FOR UPDATE`, as
+/// `identity::service::delete_role` does. `pg_blocking_pids` shows the
+/// publish waiting on the holder at that lock; the delete must then finish
+/// without waiting on the publish.
+///
+/// **Seen red** against the department block moved above the role block in
+/// `publish_definition` (the role staging: the delete waits on the publish at
+/// its row lock), and against `lock_for_publish` moved after the department
+/// read (the revision staging).
+#[tokio::test]
+async fn a_publish_held_before_its_department_read_holds_no_department() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    let approver = role(&app, "WF-APPROVER").await;
+
+    for staging in ["revision", "role"] {
+        let code = format!("WF-DEPT-ORDER-{}", staging.to_uppercase());
+        let key = format!("wf_dept_order_{staging}");
+        let department = live_department(&app, &code).await;
+        let id = saved(&app, &token, &key, within_department(&key, &code)).await;
+
+        let (mut holder, holder_pid) = holder_with_pid(&app).await;
+        let (lock, row, expected) = match staging {
+            "revision" => (
+                "SELECT id FROM workflow_definitions WHERE id = $1 FOR UPDATE",
+                id,
+                "workflow_definitions",
+            ),
+            _ => (
+                "SELECT id FROM roles WHERE id = $1 FOR UPDATE",
+                approver,
+                "FROM roles",
+            ),
+        };
+        sqlx::query(lock)
+            .bind(row)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the earlier lock");
+
+        let publishing = {
+            let app = std::sync::Arc::clone(&app);
+            let token = token.clone();
+            tokio::spawn(async move { publish(&app, &token, id).await })
+        };
+        let (publisher, statement) = blocked_by(&app, holder_pid, &publishing, "the publish").await;
+        assert!(
+            statement.contains(expected),
+            "{staging}: the publish waited somewhere other than its {staging} lock: {statement}"
+        );
+
+        let deleting = {
+            let app = std::sync::Arc::clone(&app);
+            let token = token.clone();
+            tokio::spawn(async move { delete_department(&app, &token, department).await })
+        };
+        let unheld = finished_without_waiting_on(&app, publisher, &deleting).await;
+
+        holder.rollback().await.expect("release the earlier lock");
+
+        let deleted = deleting.await.expect("the delete finished");
+        let refused = publishing.await.expect("the publish finished");
+
+        assert_eq!(
+            unheld,
+            Ok(()),
+            "{staging}: a publish held at its {staging} lock already held the department"
+        );
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{staging}: {}",
+            refused.body
+        );
+        assert_eq!(
+            refusals(&refused),
+            department_not_live(&WITHIN),
+            "{staging}"
+        );
+        assert_eq!(status_of(&app, id).await, "DRAFT", "{staging}");
+    }
+}
+
+/// **#764 AC3: the publish's department lock is `FOR KEY SHARE` and nothing
+/// stronger**, so an edit of a department a publish names is not held up by
+/// it: `a_role_edit_is_not_held_up_by_a_publish_in_flight`, for departments.
+///
+/// The publish is held at its projection, after its department read, as in
+/// `a_department_delete_waits_on_a_publish_in_flight_and_then_proceeds`, and a
+/// `FOR UPDATE NOWAIT` probe confirms it holds the department there. A rename
+/// and a deactivation through the API take `FOR NO KEY UPDATE`, which
+/// `FOR KEY SHARE` does not conflict with, so each finishes while the publish
+/// is still open.
+///
+/// **Seen red** against `lock_live_departments` taking `FOR SHARE`,
+/// `FOR NO KEY UPDATE` or `FOR UPDATE`: the edit waits on the publish.
+#[tokio::test]
+async fn a_department_edit_is_not_held_up_by_a_publish_in_flight() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+    let department = live_department(&app, "WF-DEPT-EDITED").await;
+    let id = saved(
+        &app,
+        &token,
+        "wf_dept_edited",
+        within_department("wf_dept_edited", "WF-DEPT-EDITED"),
+    )
+    .await;
+
+    let (mut holder, holder_pid) = holder_with_pid(&app).await;
+    sqlx::query("LOCK TABLE workflow_transitions IN SHARE MODE")
+        .execute(&mut *holder)
+        .await
+        .expect("hold the projection");
+
+    let publishing = {
+        let app = std::sync::Arc::clone(&app);
+        let token = token.clone();
+        tokio::spawn(async move { publish(&app, &token, id).await })
+    };
+    let (publisher, statement) = blocked_by(&app, holder_pid, &publishing, "the publish").await;
+    assert!(
+        statement.contains("workflow_transitions"),
+        "the publish waited somewhere other than its projection: {statement}"
+    );
+
+    // The pause point means something only if the publish holds the
+    // department there: a `FOR UPDATE NOWAIT` must fail with 55P03.
+    let mut probe = app.pool.begin().await.expect("a transaction");
+    let probed = sqlx::query("SELECT id FROM departments WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(department)
+        .execute(&mut *probe)
+        .await;
+    probe.rollback().await.expect("end the probe");
+    let held_by_the_publish = matches!(
+        &probed,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03")
+    );
+
+    let mut edits = Vec::new();
+    for body in [
+        json!({ "name": "Department, renamed" }),
+        json!({ "status": "INACTIVE" }),
+    ] {
+        let editing = {
+            let app = std::sync::Arc::clone(&app);
+            let token = token.clone();
+            tokio::spawn(async move {
+                app.put(
+                    &format!("/api/v1/organization/departments/{department}"),
+                    Some(&token),
+                    body,
+                )
+                .await
+            })
+        };
+        let unheld = finished_without_waiting_on(&app, publisher, &editing).await;
+        edits.push((unheld, editing));
+    }
+
+    holder.rollback().await.expect("release the projection");
+
+    let published = publishing.await.expect("the publish finished");
+    assert!(
+        held_by_the_publish,
+        "the publish was paused before it locked its department, so this proves \
+         nothing about its lock: {probed:?}"
+    );
+    for (unheld, editing) in edits {
+        let edited = editing.await.expect("the edit finished");
+        assert_eq!(
+            unheld,
+            Ok(()),
+            "a department edit waited on a publish naming the department"
+        );
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    }
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+}
+
+/// **The delete's `FOR UPDATE` waits on a record being written against the
+/// department, and then counts it**, as `lock_for_delete` documents. A foreign
+/// key check takes `FOR KEY SHARE` on the department, which `FOR UPDATE`
+/// conflicts with and `FOR NO KEY UPDATE` does not.
+///
+/// A transaction inserts a user placed in the department and stays open. The
+/// delete, sent through the API, is seen waiting on it at its row lock. When
+/// the insert commits, the delete counts the user and is refused, 409, and the
+/// department stays live; when it rolls back, the delete goes through. Before
+/// #764 the delete did not wait: it counted nothing, soft-deleted the
+/// department, and the user committed placed in a deleted department.
+///
+/// **Seen red** against `lock_for_delete` taking `FOR NO KEY UPDATE` or
+/// `FOR SHARE`: the delete finishes without waiting.
+#[tokio::test]
+async fn a_department_delete_waits_on_a_user_being_placed_in_it_and_counts_them() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+
+    for (round, commits) in [(0, true), (1, false)] {
+        let department = live_department(&app, &format!("WF-DEPT-PLACED-{round}")).await;
+
+        let (mut holder, holder_pid) = holder_with_pid(&app).await;
+        let username = format!("wf.764.placed.{round}");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, username, email, password_hash, display_name, \
+             department_id) VALUES ($1, $2, $3, $4, 'not-a-hash', $3, $5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(common::fixtures::SYSTEM_TENANT_ID)
+        .bind(&username)
+        .bind(format!("{username}@example.test"))
+        .bind(department)
+        .execute(&mut *holder)
+        .await
+        .expect("place a user in the department, uncommitted");
+
+        let deleting = {
+            let app = std::sync::Arc::clone(&app);
+            let token = token.clone();
+            tokio::spawn(async move { delete_department(&app, &token, department).await })
+        };
+        let (_, statement) = blocked_by(&app, holder_pid, &deleting, "the delete").await;
+        assert!(
+            statement.contains("FROM departments") && statement.contains("FOR UPDATE"),
+            "the delete waited somewhere other than its row lock: {statement}"
+        );
+
+        if commits {
+            holder.commit().await.expect("commit the user");
+        } else {
+            holder.rollback().await.expect("roll the user back");
+        }
+
+        let deleted = deleting.await.expect("the delete finished");
+        if commits {
+            assert_eq!(
+                deleted.status,
+                StatusCode::CONFLICT,
+                "a user placed in the department while it was deleted was not counted: {}",
+                deleted.body
+            );
+            assert!(department_is_live(&app, department).await);
+        } else {
+            assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+            assert!(!department_is_live(&app, department).await);
+        }
+    }
+}
+
+/// **#764 AC1: a code is matched as written**, as `assignment::direct` looks
+/// it up (`department_code = $2`). With `WF-DEPT-EXACT` live, the code in
+/// another case, the code with a trailing space and the empty string are each
+/// a code no department has, and each is refused at its own place: none is
+/// folded, trimmed or read as no scope. The same places naming the code
+/// exactly publish.
+///
+/// **Seen red** against `department_references` upper-casing the code,
+/// trimming it, and skipping an empty scope: the place it changed publishes,
+/// and the engine refuses its tasks at run time.
+#[tokio::test]
+async fn a_department_code_is_matched_as_written_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    role(&app, "WF-APPROVER").await;
+    live_department(&app, "WF-DEPT-EXACT").await;
+
+    let mut definition = approval_workflow("wf_dept_exact");
+    definition["states"][0]["task"]["assignment"] = department_role("wf-dept-exact");
+    definition["transitions"][0]["allowedBy"] = department_role("WF-DEPT-EXACT ");
+    definition["transitions"][1]["allowedBy"] = department_role("");
+    let id = saved(&app, &token, "wf_dept_exact", definition).await;
+
+    let refused = publish(&app, &token, id).await;
+
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refusals(&refused),
+        department_not_live(&[
+            "definition.states.0.task.assignment.departmentScope",
+            "definition.transitions.0.allowedBy.departmentScope",
+            "definition.transitions.1.allowedBy.departmentScope",
+        ])
+    );
+    let messages = messages(&refused);
+    assert!(messages[0].contains("`wf-dept-exact`"), "{}", messages[0]);
+    assert!(messages[1].contains("`WF-DEPT-EXACT `"), "{}", messages[1]);
+    assert!(messages[2].starts_with("`` "), "{}", messages[2]);
+    assert_eq!(status_of(&app, id).await, "DRAFT");
+
+    let mut exact = approval_workflow("wf_dept_exact_control");
+    exact["states"][0]["task"]["assignment"] = department_role("WF-DEPT-EXACT");
+    exact["transitions"][0]["allowedBy"] = department_role("WF-DEPT-EXACT");
+    exact["transitions"][1]["allowedBy"] = department_role("WF-DEPT-EXACT");
+    let control = saved(&app, &token, "wf_dept_exact_control", exact).await;
+    let published = publish(&app, &token, control).await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+}
