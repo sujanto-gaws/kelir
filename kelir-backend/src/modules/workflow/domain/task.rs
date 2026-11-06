@@ -587,6 +587,27 @@ pub fn claim_lost(status: TaskStatus, assignee: Option<Uuid>) -> AppError {
     }
 }
 
+/// Refuses a claim of a task nobody can decide ([#761], the product owner's
+/// decision of 2026-11-06).
+///
+/// A 422 `ASSIGNMENT_UNRESOLVED`, the code a decision on the same task answers,
+/// so a client handles one refusal. The state has at least one decision edge
+/// and none of them resolves, which `repository::inbox::can_be_decided` asks
+/// with the inbox's own clause. Nothing is written: the task stays unclaimed,
+/// and off every inbox, until the data its edges name is restored.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+pub fn claim_undecidable() -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "allowedBy",
+        "assignment",
+        "ASSIGNMENT_UNRESOLVED",
+        "no decision this task's state offers can be taken: every APPROVE, REJECT and \
+         RETURN edge names a role, department or person that does not resolve, so the \
+         task is not claimed",
+    )])
+}
+
 /// Refuses an action the definition does not offer from where the instance is.
 ///
 /// A 422 rather than a 409: the request names an action the process cannot take
@@ -826,6 +847,25 @@ mod tests {
             "{details:?}"
         );
         assert!(details[0].message.contains("REJECT"), "{details:?}");
+    }
+
+    /// A claim of a task nobody can decide answers as a decision on it does
+    /// ([#761]): 422 with `ASSIGNMENT_UNRESOLVED`, so a client handles one code.
+    ///
+    /// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+    #[test]
+    fn a_claim_of_an_undecidable_task_is_refused_as_unresolved() {
+        let error = claim_undecidable();
+        assert_eq!(error.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+        let AppError::Validation { details } = error else {
+            panic!("expected a validation failure");
+        };
+
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert_eq!(details[0].code, "ASSIGNMENT_UNRESOLVED");
+        assert_eq!(details[0].path, "allowedBy");
+        assert!(details[0].message.contains("not claimed"), "{details:?}");
     }
 
     #[test]

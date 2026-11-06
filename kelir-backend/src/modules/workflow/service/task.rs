@@ -105,15 +105,16 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::super::domain::task::{
-    claim_lost, delegate_unavailable, normalize_comment, reassign_closed, refuse_self_delegation,
-    refuse_unless_held_by, refuse_unless_open, refuse_unless_theirs, target_cannot_decide,
+    claim_lost, claim_undecidable, delegate_unavailable, normalize_comment, reassign_closed,
+    refuse_self_delegation, refuse_unless_held_by, refuse_unless_open, refuse_unless_theirs,
+    target_cannot_decide,
 };
 use super::super::domain::{
     AssigneeType, AssignmentRule, DecisionAction, DelegateRequest, Graph, OpenTaskNeedingRole,
     ReassignTarget, ReassignTaskRequest, TaskStatus, TransitionAction, WorkflowTask,
 };
 use super::super::repository::{
-    definition as definition_repo, instance as instance_repo, task as repo,
+    definition as definition_repo, inbox as inbox_repo, instance as instance_repo, task as repo,
 };
 use super::super::{TASK_EXECUTE, TASK_REASSIGN};
 use super::assignment::{self, AssignmentContext};
@@ -148,6 +149,13 @@ pub struct DecisionResult {
 }
 
 /// Claims an unassigned role task ([#176] AC3).
+///
+/// **A task nobody can decide is refused** with 422 `ASSIGNMENT_UNRESOLVED`
+/// ([#761]): its state has a decision edge and none resolves, which is the
+/// set the inbox hides. Asked after the role check, so a caller who does not
+/// hold the role still answers 403 and learns nothing about the edges.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 pub async fn claim_task(
     state: &AppState,
     caller: &Authenticated,
@@ -194,6 +202,17 @@ pub async fn claim_task(
     .await?
     {
         return Err(AppError::Forbidden);
+    }
+
+    // A task nobody can decide is not offered, and not claimed either (#761,
+    // the product owner's option A). Asked with the inbox's own clause, through
+    // `with_claimed_clause!`, under the instance lock taken above, so the
+    // claim and the inbox agree about one task as of the claim. The lock does
+    // not order against a delete of the user, role or department an edge
+    // names, which takes no instance lock. Nothing is written: the
+    // transaction is dropped and rolls back.
+    if !inbox_repo::can_be_decided(&mut *transaction, tenant_id, id).await? {
+        return Err(claim_undecidable());
     }
 
     if repo::claim(&mut transaction, tenant_id, id, user_id).await? == 0 {

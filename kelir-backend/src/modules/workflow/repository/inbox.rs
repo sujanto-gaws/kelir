@@ -66,13 +66,22 @@
 //!
 //! [#487]: https://github.com/sujanto-gaws/kelir/issues/487
 //!
-//! # A claimed task nobody can decide is not waiting either
+//! # A task nobody can decide is not waiting either, claimed or not
 //!
-//! That clause covers the **unclaimed** arm only. A claimed task reaches its
+//! The first clause covers the **unclaimed** arm only. A claimed task reaches its
 //! assignee through `assignee_user_id` whatever became of any role, and
 //! [#530] found one still waiting on every surface while its decision refused
-//! as `ASSIGNMENT_UNRESOLVED`. So each copy of the rule carries a second clause
-//! for the claimed arm, and it asks a different question from the first.
+//! as `ASSIGNMENT_UNRESOLVED`. So each copy of the rule carries a second
+//! clause, and it asks a different question from the first.
+//!
+//! **It judged the claimed arm alone until [#761].** An unclaimed task whose
+//! offered role is live passed the first clause, and an unclaimed task whose
+//! every decision edge failed to resolve stayed on every holder's inbox. The
+//! first to claim it then lost sight of it. The product owner chose, on
+//! 2026-11-06, that such a task is not offered either: the second clause now
+//! judges every open task, whoever holds it or nobody, and a claim of one is
+//! refused as `ASSIGNMENT_UNRESOLVED` by [`can_be_decided`], which splices
+//! the same clause. A claimed task is judged as before.
 //!
 //! **Not whether the task's own role is live.** A claimed task's decision never
 //! reads `candidate_role_id`: `service::task::refuse_unless_theirs` passes on
@@ -93,10 +102,11 @@
 //! user of the tenant, when it is `OWNER` and the document's creator is a live
 //! user of the tenant ([#762]), when it is `ROLE` and a live role in the tenant
 //! has its `roleCode`, or when it is `DEPARTMENT_ROLE`, a live role has its
-//! `roleCode`, and its `departmentScope` resolves. An open task claimed by the
-//! caller is hidden when the state has at least one decision edge and none of
-//! them resolves. Matching by **code** is `direct`'s own match, so a live role
-//! that took a deleted one's code resolves the edge here as it does there.
+//! `roleCode`, and its `departmentScope` resolves. An open task, claimed or
+//! not, is hidden from every caller when the state has at least one decision
+//! edge and none of them resolves ([#761]). Matching by **code** is
+//! `direct`'s own match, so a live role that took a deleted one's code
+//! resolves the edge here as it does there.
 //!
 //! **A `departmentScope` resolves as `assignment::normalize` and `direct` read
 //! it** ([#635]). It is read at each query, as the engine reads it at each
@@ -183,9 +193,12 @@
 //! liveness `direct` checks: the role, the department, the user and the
 //! owner. So it can keep a task on the inbox that the engine would refuse, by
 //! a condition or by who is asking, and it hides none the engine would
-//! accept. It applies to open tasks only,
-//! because a finished task is a record of what was done, and its instance's
-//! later edges say nothing about it.
+//! accept. It applies to open tasks only, claimed or unclaimed alike since
+//! [#761], because a finished task is a record of what was done, and its
+//! instance's later edges say nothing about it. It reads nothing about the
+//! caller or the assignee, so every caller who could see an open task sees
+//! the same answer, and a task leaves every holder's inbox at the next read
+//! after its last resolving edge stops resolving.
 //!
 //! **A hidden task is not lost**, and it is one of three kinds.
 //!
@@ -211,8 +224,10 @@
 //!   whose `userId` is not a uuid, or names a deleted user, another tenant's
 //!   or nobody, or an `OWNER` on a document whose creator is unrecorded,
 //!   deleted or another tenant's. These edges name no role, so **nothing finds
-//!   it**: neither the stranded task query nor the Roles screen's list, which
-//!   reads a claimed task only through an edge naming the role ([#893]).
+//!   a claimed one**: neither the stranded task query nor the Roles screen's
+//!   list, which reads a claimed task only through an edge naming the role
+//!   ([#893]). An unclaimed one is listed there under the role it is offered
+//!   to, as any unclaimed task is, and that is its only finder.
 //!   A reassign is refused as `TARGET_CANNOT_DECIDE`, as for the second kind.
 //!   The remedy is the data where data can reach: restoring the user by SQL,
 //!   clearing `users.deleted_at`, since no route restores one, or setting the
@@ -221,9 +236,13 @@
 //!   instance stays on its revision, a published revision is not edited, and
 //!   nothing cancels a task.
 //!
-//! **The unclaimed arm is unchanged.** An unclaimed task with such edges is
-//! still offered to its role's holders, and the first to claim it then loses
-//! sight of it ([#761]).
+//! **An unclaimed task with such edges is not offered, and not claimable**
+//! ([#761]). It is hidden from every holder of its role on every surface, and
+//! a claim of it answers 422 `ASSIGNMENT_UNRESOLVED` and writes nothing,
+//! because [`can_be_decided`] asks this clause under the instance lock. A
+//! task with at least one resolving edge, or with no decision edge, is
+//! offered and claimable as before. Until #761 such a task stayed offered,
+//! and the first holder to claim it then lost sight of it.
 //!
 //! [#530]: https://github.com/sujanto-gaws/kelir/issues/530
 //! [#761]: https://github.com/sujanto-gaws/kelir/issues/761
@@ -266,7 +285,7 @@
 //! [#179]: https://github.com/sujanto-gaws/kelir/issues/179
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 /// **One axis with four points**, which is what the inbox is asked along
@@ -452,13 +471,14 @@ pub struct InboxPage {
     pub matching: Option<i64>,
 }
 
-/// **#530's claimed-task clause, with #635's department test and #762's
-/// person test, written once.**
+/// **#530's clause, with #635's department test and #762's person test,
+/// written once, and since #761 judging an unclaimed task too.**
 ///
-/// Each of [`list_for_caller`], [`count_for_caller`] and [`is_visible_to`] is
-/// written as `with_claimed_clause!(kind, head, tail, args…)`, and this splices
-/// the clause between the two halves of its statement. `kind` is `query` or
-/// `query_scalar`.
+/// Each of [`list_for_caller`], [`count_for_caller`], [`is_visible_to`] and
+/// [`can_be_decided`] is written as `with_claimed_clause!(kind, head, tail,
+/// args…)`, and this splices the clause between the two halves of its
+/// statement. `kind` is `query` or `query_scalar`. The name is #530's, kept
+/// because every comment and table since cites it.
 ///
 /// **A macro, because nothing else is both one text and checked.** `query!`
 /// takes string literals, joined by `+` if there are several, and no `const`
@@ -468,23 +488,24 @@ pub struct InboxPage {
 /// against the schema at compile time. The `.sqlx/` entries are keyed on the
 /// joined text, so they change when this does.
 ///
-/// The clause reads `t` (the task), `d` (its document), `i` (its instance) and
-/// `$2` (the caller), so each statement joins `documents d` and
-/// `workflow_instances i` and binds the caller second.
+/// The clause reads `t` (the task), `d` (its document) and `i` (its
+/// instance), so each statement joins `documents d` and
+/// `workflow_instances i`. It read `$2`, the caller, until #761: it judged
+/// only the caller's own claimed tasks, and now it judges every open task,
+/// so it asks nothing about who is looking.
 macro_rules! with_claimed_clause {
     ($kind:ident, $head:literal, $tail:literal $(, $arg:expr)* $(,)?) => {
         sqlx::$kind!(
             $head
                 + r#"
-          -- A claimed task nobody can decide is not waiting for its holder
-          -- (#530, #635, #762, #763). Written once, here, and spliced into
-          -- `list_for_caller`, `count_for_caller` and `is_visible_to`. It is
-          -- not `count_open_tasks_needing_role`'s clause, which asks whether
+          -- A task nobody can decide is not waiting for anybody, claimed or
+          -- not (#530, #635, #762, #763, #761). Written once, here, and
+          -- spliced into `list_for_caller`, `count_for_caller`,
+          -- `is_visible_to` and `can_be_decided`. It is not
+          -- `count_open_tasks_needing_role`'s clause, which asks whether
           -- *some* edge names a role: this asks whether *no* decision edge
-          -- resolves. See "A claimed task nobody can decide" at the top of the
-          -- file.
-          AND (t.assignee_user_id IS DISTINCT FROM $2
-               OR t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+          -- resolves. See "A task nobody can decide" at the top of the file.
+          AND (t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
                -- No decision edge at all, as on a RETURNED correction task that
                -- only RESUBMIT leaves: nothing to judge by, so it stays.
                OR NOT EXISTS (SELECT 1 FROM workflow_transitions tr
@@ -879,21 +900,68 @@ pub async fn is_visible_to(
     Ok(found.is_some())
 }
 
+/// Whether anybody can decide the task: the clause alone, with no caller
+/// ([#761]).
+///
+/// The claim's check. `service::task::claim_task` asks it under the instance
+/// lock and refuses a task this answers `false` for, so a claim and the inbox
+/// read the same SQL and agree about a task as of the claim. The lock orders
+/// the claim against the task's own transitions, not against a delete of the
+/// user, role or department an edge names, which takes no instance lock: a
+/// claim and such a delete that commit together can still leave a claimed
+/// task nobody can decide. **Not a Rust copy of
+/// the clause**, which is what #761's product owner asked the claim not to be:
+/// the text is `with_claimed_clause!`'s, as in the three statements above.
+///
+/// A task that is not open answers `true`, as the clause passes it. The claim
+/// has refused it as closed before asking. The document's `deleted_at` is not
+/// read: whether a task can be decided is not whether its document is listed,
+/// and the claim has found the task already.
+///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+pub async fn can_be_decided<'e, E: PgExecutor<'e>>(
+    executor: E,
+    tenant_id: Uuid,
+    task_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let found = with_claimed_clause!(
+        query_scalar,
+        r#"
+        SELECT 1 AS "found!"
+        FROM workflow_tasks t
+        JOIN documents d ON d.id = t.document_id
+        JOIN workflow_instances i ON i.id = t.workflow_instance_id
+        WHERE t.tenant_id = $1 AND t.id = $2
+        "#,
+        r#"
+        "#,
+        tenant_id,
+        task_id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(found.is_some())
+}
+
 #[cfg(test)]
 mod tests {
-    /// **The claimed clause is written once, and all three statements read
-    /// it** ([#635] AC13).
+    /// **The clause is written once, and all four statements read it**
+    /// ([#635] AC13, [#761]).
     ///
     /// The list, its count and the detail gate each answer *is this task
     /// waiting for me*, and [#279] is what it costs when they disagree. #530
     /// kept three copies of the clause identical by hand. The clause is now
     /// `with_claimed_clause!`'s text, and this reads the source for a copy
     /// written back into a statement, or a statement that stopped splicing it.
+    /// The claim's check, [`super::can_be_decided`], is the fourth since #761,
+    /// which asked that the claim reuse the clause's SQL and not copy it.
     ///
     /// [#279]: https://github.com/sujanto-gaws/kelir/issues/279
     /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+    /// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
     #[test]
-    fn the_claimed_clause_is_identical_in_all_three_statements() {
+    fn the_claimed_clause_is_identical_in_all_four_statements() {
         let source = include_str!("inbox.rs");
         let code = source
             .split("#[cfg(test)]")
@@ -901,7 +969,7 @@ mod tests {
             .expect("the code above the tests");
 
         // The clause's first line of SQL, which nothing else in the file says.
-        let marker = "AND (t.assignee_user_id IS DISTINCT FROM $2";
+        let marker = "AND (t.status NOT IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')";
         assert_eq!(
             code.matches(marker).count(),
             1,
@@ -918,9 +986,14 @@ mod tests {
             "the clause is not the macro's text"
         );
 
-        for name in ["list_for_caller", "count_for_caller", "is_visible_to"] {
+        for name in [
+            "list_for_caller",
+            "count_for_caller",
+            "is_visible_to",
+            "can_be_decided",
+        ] {
             let start = code
-                .find(&format!("pub async fn {name}("))
+                .find(&format!("pub async fn {name}"))
                 .unwrap_or_else(|| panic!("{name} is gone"));
             let body = &code[start..];
             let end = body[1..]
@@ -931,5 +1004,39 @@ mod tests {
                 "{name} does not splice the claimed clause"
             );
         }
+    }
+
+    /// **The clause asks nothing about who is looking** ([#761]).
+    ///
+    /// Until #761 its first disjunct, `t.assignee_user_id IS DISTINCT FROM
+    /// $2`, passed every task the caller did not hold, so an unclaimed task
+    /// nobody could decide stayed offered. The clause now judges every open
+    /// task, and the claim's check binds no caller at all, so a clause that
+    /// read the caller or the assignee again would either exempt the unclaimed
+    /// arm or compare the task's id with a user's.
+    ///
+    /// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
+    #[test]
+    fn the_clause_reads_neither_the_caller_nor_the_assignee() {
+        let source = include_str!("inbox.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the code above the tests");
+        let start = code
+            .find("macro_rules! with_claimed_clause")
+            .expect("the macro");
+        let end = start + code[start..].find("\n}\n").expect("the end of the macro");
+        let sql: String = code[start..end]
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!sql.contains("$2"), "the clause reads the caller");
+        assert!(
+            !sql.contains("assignee_user_id"),
+            "the clause reads the assignee"
+        );
     }
 }

@@ -6018,15 +6018,20 @@ async fn a_resubmit_whose_requested_department_was_deleted_is_refused() {
 
 /// **A decision through a requested department deleted since the raise is
 /// refused, and nothing is written; the task keeps the department it was
-/// raised with, and its claim is unchanged** ([#763] criteria 3 and 8).
+/// raised with** ([#763] criteria 3 and 8), **and since [#761] its claim is
+/// refused too**.
 ///
 /// The task is offered to the role in the requested department, and both
 /// edges are scoped to it. After the delete, the department's own holder
-/// still claims the task, because the claim reads the task's stored
-/// `candidate_department_id`, which no delete rewrites ([#902]'s). The
-/// decision reads the edge live and is refused. The control's department is
-/// `INACTIVE`, and an unscoped holder decides it.
+/// still holds the task's role in its stored `candidate_department_id`, which
+/// no delete rewrites ([#902]'s), so their claim passed until #761. Now no
+/// decision edge resolves, so the claim answers 422 `ASSIGNMENT_UNRESOLVED`
+/// and the task stays unclaimed. The holder may still ask for the decision,
+/// as any holder of the role may on an unclaimed task, and the decision reads
+/// the edge live and is refused. The control's department is `INACTIVE`, and
+/// an unscoped holder decides it.
 ///
+/// [#761]: https://github.com/sujanto-gaws/kelir/issues/761
 /// [#763]: https://github.com/sujanto-gaws/kelir/issues/763
 /// [#902]: https://github.com/sujanto-gaws/kelir/issues/902
 #[tokio::test]
@@ -6058,8 +6063,19 @@ async fn a_decision_through_a_deleted_requested_department_is_refused_and_writes
 
     let task = open_task_of(&app, closed).await;
     assert_eq!(candidate_department(&app, task).await, Some(gone));
-    let claimed = claim(&app, &insider, task).await;
-    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let refused = claim(&app, &insider, task).await;
+    assert_eq!(
+        (
+            refused.status,
+            refused.body["error"]["details"][0]["code"].as_str()
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("ASSIGNMENT_UNRESOLVED")
+        ),
+        "{}",
+        refused.body
+    );
 
     let history = "SELECT count(*) FROM workflow_history WHERE document_id = $1";
     let history_before = count_rows(&app, history, closed).await;
