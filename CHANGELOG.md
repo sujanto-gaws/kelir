@@ -11,6 +11,16 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **A draft naming a department code that is not live no longer publishes**
+  ([#764](https://github.com/sujanto-gaws/kelir/issues/764), **D-142**). A
+  draft, or a revision cloned from a published one, whose `DEPARTMENT_ROLE`
+  `departmentScope` names a deleted department or a code no department has
+  is refused at publish with `DEPARTMENT_NOT_LIVE`. Create or restore the
+  department, or edit the scope, then publish again. No query lists such
+  drafts in advance; the publish names each place. Published revisions are
+  not re-checked, and a task or decision scoped to such a code is still
+  refused at run time as `ASSIGNMENT_UNRESOLVED` (Installation and
+  Deployment §9 gives the remedies).
 - **Unclaimed tasks nobody can decide leave their inboxes at the upgrade**
   ([#761](https://github.com/sujanto-gaws/kelir/issues/761)). An open task
   that no one has claimed, whose state has `APPROVE`, `REJECT` or `RETURN`
@@ -692,7 +702,9 @@ While the major version is `0`, the public API may change in any release.
   `FOR KEY SHARE`, after its roles, and a department delete now locks its row
   `FOR UPDATE` in one transaction with its dependents count and its write, so
   the two do not interleave: a publish waiting on a delete is refused, and a
-  delete waiting on a publish then deletes. No delete is refused because a
+  delete waiting on a publish then deletes. The delete's lock also makes it
+  wait for any open transaction that is inserting a row pointing at the
+  department, and it then counts that row. No delete is refused because a
   published revision names the department, which is
   [#902](https://github.com/sujanto-gaws/kelir/issues/902)'s, and a revision
   already published is not re-checked. JWSS takes R-23, which changes no

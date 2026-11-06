@@ -66,9 +66,10 @@
 //!
 //! **A publish, a deprecate and a delete take the revision `FOR UPDATE`
 //! first, holding nothing before it** (`repo::lock_for_publish`; [#572],
-//! [#573], [#712]). After it, a publish also takes the roles it checks
-//! `FOR KEY SHARE`; a deprecate and a delete take no role. Each then writes
-//! only the revision's own row and projections. Nothing else is
+//! [#573], [#712]). After it, a publish also takes the roles, then the
+//! departments, it checks `FOR KEY SHARE` (D-111, D-142); a deprecate and a
+//! delete take neither. Each then writes only the revision's own row and
+//! projections. Nothing else is
 //! locked: `repo::has_live_instances` is a plain read, and no instance,
 //! document or document type is touched.
 //!
