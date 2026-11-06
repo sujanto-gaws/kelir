@@ -357,10 +357,13 @@ pub async fn publish_definition(
     // refuses as `NOT_A_DRAFT`; or it committed first, and its JSON is what is read
     // here. A second publish waits too, and then finds the revision `ACTIVE`.
     //
-    // **The definition row first, then its roles** (`repo::lock_live_roles`).
+    // **The definition row first, then its roles** (`repo::lock_live_roles`),
+    // **then its departments** (`repo::lock_live_departments`, D-142).
     // `identity::service::delete_role` locks a role and reads definitions
-    // without locking them, so it never waits on this row, and the order
-    // cannot close a cycle with it.
+    // without locking them, so it never waits on this row, and
+    // `organization::department_service::delete_department` locks a department
+    // and takes no other lock after it, so the order cannot close a cycle with
+    // either.
     if !repo::lock_for_publish(&mut transaction, tenant_id, id).await? {
         return Err(AppError::not_found("Workflow definition"));
     }
@@ -430,6 +433,34 @@ pub async fn publish_definition(
             .collect();
 
         refused.extend(jwss::dead_role_errors(&references, &live));
+    }
+
+    // **Every department code it names is live, and stays live until this
+    // commits** (**D-142**, #764; JWSS §5.3). D-111 for the literal
+    // `departmentScope` on a `DEPARTMENT_ROLE` rule: a code naming no live
+    // department would refuse every task and decision scoped to it as
+    // `ASSIGNMENT_UNRESOLVED`. The reserved words, a `ROLE` rule's scope and an
+    // escalation are not codes (`graph::department_references`). Taken after
+    // the roles, so the lock order is the definition row, its roles, then its
+    // departments, and before any write, so a refusal writes nothing; its
+    // details follow D-111's. `repo::lock_live_departments` says why its lock
+    // holds against `organization::department_service::delete_department`.
+    let departments = graph::department_references(&before.definition);
+
+    if !departments.is_empty() {
+        let codes: BTreeSet<String> = departments
+            .iter()
+            .map(|reference| reference.department_code.clone())
+            .collect();
+        let codes: Vec<String> = codes.into_iter().collect();
+
+        let live: BTreeSet<String> =
+            repo::lock_live_departments(&mut transaction, tenant_id, &codes)
+                .await?
+                .into_iter()
+                .collect();
+
+        refused.extend(jwss::dead_department_errors(&departments, &live));
     }
 
     if !refused.is_empty() {

@@ -164,7 +164,17 @@ async fn update_definition(
         (status = 403, description = "Missing workflow:definition:publish"),
         (status = 404, description = "No such definition"),
         (status = 409, description = "The revision is not a draft"),
-        (status = 422, description = "The stored definition does not satisfy the JWSS structural rules")
+        (status = 422, description = "VALIDATION_ERROR. The stored definition does not satisfy \
+                                      the JWSS structural rules; or, each place one detail, in \
+                                      this order (JWSS §5.3, §6.4): a ROLE rule carries a \
+                                      departmentScope (ROLE_TAKES_NO_SCOPE, D-114); a condition \
+                                      or variable source reads a path the engine does not build \
+                                      or works one out as it runs (CONDITION_PATH_NOT_BUILT, \
+                                      CONDITION_PATH_COMPUTED); a role it names is not live \
+                                      (ROLE_NOT_LIVE, D-111); a DEPARTMENT_ROLE names a \
+                                      department code that is not a live department of the \
+                                      tenant (DEPARTMENT_NOT_LIVE, D-142). The revision stays a \
+                                      draft and nothing is written")
     ),
     security(("bearer" = []))
 )]

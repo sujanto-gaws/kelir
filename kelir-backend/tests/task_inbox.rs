@@ -9734,6 +9734,24 @@ async fn soft_delete_department(app: &TestApp, department: Uuid) {
         .expect("soft-delete the department");
 }
 
+/// A department coded `code` in the system tenant that stands in only until
+/// the definitions naming the code are published: a publish refuses a code
+/// that is not live there (D-142, #764). [`strike_off`] then removes it, so
+/// the code is one no department in the tenant has, as the case means.
+async fn stand_in(app: &TestApp, code: &str) -> Uuid {
+    department(app, code).await
+}
+
+/// Removes a [`stand_in`] row outright, nothing pointing at it.
+async fn strike_off(app: &TestApp, department: Uuid) {
+    let removed = sqlx::query("DELETE FROM departments WHERE id = $1")
+        .bind(department)
+        .execute(&app.pool)
+        .await
+        .expect("remove the stand-in department");
+    assert_eq!(removed.rows_affected(), 1, "the stand-in was not there");
+}
+
 /// Deleted through the API, which a department no live user points at allows.
 async fn delete_department_through_the_api(app: &TestApp, token: &str, department: Uuid) {
     let deleted = app
@@ -10112,9 +10130,11 @@ async fn a_claimed_task_whose_requested_department_is_none_stops_waiting() {
 /// **A claimed task whose department code names no live department of its
 /// tenant stops waiting** ([#635] AC4).
 ///
-/// Three codes: (a) one that never existed, which a publish does not check;
-/// (b) one deleted through the API after the task was raised and shown; and
-/// (c) one that only another tenant has. All three leave every surface. The
+/// Three codes: (a) one no department has, which a publish refuses since
+/// D-142 (#764), so a stand-in is struck off once the task is raised; (b) one
+/// deleted through the API after the task was raised and shown; and (c) one
+/// that only another tenant has, with a stand-in of this tenant's struck off
+/// the same way. All three leave every surface. The
 /// control's code names a live department, and it stays and is approved.
 ///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
@@ -10129,6 +10149,8 @@ async fn a_claimed_task_whose_department_code_names_no_live_department_stops_wai
     department(&app, "TI-635-CODE-LIVE").await;
     let elsewhere = fixtures::create_tenant(&app.pool, "TNT-635", "Another tenant").await;
     department_in(&app, elsewhere, "TI-635-CODE-ELSEWHERE").await;
+    let never_stand_in = stand_in(&app, "TI-635-CODE-NEVER").await;
+    let foreign_stand_in = stand_in(&app, "TI-635-CODE-ELSEWHERE").await;
 
     let by_code = |key: &str, code: &str| department_scoped(key, Some(code));
     let never = claimed_late_task(
@@ -10163,6 +10185,8 @@ async fn a_claimed_task_whose_department_code_names_no_live_department_stops_wai
         by_code("ti_635_code_live", "TI-635-CODE-LIVE"),
     )
     .await;
+    strike_off(&app, never_stand_in).await;
+    strike_off(&app, foreign_stand_in).await;
 
     assert_waiting(
         &app,
@@ -10215,6 +10239,9 @@ async fn a_claimed_task_stays_while_one_decision_edge_resolves_through_its_depar
     let edge = bare_role(&app, DEPT_EDGE_ROLE).await;
     let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.one", edge).await;
     department(&app, "TI-635-ONE-LIVE").await;
+    // A code no department has, which a publish refuses since D-142 (#764):
+    // a stand-in until (c) and (d) are raised, struck off before the reads.
+    let never_stand_in = stand_in(&app, "TI-635-ONE-NEVER").await;
 
     let owner_or_code = claimed_late_task(
         &app,
@@ -10271,6 +10298,7 @@ async fn a_claimed_task_stays_while_one_decision_edge_resolves_through_its_depar
         }));
     let beside_a_live_cancel =
         claimed_late_task(&app, &token, &holder, "ti_635_one_d", with_cancel).await;
+    strike_off(&app, never_stand_in).await;
 
     assert_waiting(
         &app,
@@ -11169,6 +11197,22 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
         ),
     ];
 
+    // The codes no department of this tenant has, which a publish refuses
+    // since D-142 (#764): each has a stand-in until the tasks are raised, and
+    // is struck off before anything is read.
+    let mut stand_ins = Vec::new();
+    for code in [
+        "TI-635-OR-NEVER",
+        "TI-635-OR-ABROAD",
+        "",
+        "owner_department",
+        "requested_department",
+        "ti-635-or-live",
+        "TI-635-OR-LIVE ",
+    ] {
+        stand_ins.push(stand_in(&app, code).await);
+    }
+
     let mut tasks = Vec::new();
     for (index, (case, owner, scope, requested, resolves)) in cases.iter().enumerate() {
         let key = format!("ti_635_or_{index}");
@@ -11183,6 +11227,10 @@ async fn the_inbox_and_the_engine_agree_on_which_department_edges_resolve() {
         )
         .await;
         tasks.push((*case, task, *resolves));
+    }
+
+    for stand_in in stand_ins {
+        strike_off(&app, stand_in).await;
     }
 
     soft_delete_department(&app, owner_gone).await;
@@ -11876,6 +11924,9 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     // A role the unclaimed `ROLE` row's edges name, live at the publish and
     // soft-deleted after the raise, as D-89's refusal leaves no route to.
     let role_gone = bare_role(&app, UNCLAIMED_GONE_ROLE).await;
+    // A code no department has, which a publish refuses since D-142 (#764): a
+    // stand-in until the raise, struck off with the other changes below.
+    let department_never_stand_in = stand_in(&app, "TI-762-NEVER").await;
 
     use EdgeAnswer::{Decided, Forbidden, Unresolved};
 
@@ -12380,6 +12431,7 @@ async fn the_inbox_and_the_engine_agree_on_which_user_and_owner_edges_resolve() 
     }
     soft_delete_department(&app, requested_gone).await;
     set_department_status(&app, requested_asleep, "INACTIVE").await;
+    strike_off(&app, department_never_stand_in).await;
 
     // Every holder's lists, each count against its rows. No surface may
     // answer anything but 200, whatever an edge's `userId` says.

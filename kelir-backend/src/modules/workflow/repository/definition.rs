@@ -551,6 +551,48 @@ pub async fn lock_live_roles(
     .await
 }
 
+/// The codes among `department_codes` that are live departments in the
+/// tenant, each row held `FOR KEY SHARE` until the caller's transaction ends
+/// (**D-142**, [#764]).
+///
+/// Publish's one department read, and [`lock_live_roles`] for departments.
+/// `organization::department_service::delete_department` locks the department
+/// row `FOR UPDATE` before it counts dependents and soft-deletes it, which
+/// conflicts with this lock. So a delete that locked first makes this wait, and
+/// its row no longer matches `deleted_at IS NULL` when the wait ends: the code
+/// is missing from the answer and the publish is refused. A delete that arrives
+/// second waits for the publish to commit and then goes on: no delete is
+/// refused over a revision naming the department, which is #902's. `status` is
+/// not read: an `INACTIVE` department is live. Key-share locks do not conflict
+/// with one another, nor with the key-share a foreign key takes, so two
+/// publishes naming one department, or a record pointing at it, do not wait on
+/// this.
+///
+/// **Taken after the roles**, so the order is the definition row, then its
+/// roles, then its departments. The one lock on a department that conflicts
+/// with this is the delete's `FOR UPDATE`, and the delete waits on no other
+/// row once it holds it, so the order closes no cycle.
+///
+/// [#764]: https://github.com/sujanto-gaws/kelir/issues/764
+pub async fn lock_live_departments(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    department_codes: &[String],
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT department_code FROM departments
+        WHERE tenant_id = $1 AND department_code = ANY($2) AND deleted_at IS NULL
+        ORDER BY id
+        FOR KEY SHARE
+        "#,
+        tenant_id,
+        department_codes
+    )
+    .fetch_all(&mut **transaction)
+    .await
+}
+
 /// Whether any instance is still running against this revision.
 ///
 /// A retirement is refused over it, for `delete_type`'s reason one module over:

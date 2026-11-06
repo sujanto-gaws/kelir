@@ -338,6 +338,40 @@ fn split<T>(field: Option<Option<T>>) -> (bool, Option<T>) {
     }
 }
 
+/// Locks a live department's row for a delete, answering whether there was one
+/// (**D-142**, [#764]).
+///
+/// `FOR UPDATE` rather than the `FOR NO KEY UPDATE` the delete's own `UPDATE`
+/// would take, because only `FOR UPDATE` conflicts with the `FOR KEY SHARE` a
+/// workflow publish holds on each department its definition names
+/// (`workflow::repository::definition::lock_live_departments`). A publish that
+/// locked first makes this wait until it commits; one arriving after this
+/// waits, and then finds the department gone. It also waits on a transaction
+/// whose uncommitted row points at the department, since a foreign key check
+/// takes the same key-share lock, so [`dependents`] then counts that row.
+/// `false` when there is no live department by that id in the tenant.
+///
+/// [#764]: https://github.com/sujanto-gaws/kelir/issues/764
+pub async fn lock_for_delete(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let found = sqlx::query_scalar!(
+        r#"
+        SELECT 1 AS "found!" FROM departments
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(found.is_some())
+}
+
 /// Retires a department by soft delete.
 pub async fn soft_delete<'e, E: PgExecutor<'e>>(
     executor: E,

@@ -22,6 +22,7 @@
 
 use serde_json::Value;
 
+use super::jwss::RESERVED_DEPARTMENT_SCOPES;
 use super::task_type::{self, TaskType};
 use crate::modules::hook::domain::Registration;
 
@@ -398,24 +399,7 @@ pub struct RoleReference {
 /// too. A rule that does not parse, or a role rule with no `roleCode`, names
 /// nothing here: the validator has already refused it.
 pub fn role_references(definition: &Value) -> Vec<RoleReference> {
-    let rules = array(definition, "states")
-        .iter()
-        .enumerate()
-        .filter_map(|(index, state)| {
-            let rule = state.get("task")?.get("assignment")?;
-            Some((format!("definition.states.{index}.task.assignment"), rule))
-        })
-        .chain(
-            array(definition, "transitions")
-                .iter()
-                .enumerate()
-                .filter_map(|(index, transition)| {
-                    let rule = transition.get("allowedBy")?;
-                    Some((format!("definition.transitions.{index}.allowedBy"), rule))
-                }),
-        );
-
-    rules
+    rule_places(definition)
         .filter_map(|(path, value)| {
             let rule = AssignmentRule::parse(value)?;
 
@@ -436,6 +420,81 @@ pub fn role_references(definition: &Value) -> Vec<RoleReference> {
             })
         })
         .collect()
+}
+
+/// A department a definition names by its code, and where (**D-142**, [#764]).
+///
+/// [#764]: https://github.com/sujanto-gaws/kelir/issues/764
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepartmentReference {
+    /// The request path a refusal names:
+    /// `definition.states.<i>.task.assignment.departmentScope` or
+    /// `definition.transitions.<i>.allowedBy.departmentScope`.
+    pub path: String,
+    pub department_code: String,
+}
+
+/// Every department **code** a definition names, in document order, once per
+/// place it names one (**D-142**, [#764]).
+///
+/// **The places and the rule are the engine's.** A `departmentScope` is read
+/// as a code only on a `DEPARTMENT_ROLE` rule, and only when it is not one of
+/// [`RESERVED_DEPARTMENT_SCOPES`], which `service::assignment::normalize`
+/// matches first. So:
+///
+/// - a `ROLE` rule's scope is not a code: the engine never reads it, and
+///   publish refuses it as `ROLE_TAKES_NO_SCOPE` instead (**D-114** A);
+/// - a rule with no scope names no department;
+/// - a task's `escalation.assignment` is not read, because nothing executes it
+///   (JWSS §3.1), which is [`role_references`]' rule too.
+///
+/// The places are [`role_references`]' places, states first: a state's
+/// `task.assignment` and a transition's `allowedBy`. The `"ROLE:X"` shorthand
+/// is a `ROLE` rule and carries no scope.
+///
+/// [#764]: https://github.com/sujanto-gaws/kelir/issues/764
+pub fn department_references(definition: &Value) -> Vec<DepartmentReference> {
+    rule_places(definition)
+        .filter_map(|(path, value)| {
+            let rule = AssignmentRule::parse(value)?;
+
+            if rule.assignee_type != AssigneeType::DepartmentRole {
+                return None;
+            }
+
+            let code = rule.department_scope?;
+
+            if RESERVED_DEPARTMENT_SCOPES.contains(&code.as_str()) {
+                return None;
+            }
+
+            Some(DepartmentReference {
+                path: format!("{path}.departmentScope"),
+                department_code: code,
+            })
+        })
+        .collect()
+}
+
+/// A state's `task.assignment` and a transition's `allowedBy`, each with the
+/// path a refusal names, states first, each in document order.
+fn rule_places(definition: &Value) -> impl Iterator<Item = (String, &Value)> {
+    array(definition, "states")
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            let rule = state.get("task")?.get("assignment")?;
+            Some((format!("definition.states.{index}.task.assignment"), rule))
+        })
+        .chain(
+            array(definition, "transitions")
+                .iter()
+                .enumerate()
+                .filter_map(|(index, transition)| {
+                    let rule = transition.get("allowedBy")?;
+                    Some((format!("definition.transitions.{index}.allowedBy"), rule))
+                }),
+        )
 }
 
 fn parse_state(value: &Value) -> Option<State> {
@@ -820,5 +879,108 @@ mod tests {
         });
 
         assert!(role_references(&definition).is_empty());
+    }
+
+    /// A valid definition naming a department scope in every way a rule may:
+    /// a code and both reserved words on `DEPARTMENT_ROLE`, no scope, a code on
+    /// a `ROLE` rule, and a code on an escalation.
+    fn every_kind_of_department_scope() -> Value {
+        let department_role = |scope: Option<&str>| {
+            let mut rule = json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "R" });
+            if let Some(scope) = scope {
+                rule["departmentScope"] = json!(scope);
+            }
+            rule
+        };
+
+        json!({
+            "workflowKey": "department_references", "version": "1.0.0",
+            "name": "Department references", "initialState": "A",
+            "states": [
+                { "code": "A", "name": "A", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "a", "taskName": "A",
+                            "assignment": department_role(Some("D-TASK")),
+                            "escalation": { "afterHours": 24,
+                                            "assignment": department_role(Some("D-ESCALATION")) } } },
+                { "code": "B", "name": "B", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "b", "taskName": "B",
+                            "assignment": department_role(Some("OWNER_DEPARTMENT")) } },
+                { "code": "C", "name": "C", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "c", "taskName": "C",
+                            "assignment": { "assigneeType": "ROLE", "roleCode": "R",
+                                            "departmentScope": "D-ON-ROLE" } } },
+                { "code": "D", "name": "D", "mapsToDocumentStatus": "PENDING_APPROVAL",
+                  "task": { "taskDefinitionKey": "d", "taskName": "D",
+                            "assignment": department_role(Some("D-LATER-TASK")) } },
+                { "code": "E", "name": "E", "mapsToDocumentStatus": "COMPLETED", "isFinal": true }
+            ],
+            "transitions": [
+                { "from": "A", "to": "B", "action": "APPROVE",
+                  "allowedBy": department_role(Some("REQUESTED_DEPARTMENT")) },
+                { "from": "B", "to": "C", "action": "APPROVE",
+                  "allowedBy": department_role(Some("D-EDGE")) },
+                { "from": "C", "to": "D", "action": "APPROVE", "allowedBy": department_role(None) },
+                { "from": "D", "to": "E", "action": "APPROVE", "allowedBy": "ROLE:R" }
+            ]
+        })
+    }
+
+    #[test]
+    fn department_references_name_each_code_on_a_department_role_rule_with_its_path() {
+        let definition = every_kind_of_department_scope();
+
+        assert_eq!(
+            super::super::jwss::validate_definition(&definition),
+            Vec::new(),
+            "the fixture must be valid JWSS"
+        );
+
+        let found: Vec<(String, String)> = department_references(&definition)
+            .into_iter()
+            .map(|reference| (reference.path, reference.department_code))
+            .collect();
+
+        // Not the reserved words, not the ROLE rule's scope (D-114), not the
+        // unscoped rule, not the escalation; states first, in document order.
+        let expected = [
+            (
+                "definition.states.0.task.assignment.departmentScope",
+                "D-TASK",
+            ),
+            (
+                "definition.states.3.task.assignment.departmentScope",
+                "D-LATER-TASK",
+            ),
+            (
+                "definition.transitions.1.allowedBy.departmentScope",
+                "D-EDGE",
+            ),
+        ]
+        .map(|(path, code)| (path.to_owned(), code.to_owned()));
+
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn each_reserved_word_is_a_scope_and_not_a_code() {
+        for word in RESERVED_DEPARTMENT_SCOPES {
+            let definition = json!({
+                "states": [{ "code": "A", "task": { "assignment": {
+                    "assigneeType": "DEPARTMENT_ROLE", "roleCode": "R", "departmentScope": word
+                } } }]
+            });
+
+            assert!(department_references(&definition).is_empty(), "{word}");
+        }
+
+        // Matched exactly, as `normalize` matches them: another spelling is a
+        // code, and is looked up as one at run time.
+        let definition = json!({
+            "states": [{ "code": "A", "task": { "assignment": {
+                "assigneeType": "DEPARTMENT_ROLE", "roleCode": "R",
+                "departmentScope": "owner_department"
+            } } }]
+        });
+        assert_eq!(department_references(&definition).len(), 1);
     }
 }

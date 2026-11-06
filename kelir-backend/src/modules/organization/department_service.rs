@@ -269,7 +269,20 @@ pub async fn delete_department(
     let tenant_id = caller.tenant_id();
     let actor = Some(caller.user_id());
 
-    let before = repo::find_department(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // **The row is locked before anything is counted** (**D-142**, #764). A
+    // workflow publish holds each department its definition names `FOR KEY
+    // SHARE` until it commits, and this `FOR UPDATE` conflicts with that. A
+    // publish in flight makes this wait, and the delete then goes on: no
+    // delete is refused over a revision naming the department, which is
+    // #902's. A publish arriving while this holds the lock waits, and then
+    // finds the department gone and is refused as `DEPARTMENT_NOT_LIVE`.
+    if !repo::lock_for_delete(&mut transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Department"));
+    }
+
+    let before = repo::find_department(&mut *transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("Department"))?;
 
@@ -277,7 +290,7 @@ pub async fn delete_department(
     // thing that would be stranded. `ON DELETE RESTRICT` would refuse too, as a
     // 500 saying "foreign key violation" — which tells an administrator nothing
     // about what to move first.
-    let dependents = repo::dependents(&state.pool, tenant_id, id).await?;
+    let dependents = repo::dependents(&mut *transaction, tenant_id, id).await?;
 
     if dependents.any() {
         return Err(AppError::conflict(format!(
@@ -291,9 +304,11 @@ pub async fn delete_department(
         )));
     }
 
-    if repo::soft_delete(&state.pool, tenant_id, id, actor).await? == 0 {
+    if repo::soft_delete(&mut *transaction, tenant_id, id, actor).await? == 0 {
         return Err(AppError::not_found("Department"));
     }
+
+    transaction.commit().await?;
 
     audit::record_or_warn(
         &state.pool,

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT department_code FROM departments\n        WHERE tenant_id = $1 AND department_code = ANY($2) AND deleted_at IS NULL\n        ORDER BY id\n        FOR KEY SHARE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "department_code",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8c0c473efb9208c26a3cb34b7e5329198b574e5aeb6fd71e4111b1521309ee81"
+}

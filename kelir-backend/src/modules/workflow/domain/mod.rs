@@ -15,8 +15,8 @@ pub use definition::{
     WorkflowDefinitionSummary,
 };
 pub use graph::{
-    role_references, AssigneeType, AssignmentRule, Graph, RoleReference, State, TaskSpec,
-    Transition, TransitionAction,
+    department_references, role_references, AssigneeType, AssignmentRule, DepartmentReference,
+    Graph, RoleReference, State, TaskSpec, Transition, TransitionAction,
 };
 pub use instance::{
     InstanceOutcome, InstanceStatus, WorkflowHistoryEntry, WorkflowInstance, WorkflowVariable,
