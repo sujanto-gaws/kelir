@@ -184,6 +184,25 @@ pub const DOCUMENT_FACTS: &[&str] = &[
 /// same way.
 pub const ACTOR_FACTS: &[&str] = &["userId", "roles", "departmentId"];
 
+/// JWSS §5.1's `departmentScope` word for the document's requested department.
+pub const REQUESTED_DEPARTMENT_SCOPE: &str = "REQUESTED_DEPARTMENT";
+/// JWSS §5.1's `departmentScope` word for the document creator's department.
+pub const OWNER_DEPARTMENT_SCOPE: &str = "OWNER_DEPARTMENT";
+
+/// **The `departmentScope` words §5.1 reads before any department code**, in
+/// one list ([#767]).
+///
+/// `service::assignment::normalize` matches these as patterns, and the inbox
+/// clause in `repository::inbox` matches the same two as SQL literals, both
+/// before a scope is looked up as a code. So a department *coded* with one can
+/// never be named by a scope, and `organization::department::validate_create`
+/// refuses such a code from this list. A word added to `normalize` belongs
+/// here too, or the refusal falls behind it.
+///
+/// [#767]: https://github.com/sujanto-gaws/kelir/issues/767
+pub const RESERVED_DEPARTMENT_SCOPES: &[&str] =
+    &[REQUESTED_DEPARTMENT_SCOPE, OWNER_DEPARTMENT_SCOPE];
+
 /// The compiled meta-schema. Compiled once — compiling it per request would put
 /// ~6 KB of JSON Schema on the save path of every workflow.
 fn validator() -> &'static jsonschema::Validator {

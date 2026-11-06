@@ -10408,13 +10408,17 @@ async fn a_department_of_another_tenant_does_not_resolve_an_edge() {
 /// **A department coded with a reserved word does not rescue the scope**
 /// ([#635] AC9).
 ///
-/// No rule reserves `OWNER_DEPARTMENT` or `REQUESTED_DEPARTMENT` as a
-/// department code, so both are created through the API. `normalize` matches
-/// the reserved words before it reads a code, so an owner with no department,
-/// and a document with no requested department, still refuse, and both tasks
-/// leave every surface.
+/// The API refuses `OWNER_DEPARTMENT` and `REQUESTED_DEPARTMENT` as a
+/// department code since [#767], but a row written before that can still hold
+/// one, so both are seeded directly. `normalize` matches the reserved words
+/// before it reads a code, so an owner with no department, and a document with
+/// no requested department, still refuse, and both tasks leave every surface.
+///
+/// *(Edited 2026-11-06 for #767: the two departments were created through the
+/// API, which now refuses them. The assertions are unchanged.)*
 ///
 /// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+/// [#767]: https://github.com/sujanto-gaws/kelir/issues/767
 #[tokio::test]
 async fn a_department_coded_owner_department_does_not_rescue_the_scope() {
     let app = TestApp::spawn().await;
@@ -10424,14 +10428,7 @@ async fn a_department_coded_owner_department_does_not_rescue_the_scope() {
     let (holder_id, holder) = department_holder(&app, "TI-635-DASH", "ti.635.reserved", edge).await;
 
     for code in ["OWNER_DEPARTMENT", "REQUESTED_DEPARTMENT"] {
-        let created = app
-            .post(
-                "/api/v1/organization/departments",
-                Some(&token),
-                json!({ "departmentId": code, "name": code }),
-            )
-            .await;
-        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        department(&app, code).await;
     }
 
     let by_owner = claimed_late_task(
