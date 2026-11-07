@@ -6221,6 +6221,16 @@ async fn a_decision_through_a_deleted_requested_department_is_refused_and_writes
 // | K9 `DEPARTMENT_ROLE` edges skipped | the four red-first tests, `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
 // | K10 a raised task judged again at its decision (`fire` asks the check of its `from` state after `permits`) | `the_raise_is_judged_in_one_place` only: after `permits` it is equivalent, since `permits` refuses the chosen edge first and the check passes when it resolves |
 // | K10b the same, before `permits` | `a_task_stranded_after_its_raise_is_not_touched`, `an_owner_department_edge_with_no_live_department_refuses_the_decision` |
+// | M1 (test-engineer) a `USER` or `OWNER` edge refused when `users.status` is not `ACTIVE` | `the_raise_and_the_inbox_agree_beyond_deletion` (task_inbox) |
+// | M2 (test-engineer) a department scope refused when `departments.status` is not `ACTIVE` | `the_raise_and_the_inbox_agree_beyond_deletion` |
+// | M3 (test-engineer) `OWNER_DEPARTMENT` reads the creator's `deleted_at` | `the_raise_and_the_inbox_agree_beyond_deletion` |
+// | M6 (test-engineer) conditioned decision edges skipped | `the_raise_and_the_inbox_agree_beyond_deletion` |
+// | S1 (test-engineer) `insert_task` named outside the engine as a function value | `a_task_row_is_written_by_one_statement_reached_from_the_engine_alone` |
+// | M10 (test-engineer) an edge with no `allowedBy` skipped instead of resolving | equivalent: no published decision edge fails to parse (meta-schema S5, D-37) |
+//
+// K5 and K5b read `documents.status`; M1 and M2 are the other reading of the
+// required mutant "make the check read `status`": criterion 2 reads no
+// `users.status` or `departments.status`, and the builder's suite passed both.
 //
 // K6–K9 skip an edge of that kind as if it were not a decision edge. A
 // skipped `ROLE` edge that names a deleted role is still refused, by

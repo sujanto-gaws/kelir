@@ -202,7 +202,8 @@
 //!
 //! **A hidden task is not lost**, and it is one of three kinds.
 //!
-//! **None of them is raised any more** ([#765], **D-141** E). Where a task is
+//! **None of them is raised any more** ([#765], **D-141** E), though one already
+//! raised can still be hidden. Where a task is
 //! raised, `assignment::refuse_unless_an_edge_resolves` refuses the
 //! transition as `ASSIGNMENT_UNRESOLVED` when the state has a decision edge
 //! and none resolves, by `normalize` and `direct`, the steps this clause is
