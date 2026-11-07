@@ -1445,6 +1445,18 @@ async fn enter_once(
         )
         .await?;
 
+        // **And a task nobody could ever decide is not raised** (#765,
+        // D-141 E): one decision edge that resolves for this document is
+        // enough, and none refuses the transition. The submit, the resubmit
+        // and a decision all raise their task here, so all three ask it here.
+        assignment::refuse_unless_an_edge_resolves(
+            transaction,
+            tenant_id,
+            context,
+            graph.actions_from(&state.code),
+        )
+        .await?;
+
         let year = Utc::now().year();
         let task_ref = reference::allocate(transaction, tenant_id, RefKind::Task, year)
             .await

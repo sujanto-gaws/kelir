@@ -4395,15 +4395,22 @@ async fn a_decision_through_an_owner_department_edge_is_the_owners_departments()
 /// **At a decision, an owner with no department, or a deleted one, is refused
 /// for the decision** ([#579] criterion 5). The task stays open.
 ///
+/// Both owners are in a live department at the submit, and leave it after the
+/// task is raised: since [#765] a task whose every decision edge is already
+/// unresolvable is not raised, so the decision's refusal is reached by data
+/// that changed after the raise.
+///
 /// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
 #[tokio::test]
 async fn an_owner_department_edge_with_no_live_department_refuses_the_decision() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
     let gone = department(&app, "OD-DEC-GONE", "Closed").await;
+    let left = department(&app, "OD-DEC-LEFT", "Left behind").await;
     let (_, approver) = holder_in(&app, "od.dec.holder", None, &[]).await;
-    let (_, none_token) = owner(&app, "od.dec.none", None).await;
+    let (none_id, none_token) = owner(&app, "od.dec.none", Some(left)).await;
     let (_, gone_token) = owner(&app, "od.dec.gone", Some(gone)).await;
 
     let workflow = publish_workflow(&app, &token, owner_edge_workflow("wf_od_dec")).await;
@@ -4413,6 +4420,7 @@ async fn an_owner_department_edge_with_no_live_department_refuses_the_decision()
 
     let unplaced = draft(&app, &none_token, type_id).await;
     assert_eq!(submit(&app, &token, unplaced).await.status, StatusCode::OK);
+    place_in(&app, none_id, None).await;
     let message = refused_decision(&app, &approver, unplaced, "APPROVE", path).await;
     assert!(
         message.starts_with("the document's creator belongs to no department, so "),
@@ -4467,78 +4475,134 @@ fn owner_return_workflow(key: &str) -> Value {
 }
 
 /// **A task whose only decision edges are scoped to an owner's department that
-/// cannot resolve is raised, and then refused at every decision** ([#689]'s
-/// probe, closed by [#635]).
+/// cannot resolve is not raised** ([#765], **D-141** E; [#689]'s probe).
 ///
-/// The task's own assignment is the plain role, so the submit reads no
-/// department: `hold_deciding_roles` checks only that the edges name a live
-/// role. Two owners, one with no department and one whose department was
-/// deleted before the submit, each have a document submitted with 200. Then
-/// `APPROVE`, `REJECT` and `RETURN` are each refused as `ASSIGNMENT_UNRESOLVED`
-/// at the edge's `departmentScope`, the task stays open, and the document stays
-/// `PENDING_APPROVAL`. This pins #689's answer, "it happens": the task is not
-/// refused at the raise, and `task_inbox.rs`'s #635 tests take it off its
-/// holder's surfaces once claimed.
+/// The task's own assignment is the plain role, so the task resolves, and
+/// `hold_deciding_roles` finds every edge's role live. Two owners, one with no
+/// department and one whose department was deleted before the submit, each
+/// have a document submitted. Until #765 both submits answered 200 and every
+/// decision on the task was then refused, which #689 found and #635 hid once
+/// the task was claimed. Now each submit is refused as `ASSIGNMENT_UNRESOLVED`
+/// with one detail for each of `APPROVE`, `REJECT` and `RETURN`, at the edge's
+/// `departmentScope`, saying why, and writes nothing. The document keeps no
+/// number, and once the first owner is placed in a live department its submit
+/// takes the sequence's first.
 ///
-/// [#635]: https://github.com/sujanto-gaws/kelir/issues/635
+/// **Seen red, 2026-11-07**, against `e5859a3`: both submits answered 200.
+///
 /// [#689]: https://github.com/sujanto-gaws/kelir/issues/689
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
 #[tokio::test]
-async fn a_task_raised_with_only_unresolvable_owner_department_edges_is_refused_at_every_decision()
-{
+async fn a_task_whose_owner_department_edges_cannot_resolve_is_not_raised() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
     let gone = department(&app, "OD-689-GONE", "Closed").await;
-    let (_, approver) = holder_in(&app, "od.689.holder", None, &[]).await;
-    let (_, unplaced) = owner(&app, "od.689.none", None).await;
+    let live = department(&app, "OD-689-LIVE", "Open").await;
+    let (unplaced_id, unplaced) = owner(&app, "od.689.none", None).await;
     let (_, closed) = owner(&app, "od.689.gone", Some(gone)).await;
-    sqlx::query("UPDATE departments SET deleted_at = now() WHERE id = $1")
-        .bind(gone)
-        .execute(&app.pool)
-        .await
-        .expect("delete the department");
+    delete_department(&app, gone).await;
 
     let workflow = publish_workflow(&app, &token, owner_return_workflow("wf_689")).await;
     let type_id = document_type(&app, &token, "PR_689", Some(workflow)).await;
 
+    let mut drafts = Vec::new();
     for (owner_token, why) in [
-        (unplaced, "no department"),
-        (closed, "a deleted department"),
+        (
+            unplaced,
+            "the document's creator belongs to no department, so ".to_owned(),
+        ),
+        (
+            closed,
+            format!("the document's creator belongs to department {gone}, which is not a live "),
+        ),
     ] {
         let id = draft(&app, &owner_token, type_id).await;
-        let submitted = submit(&app, &token, id).await;
-        assert_eq!(
-            submitted.status,
-            StatusCode::OK,
-            "an owner with {why}: the submit was refused at the raise: {}",
-            submitted.body
-        );
-        let task = open_task_of(&app, id).await;
-
-        for action in ["APPROVE", "REJECT", "RETURN"] {
-            refused_decision(
-                &app,
-                &approver,
-                id,
-                action,
-                &format!("transitions.MANAGER_APPROVAL.{action}.allowedBy.departmentScope"),
-            )
-            .await;
+        let messages = refused_raise(
+            &app,
+            &token,
+            id,
+            "MANAGER_APPROVAL",
+            &[
+                ("APPROVE", "departmentScope"),
+                ("REJECT", "departmentScope"),
+                ("RETURN", "departmentScope"),
+            ],
+        )
+        .await;
+        for message in messages {
+            assert!(message.starts_with(&why), "{message}");
         }
-
-        assert_eq!(
-            open_task_of(&app, id).await,
-            task,
-            "an owner with {why}: the task is no longer the open one"
-        );
-        let (_, state, status) = instance_of(&app, id).await.expect("the instance");
-        assert_eq!(
-            (state.as_str(), status.as_str()),
-            ("MANAGER_APPROVAL", "RUNNING"),
-            "an owner with {why}"
-        );
-        assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+        drafts.push(id);
     }
+
+    place_in(&app, unplaced_id, Some(live)).await;
+    let submitted = submit(&app, &token, drafts[0]).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    let number = stored_number(&app, drafts[0]).await.expect("a number");
+    assert!(
+        number.ends_with("-000001"),
+        "a refused submit used up a number: {number}"
+    );
+}
+
+/// **A task stranded after its raise is not touched** ([#765] criterion 7).
+///
+/// The owner is in a live department at the submit, so every decision edge
+/// resolves and the task is raised. The department is then deleted. Nothing
+/// judges a raised task again: each of `APPROVE`, `REJECT` and `RETURN` is
+/// refused at its `departmentScope` as before, and the task is the same open
+/// task, offered as it was, in an instance still `RUNNING` in
+/// `MANAGER_APPROVAL`. Repairing it is data (Installation and Deployment §9).
+///
+/// A regression case, green against `e5859a3` as it must be: the check runs
+/// only where a task is raised. Mutant K10b below, which judges the task again
+/// at its decision, reddens it.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn a_task_stranded_after_its_raise_is_not_touched() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let later_gone = department(&app, "OD-765-LATER", "Closed later").await;
+    let (_, approver) = holder_in(&app, "od.765.holder", None, &[]).await;
+    let (_, placed) = owner(&app, "od.765.placed", Some(later_gone)).await;
+
+    let workflow = publish_workflow(&app, &token, owner_return_workflow("wf_765_kept")).await;
+    let type_id = document_type(&app, &token, "PR_765_KEPT", Some(workflow)).await;
+
+    let id = draft(&app, &placed, type_id).await;
+    let submitted = submit(&app, &token, id).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    let task = open_task_of(&app, id).await;
+    let before = task_row(&app, task).await;
+
+    delete_department(&app, later_gone).await;
+
+    for action in ["APPROVE", "REJECT", "RETURN"] {
+        refused_decision(
+            &app,
+            &approver,
+            id,
+            action,
+            &format!("transitions.MANAGER_APPROVAL.{action}.allowedBy.departmentScope"),
+        )
+        .await;
+    }
+
+    assert_eq!(open_task_of(&app, id).await, task);
+    assert_eq!(
+        task_row(&app, task).await,
+        before,
+        "a raised task was touched"
+    );
+    let (_, state, status) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(
+        (state.as_str(), status.as_str()),
+        ("MANAGER_APPROVAL", "RUNNING")
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
 }
 
 /// **A claim is the owner's department's, or an unscoped grant's** ([#579]
@@ -6108,4 +6172,624 @@ async fn a_decision_through_a_deleted_requested_department_is_refused_and_writes
     let decided = decide(&app, &anywhere, task, "APPROVE").await;
     assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
     assert_eq!(stored_status(&app, control).await, "COMPLETED");
+}
+
+// ---------------------------------------------------------------------------
+// #765 — a task none of whose decision edges resolves is not raised
+// ---------------------------------------------------------------------------
+//
+// **D-141**, option E (the product owner, 2026-11-06): where a task is raised,
+// the `APPROVE`, `REJECT` and `RETURN` edges out of its state are judged
+// against the document's `AssignmentContext`. When there is at least one and
+// none resolves, the transition is refused as `ASSIGNMENT_UNRESOLVED`, one
+// detail per edge at `transitions.<from>.<action>.allowedBy.<field>`, and
+// writes nothing. One edge that resolves is enough, and a state with no
+// decision edge raises its task as before. The submit, the resubmit and a
+// decision all raise in `engine::enter_once`, which asks
+// `assignment::refuse_unless_an_edge_resolves`.
+//
+// **Seen red, 2026-11-07**, against `e5859a3`'s behaviour (`engine.rs` put
+// back to `e5859a3`, so the new check was never called): four tests here,
+// `a_submit_none_of_whose_decision_edges_resolves_is_refused` (its first row
+// answered 200), `a_task_whose_owner_department_edges_cannot_resolve_is_not_raised`
+// (200), `a_resubmit_into_a_state_nobody_can_decide_is_refused` (200) and
+// `a_decision_raising_a_task_nobody_can_decide_is_refused` (200);
+// `task_inbox.rs`'s `the_raise_and_the_inbox_agree_on_every_edge_kind` (every
+// row the inbox hides but `ROLE deleted` was raised with 200); and
+// `assignment.rs`'s `the_raise_is_judged_in_one_place` (no call found).
+// `one_decision_edge_that_resolves_raises_the_task`,
+// `a_state_with_no_decision_edge_raises_its_task_as_before` and
+// `a_task_stranded_after_its_raise_is_not_touched` were green there, as
+// regression cases must be; the mutants below redden them.
+//
+// Each mutant was applied alone to the fixed `src/` and reverted. The seven
+// #765 tests here, `task_inbox.rs`'s agreement test and `--lib assignment::`
+// were run against each:
+//
+// | Mutant | Reddened |
+// |---|---|
+// | K1 the new check skipped (its call removed from `enter_once`) | the four red-first tests, the agreement test, `the_raise_is_judged_in_one_place` |
+// | K2 every decision edge must resolve, not one | `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
+// | K3 a state with no decision edge judged (none counted as none resolving) | `a_state_with_no_decision_edge_raises_its_task_as_before` |
+// | K3b every edge judged, not the decision edges only | `a_state_with_no_decision_edge_raises_its_task_as_before` |
+// | K4 the resubmit path skipped (`fire` strips the decision edges of a `RESUBMIT`'s target before entering it) | `a_resubmit_into_a_state_nobody_can_decide_is_refused` |
+// | K5 the check reads `documents.status`, judging only a `DRAFT` (which no raise sees: the submit marks the document `SUBMITTED` first, so this skips every raise) | the four red-first tests, the agreement test |
+// | K5b the same, judging only a `SUBMITTED` document, so the submit and the resubmit are judged and a decision is not | `a_decision_raising_a_task_nobody_can_decide_is_refused` |
+// | K6 `USER` edges skipped | `a_submit_none_of_whose_decision_edges_resolves_is_refused`, `a_decision_raising_a_task_nobody_can_decide_is_refused`, `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
+// | K7 `OWNER` edges skipped | `a_submit_none_of_whose_decision_edges_resolves_is_refused`, `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
+// | K8 `ROLE` edges skipped | `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
+// | K9 `DEPARTMENT_ROLE` edges skipped | the four red-first tests, `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
+// | K10 a raised task judged again at its decision (`fire` asks the check of its `from` state after `permits`) | `the_raise_is_judged_in_one_place` only: after `permits` it is equivalent, since `permits` refuses the chosen edge first and the check passes when it resolves |
+// | K10b the same, before `permits` | `a_task_stranded_after_its_raise_is_not_touched`, `an_owner_department_edge_with_no_live_department_refuses_the_decision` |
+//
+// K6–K9 skip an edge of that kind as if it were not a decision edge. A
+// skipped `ROLE` edge that names a deleted role is still refused, by
+// `hold_deciding_roles`, which runs first, so K8 is reddened only where a
+// live `ROLE` edge is the one that resolves.
+
+/// The sentence every raise refusal ends with.
+const UNDECIDABLE: &str = "No APPROVE, REJECT or RETURN edge out of this state resolves, so \
+                           nobody could ever decide the task this transition would create, and \
+                           the transition is refused rather than raising it";
+
+/// A `USER` rule naming `user_id` as written.
+fn user_rule(user_id: &str) -> Value {
+    json!({ "assigneeType": "USER", "userId": user_id })
+}
+
+/// A `ROLE` rule on `role_code`.
+fn role_rule(role_code: &str) -> Value {
+    json!({ "assigneeType": "ROLE", "roleCode": role_code })
+}
+
+/// A `DEPARTMENT_ROLE` rule on the approver role, scoped to `scope` or to
+/// nothing.
+fn department_role_rule(scope: Option<&str>) -> Value {
+    let mut rule = json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": APPROVER_ROLE });
+    if let Some(scope) = scope {
+        rule["departmentScope"] = json!(scope);
+    }
+    rule
+}
+
+/// [`role_workflow`], offered to the approver role, with `APPROVE` and
+/// `REJECT` allowed by the two rules given.
+fn decided_by(key: &str, approve: Value, reject: Value) -> Value {
+    let mut definition = role_workflow(key);
+    definition["transitions"][0]["allowedBy"] = approve;
+    definition["transitions"][1]["allowedBy"] = reject;
+    definition
+}
+
+/// A task's status and holders, from the row.
+async fn task_row(app: &TestApp, task: Uuid) -> (String, Option<Uuid>, Option<Uuid>) {
+    sqlx::query_as(
+        "SELECT status, assignee_user_id, candidate_role_id FROM workflow_tasks WHERE id = $1",
+    )
+    .bind(task)
+    .fetch_one(&app.pool)
+    .await
+    .expect("read the task")
+}
+
+/// Soft-deletes a user by SQL, as a user removed after the publish.
+async fn delete_user(app: &TestApp, user: Uuid) {
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .expect("delete the user");
+}
+
+/// The details of a raise refused for its decision edges, having asserted
+/// their shape: one per `(action, field)` in `edges`, in that order, each
+/// `ASSIGNMENT_UNRESOLVED` at `transitions.<from>.<action>.allowedBy.<field>`
+/// with [`UNDECIDABLE`] as its last sentence. Returns each detail's message.
+fn undecidable_details(
+    refused: &common::TestResponse,
+    from: &str,
+    edges: &[(&str, &str)],
+) -> Vec<String> {
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let details = refused.body["error"]["details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("details: {}", refused.body));
+    assert_eq!(details.len(), edges.len(), "{}", refused.body);
+
+    edges
+        .iter()
+        .zip(details)
+        .map(|((action, field), detail)| {
+            assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+            assert_eq!(
+                detail["path"],
+                format!("transitions.{from}.{action}.allowedBy.{field}"),
+                "{detail}"
+            );
+            let message = detail["message"].as_str().expect("a message").to_owned();
+            assert!(message.ends_with(UNDECIDABLE), "{message}");
+            message
+        })
+        .collect()
+}
+
+/// Submits a draft the raise refuses for its decision edges
+/// ([`undecidable_details`]), and asserts that nothing was written: the
+/// document is a `DRAFT` with no number, and there is no instance, task,
+/// history row or outbox event. Returns each detail's message.
+async fn refused_raise(
+    app: &TestApp,
+    token: &str,
+    id: Uuid,
+    from: &str,
+    edges: &[(&str, &str)],
+) -> Vec<String> {
+    let outbox_before = outbox_events(app).await;
+
+    let refused = submit(app, token, id).await;
+    let messages = undecidable_details(&refused, from, edges);
+
+    assert_eq!(stored_status(app, id).await, "DRAFT");
+    assert_eq!(stored_number(app, id).await, None, "a number was kept");
+    assert!(instance_of(app, id).await.is_none());
+    for table in ["workflow_tasks", "workflow_history"] {
+        assert_eq!(
+            count_rows(
+                app,
+                &format!("SELECT count(*) FROM {table} WHERE document_id = $1"),
+                id
+            )
+            .await,
+            0,
+            "a refused submit wrote to {table}"
+        );
+    }
+    assert_eq!(
+        outbox_events(app).await,
+        outbox_before,
+        "a refused submit wrote an outbox event"
+    );
+
+    messages
+}
+
+/// **A submit none of whose decision edges resolves is refused, for every edge
+/// kind, and writes nothing** ([#765] criteria 1, 2 and 5).
+///
+/// One row per way an edge fails to resolve, with both edges failing. Each
+/// detail names its edge in its path and says why in its message. `ROLE` is
+/// the row where the dead-role rule ([#509]) refuses first, with its own
+/// sentence, at the first edge naming the deleted role: one detail. The last
+/// row mixes two kinds.
+///
+/// **Seen red, 2026-11-07**, against `e5859a3`: its first row's submit
+/// answered 200, where the test stopped. The `ROLE` row is refused there too,
+/// by the dead-role rule.
+///
+/// [#509]: https://github.com/sujanto-gaws/kelir/issues/509
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn a_submit_none_of_whose_decision_edges_resolves_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let nobody = Uuid::now_v7().to_string();
+    let (removed_user, _) = owner(&app, "wf.765.removed", None).await;
+    let (removed_owner, removed_owner_token) = owner(&app, "wf.765.gone.owner", None).await;
+    let (_, unplaced_token) = owner(&app, "wf.765.unplaced", None).await;
+    let doomed = department(&app, "WF-765-DOOMED", "Doomed").await;
+
+    let not_live_user = |id: &str| format!("user {id} is not a live user in this tenant");
+    let removed_user_message = not_live_user(&removed_user.to_string());
+    let removed_owner_message = not_live_user(&removed_owner.to_string());
+    let no_requested = "this document names no requested department";
+    let no_owner_department = "the document's creator belongs to no department";
+    let doomed_code = "`WF-765-DOOMED` is not a live department in this tenant";
+
+    /// The row, its two rules, whose token drafts, and the expected details,
+    /// each an edge's field and the start of its message.
+    type Row<'a> = (&'a str, Value, Value, &'a str, [(&'a str, String); 2]);
+    let rows: Vec<Row> = vec![
+        (
+            "USER, a user nobody is, and not a user id",
+            user_rule(&nobody),
+            user_rule("not-a-user-id"),
+            &token,
+            [
+                ("userId", not_live_user(&nobody)),
+                ("userId", "`not-a-user-id` is not a user id".to_owned()),
+            ],
+        ),
+        (
+            "USER, a deleted user",
+            user_rule(&removed_user.to_string()),
+            user_rule(&removed_user.to_string()),
+            &token,
+            [
+                ("userId", removed_user_message.clone()),
+                ("userId", removed_user_message.clone()),
+            ],
+        ),
+        (
+            "OWNER, a deleted creator",
+            json!("OWNER"),
+            json!("OWNER"),
+            &removed_owner_token,
+            [
+                ("userId", removed_owner_message.clone()),
+                ("userId", removed_owner_message.clone()),
+            ],
+        ),
+        (
+            "DEPARTMENT_ROLE, no requested department",
+            requested_department_rule(),
+            requested_department_rule(),
+            &token,
+            [
+                ("departmentScope", no_requested.to_owned()),
+                ("departmentScope", no_requested.to_owned()),
+            ],
+        ),
+        (
+            "DEPARTMENT_ROLE, an owner with no department",
+            owner_department_rule(),
+            owner_department_rule(),
+            &unplaced_token,
+            [
+                ("departmentScope", no_owner_department.to_owned()),
+                ("departmentScope", no_owner_department.to_owned()),
+            ],
+        ),
+        (
+            "DEPARTMENT_ROLE, a deleted department code",
+            department_role_rule(Some("WF-765-DOOMED")),
+            department_role_rule(Some("WF-765-DOOMED")),
+            &token,
+            [
+                ("departmentScope", doomed_code.to_owned()),
+                ("departmentScope", doomed_code.to_owned()),
+            ],
+        ),
+        (
+            "two kinds, a user nobody is and no requested department",
+            user_rule(&nobody),
+            requested_department_rule(),
+            &token,
+            [
+                ("userId", not_live_user(&nobody)),
+                ("departmentScope", no_requested.to_owned()),
+            ],
+        ),
+    ];
+
+    let mut drafts = Vec::new();
+    for (index, (_, approve, reject, drafter, _)) in rows.iter().enumerate() {
+        let workflow = publish_workflow(
+            &app,
+            &token,
+            decided_by(&format!("wf_765_n{index}"), approve.clone(), reject.clone()),
+        )
+        .await;
+        let type_id =
+            document_type(&app, &token, &format!("PR_765_N{index}"), Some(workflow)).await;
+        drafts.push(draft(&app, drafter, type_id).await);
+    }
+
+    // What was live at the publish and the draft is gone by the submit.
+    delete_user(&app, removed_user).await;
+    delete_user(&app, removed_owner).await;
+    delete_department(&app, doomed).await;
+
+    for ((row, _, _, _, expected), id) in rows.iter().zip(drafts) {
+        let edges = [("APPROVE", expected[0].0), ("REJECT", expected[1].0)];
+        let messages = refused_raise(&app, &token, id, "MANAGER_APPROVAL", &edges).await;
+        for (message, (_, start)) in messages.iter().zip(expected) {
+            assert!(message.starts_with(start.as_str()), "{row}: {message}");
+        }
+    }
+
+    // `ROLE`: the dead-role rule is asked first, and refuses at one edge.
+    given_bare_role(&app, "WF-765-EDGE-GONE").await;
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        decided_by(
+            "wf_765_n_role",
+            role_rule("WF-765-EDGE-GONE"),
+            role_rule("WF-765-EDGE-GONE"),
+        ),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_765_N_ROLE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    delete_role_behind_the_apis_back(&app, "WF-765-EDGE-GONE").await;
+    let refused = submit(&app, &token, id).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    let detail = &refused.body["error"]["details"][0];
+    assert_eq!(detail["code"], "ASSIGNMENT_UNRESOLVED", "{detail}");
+    assert_eq!(
+        detail["path"], "transitions.MANAGER_APPROVAL.APPROVE.allowedBy.roleCode",
+        "{detail}"
+    );
+    assert_eq!(stored_status(&app, id).await, "DRAFT");
+    assert!(instance_of(&app, id).await.is_none());
+}
+
+/// **One decision edge that resolves raises the task, for every edge kind**
+/// ([#765] criteria 2 and 3).
+///
+/// Each row's resolving edge is of the kind it names, and its other edge does
+/// not resolve. The resolving edge is `APPROVE` in some rows and `REJECT` in
+/// others, so neither position decides. Each submit answers 200 and raises
+/// the task.
+///
+/// A regression case, green against `e5859a3`; K2 and K6–K9 redden it.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn one_decision_edge_that_resolves_raises_the_task() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let nobody = Uuid::now_v7().to_string();
+    let (someone, _) = owner(&app, "wf.765.someone", None).await;
+    let placed_in = department(&app, "WF-765-PLACED", "Placed").await;
+    let (_, placed_token) = owner(&app, "wf.765.placed", Some(placed_in)).await;
+
+    /// The row, the two rules, and whose token drafts.
+    type Row<'a> = (&'a str, Value, Value, &'a str);
+    let rows: Vec<Row> = vec![
+        (
+            "USER resolves",
+            user_rule(&someone.to_string()),
+            requested_department_rule(),
+            &token,
+        ),
+        (
+            "OWNER resolves",
+            requested_department_rule(),
+            json!("OWNER"),
+            &token,
+        ),
+        (
+            "ROLE resolves",
+            role_rule(APPROVER_ROLE),
+            user_rule(&nobody),
+            &token,
+        ),
+        (
+            "DEPARTMENT_ROLE resolves through the owner's department",
+            user_rule(&nobody),
+            owner_department_rule(),
+            &placed_token,
+        ),
+        (
+            "DEPARTMENT_ROLE resolves with no scope",
+            department_role_rule(None),
+            user_rule(&nobody),
+            &token,
+        ),
+    ];
+
+    for (index, (row, approve, reject, drafter)) in rows.into_iter().enumerate() {
+        let workflow = publish_workflow(
+            &app,
+            &token,
+            decided_by(&format!("wf_765_y{index}"), approve, reject),
+        )
+        .await;
+        let type_id =
+            document_type(&app, &token, &format!("PR_765_Y{index}"), Some(workflow)).await;
+        let id = draft(&app, drafter, type_id).await;
+
+        let submitted = submit(&app, &token, id).await;
+        assert_eq!(
+            submitted.status,
+            StatusCode::OK,
+            "{row}: {}",
+            submitted.body
+        );
+        assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL", "{row}");
+        open_task_of(&app, id).await;
+    }
+}
+
+/// **A state with no decision edge raises its task as before** ([#765]
+/// criterion 4).
+///
+/// The `RETURNED` state carries the owner's correction task, and its only
+/// edge is `RESUBMIT`, allowed by a user nobody is. With no `APPROVE`,
+/// `REJECT` or `RETURN` to judge, the return raises the correction task,
+/// assigned to the creator, and the document is `RETURNED`.
+///
+/// A regression case, green against `e5859a3`; K3 and K3b redden it.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn a_state_with_no_decision_edge_raises_its_task_as_before() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.765.returner").await;
+    let (creator, creator_token) = owner(&app, "wf.765.creator", None).await;
+
+    let mut definition = returnable_workflow("wf_765_corr");
+    definition["states"][1]["task"] = json!({
+        "taskDefinitionKey": "correction", "taskName": "Correct the request",
+        "assignment": { "assigneeType": "OWNER" }
+    });
+    definition["transitions"][3]["allowedBy"] = user_rule(&Uuid::now_v7().to_string());
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_765_CORR", Some(workflow)).await;
+    let id = draft(&app, &creator_token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    let returned = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver_token),
+            json!({ "action": "RETURN", "comment": "The quote is missing." }),
+        )
+        .await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+
+    assert_eq!(stored_status(&app, id).await, "RETURNED");
+    let correction = open_task_of(&app, id).await;
+    assert_ne!(correction, task);
+    assert_eq!(task_row(&app, correction).await.1, Some(creator));
+}
+
+/// **A resubmit into a state nobody can decide is refused, and the document
+/// stays returned** ([#765] criteria 1, 5 and 6).
+///
+/// The owner is in a department at the submit, so the task is raised, and the
+/// approver returns it. The owner then leaves the department, and the
+/// resubmit, which would raise the task again, finds none of its three edges
+/// resolving. The document stays `RETURNED` with its number, in a `RETURNED`
+/// instance, with no open task, and nothing is written.
+///
+/// **Seen red, 2026-11-07**, against `e5859a3`: the resubmit answered 200.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn a_resubmit_into_a_state_nobody_can_decide_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let placed_in = department(&app, "WF-765-RESUB", "Left").await;
+    let (_, approver) = holder_in(&app, "wf.765.resub.holder", None, &[]).await;
+    let (owner_id, owner_token) = owner(&app, "wf.765.resub.owner", Some(placed_in)).await;
+
+    let workflow = publish_workflow(&app, &token, owner_return_workflow("wf_765_resub")).await;
+    let type_id = document_type(&app, &token, "PR_765_RESUB", Some(workflow)).await;
+    let id = draft(&app, &owner_token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+    let number = stored_number(&app, id).await;
+
+    let task = open_task_of(&app, id).await;
+    let returned = decide(&app, &approver, task, "RETURN").await;
+    assert_eq!(returned.status, StatusCode::OK, "{}", returned.body);
+    assert_eq!(stored_status(&app, id).await, "RETURNED");
+
+    place_in(&app, owner_id, None).await;
+    let outbox_before = outbox_events(&app).await;
+    let history = "SELECT count(*) FROM workflow_history WHERE document_id = $1";
+    let history_before = count_rows(&app, history, id).await;
+
+    let refused = submit(&app, &owner_token, id).await;
+    undecidable_details(
+        &refused,
+        "MANAGER_APPROVAL",
+        &[
+            ("APPROVE", "departmentScope"),
+            ("REJECT", "departmentScope"),
+            ("RETURN", "departmentScope"),
+        ],
+    );
+
+    assert_eq!(stored_status(&app, id).await, "RETURNED");
+    assert_eq!(stored_number(&app, id).await, number);
+    let (_, state, status) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!((state.as_str(), status.as_str()), ("RETURNED", "RUNNING"));
+    assert_eq!(
+        count_rows(
+            &app,
+            "SELECT count(*) FROM workflow_tasks WHERE document_id = $1 \
+             AND status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')",
+            id
+        )
+        .await,
+        0
+    );
+    assert_eq!(count_rows(&app, history, id).await, history_before);
+    assert_eq!(outbox_events(&app).await, outbox_before);
+}
+
+/// **A decision that would raise a task nobody can decide is refused, and the
+/// task it decides stays open** ([#765] criteria 1 and 6).
+///
+/// Two approvals. The manager's edges are the approver role's, so the submit
+/// raises the manager's task. Finance's `APPROVE` names a user nobody is and
+/// its `REJECT` the requested department, which the document does not name.
+/// The manager's approval would raise finance's task, and is refused for
+/// finance's edges: the manager's task is still the open one, the instance is
+/// still in `MANAGER_APPROVAL`, and nothing is written.
+///
+/// **Seen red, 2026-11-07**, against `e5859a3`: the approval answered 200.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn a_decision_raising_a_task_nobody_can_decide_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.765.manager").await;
+
+    let mut definition = role_workflow("wf_765_two");
+    definition["states"]
+        .as_array_mut()
+        .expect("states")
+        .push(json!({
+            "code": "FINANCE_APPROVAL", "name": "Finance approval",
+            "mapsToDocumentStatus": "PENDING_APPROVAL",
+            "task": { "taskDefinitionKey": "finance_approval", "taskName": "Approve the spend",
+                      "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER_ROLE } }
+        }));
+    definition["transitions"][0]["to"] = json!("FINANCE_APPROVAL");
+    let transitions = definition["transitions"]
+        .as_array_mut()
+        .expect("transitions");
+    transitions.push(json!({
+        "from": "FINANCE_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+        "allowedBy": user_rule(&Uuid::now_v7().to_string())
+    }));
+    transitions.push(json!({
+        "from": "FINANCE_APPROVAL", "to": "REJECTED", "action": "REJECT",
+        "allowedBy": requested_department_rule()
+    }));
+    let workflow = publish_workflow(&app, &token, definition).await;
+    let type_id = document_type(&app, &token, "PR_765_TWO", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+    let outbox_before = outbox_events(&app).await;
+    let history = "SELECT count(*) FROM workflow_history WHERE document_id = $1";
+    let history_before = count_rows(&app, history, id).await;
+
+    let refused = decide(&app, &approver_token, task, "APPROVE").await;
+    undecidable_details(
+        &refused,
+        "FINANCE_APPROVAL",
+        &[("APPROVE", "userId"), ("REJECT", "departmentScope")],
+    );
+
+    assert_eq!(open_task_of(&app, id).await, task);
+    let (_, state, status) = instance_of(&app, id).await.expect("the instance");
+    assert_eq!(
+        (state.as_str(), status.as_str()),
+        ("MANAGER_APPROVAL", "RUNNING")
+    );
+    assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+    assert_eq!(
+        count_rows(
+            &app,
+            "SELECT count(*) FROM workflow_tasks WHERE document_id = $1",
+            id
+        )
+        .await,
+        1,
+        "finance's task was raised"
+    );
+    assert_eq!(count_rows(&app, history, id).await, history_before);
+    assert_eq!(outbox_events(&app).await, outbox_before);
 }

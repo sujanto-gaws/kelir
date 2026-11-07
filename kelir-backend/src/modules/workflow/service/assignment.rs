@@ -94,7 +94,9 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::super::domain::jwss::{OWNER_DEPARTMENT_SCOPE, REQUESTED_DEPARTMENT_SCOPE};
-use super::super::domain::{AssigneeType, AssignmentRule, ReassignTarget};
+use super::super::domain::{
+    AssigneeType, AssignmentRule, ReassignTarget, Transition, TransitionAction,
+};
 use super::super::repository::task as task_repo;
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::identity::delegation_repository as delegation_repo;
@@ -562,6 +564,115 @@ pub async fn hold_deciding_roles<'a>(
     Ok(())
 }
 
+/// Refuses a task none of whose decision edges resolves for this document
+/// ([#765], **D-141** E).
+///
+/// `edges` are the transitions leaving the state the task is raised in. The
+/// **decision edges** among them are those whose action is `APPROVE`,
+/// `REJECT` or `RETURN`, the three a decision can fire. When there is at least
+/// one and none of them resolves, the transition is refused as
+/// `ASSIGNMENT_UNRESOLVED`, with one detail per decision edge at
+/// `transitions.<from>.<action>.allowedBy.<field>`, saying why that edge does
+/// not resolve. Nothing is written: the caller's transaction rolls back.
+///
+/// # What *resolves* means
+///
+/// **An edge resolves when [`normalize`] and [`direct`] accept its
+/// `allowedBy` against `context`**, the two steps [`permits`] takes before it
+/// asks about anybody, so the engine refuses no decision on such an edge for
+/// want of a principal. That is the inbox clause's meaning too
+/// (`repository::inbox`, "A task nobody can decide"), which is written as
+/// those two steps' SQL: a `USER` whose `userId` parses and names a live user,
+/// an `OWNER` whose document's creator is live, a live `ROLE`, and a
+/// `DEPARTMENT_ROLE` with a live role and a scope that resolves. So the task
+/// this refuses is the task that inbox would hide once it was raised, and the
+/// check is asked of the functions the decision asks, not of a copy. Both
+/// texts are exercised by `task_inbox.rs`'s engine-agreement tests.
+///
+/// It is not who may decide: that is `permits`'s question, asked of a person
+/// at the decision. An edge naming a live user who is not the approver still
+/// resolves.
+///
+/// # One resolving edge is enough
+///
+/// A task with one decidable edge is not stranded, so the first edge that
+/// resolves ends the check. That is the opposite of
+/// [`hold_deciding_roles`]'s rule, which refuses when *any* edge's role is
+/// gone, and both apply: that one protects a role every edge still needs, and
+/// this one asks whether any edge can be taken.
+///
+/// **A state with no decision edge raises its task as before.** A `RETURNED`
+/// state's `OWNER` correction task is left only by `RESUBMIT`, taken on the
+/// document, and there is nothing to judge it by. A decision edge with no
+/// `allowedBy` resolves, as `permits` is never asked of it; JWSS S5 gives every
+/// non-`AUTO` edge one, so this does not arise from a published definition.
+///
+/// # What it locks, and what it does not
+///
+/// **No new lock.** A `ROLE` or `DEPARTMENT_ROLE` edge's role is read
+/// `FOR KEY SHARE` by [`direct`], as [`hold_deciding_roles`] has read it
+/// already in this transaction. Users and departments are read without a
+/// lock, as [`direct`] reads them at every decision, so a user or department
+/// deleted between this read and the commit can still leave a raised task
+/// nobody can decide. **The run-time refusal remains the backstop**: every
+/// decision on such a task is refused as `ASSIGNMENT_UNRESOLVED` through
+/// `permits`, and the inbox clause hides it.
+///
+/// **A task already raised is not judged again.** This runs where a task is
+/// raised, and nowhere else, so a task stranded by data that changed after
+/// its raise stays as it is; repairing it is data, Installation and
+/// Deployment §9.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+pub async fn refuse_unless_an_edge_resolves<'a>(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    context: AssignmentContext,
+    edges: impl IntoIterator<Item = &'a Transition>,
+) -> Result<(), AppError> {
+    let mut refusals = Vec::new();
+
+    for edge in edges {
+        if !matches!(
+            edge.action,
+            TransitionAction::Approve | TransitionAction::Reject | TransitionAction::Return
+        ) {
+            continue;
+        }
+
+        let Some(rule) = &edge.allowed_by else {
+            return Ok(());
+        };
+
+        let path = format!(
+            "transitions.{}.{}.allowedBy",
+            edge.from,
+            edge.action.as_db()
+        );
+
+        let resolved = match normalize(rule, context, &path, Question::Raise) {
+            Ok(principal) => direct(transaction, tenant_id, principal, &|field, message| {
+                unresolvable(Question::Raise, &path, field, message)
+            })
+            .await
+            .map(|_| ()),
+            Err(refusal) => Err(refusal),
+        };
+
+        match resolved {
+            Ok(()) => return Ok(()),
+            Err(AppError::Validation { details }) => refusals.extend(details),
+            Err(other) => return Err(other),
+        }
+    }
+
+    if refusals.is_empty() {
+        return Ok(());
+    }
+
+    Err(AppError::validation(refusals))
+}
+
 /// An open window applied to a resolution ([#184] AC2).
 ///
 /// **Returns the resolution unchanged in every case but one**, and each of those
@@ -890,6 +1001,11 @@ enum Question {
     ///
     /// [#534]: https://github.com/sujanto-gaws/kelir/issues/534
     Decider,
+    /// [`refuse_unless_an_edge_resolves`]: whether any decision edge out of
+    /// the state a task is being raised in resolves ([#765]).
+    ///
+    /// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+    Raise,
 }
 
 /// The one refusal shape this file raises.
@@ -913,6 +1029,11 @@ fn unresolvable(question: Question, path: &str, field: &str, message: String) ->
         Question::Decider => {
             "Nobody satisfies this edge's `allowedBy`, so nobody may take this decision, \
              and it is refused rather than let through unchecked"
+        }
+        Question::Raise => {
+            "No APPROVE, REJECT or RETURN edge out of this state resolves, so nobody could \
+             ever decide the task this transition would create, and the transition is \
+             refused rather than raising it"
         }
     };
 
@@ -1081,21 +1202,7 @@ mod tests {
     /// [#579]: https://github.com/sujanto-gaws/kelir/issues/579
     #[test]
     fn every_assignment_context_is_built_by_the_one_reader() {
-        fn walk(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
-            for entry in std::fs::read_dir(dir).expect("read the source tree") {
-                let path = entry.expect("an entry").path();
-                if path.is_dir() {
-                    walk(&path, found);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    let text = std::fs::read_to_string(&path).expect("read a source file");
-                    found.push((path.display().to_string().replace('\\', "/"), text));
-                }
-            }
-        }
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        walk(&root, &mut files);
+        let files = source_files();
 
         let mut literals = Vec::new();
         let mut readers = 0;
@@ -1119,6 +1226,84 @@ mod tests {
             "the submit's start and resubmit, the decision and the reassign each read \
              the context once"
         );
+    }
+
+    /// Every `.rs` file under `src/`, as its path with forward slashes and its
+    /// text.
+    fn source_files() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("read the source tree") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read a source file");
+                    found.push((path.display().to_string().replace('\\', "/"), text));
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        files
+    }
+
+    /// **Every raise is judged by the one check, in the one place**
+    /// ([#765] criterion 6).
+    ///
+    /// The submit, the resubmit and a decision each raise their task through
+    /// `engine::enter_once`, the only caller of `insert_task`, and it asks
+    /// [`super::refuse_unless_an_edge_resolves`] before it writes the task. A
+    /// second raise, or a second copy of the check written beside a caller,
+    /// would be a raise this rule does not reach, or a second answer to what
+    /// *resolves* means, so the source is read for one.
+    ///
+    /// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+    #[test]
+    fn the_raise_is_judged_in_one_place() {
+        let files = source_files();
+
+        let mut checks = Vec::new();
+        let mut raises = Vec::new();
+        for (path, text) in &files {
+            if path.ends_with("workflow/service/assignment.rs") {
+                continue;
+            }
+            for _ in text.matches("refuse_unless_an_edge_resolves(") {
+                checks.push(path.clone());
+            }
+            let calls =
+                text.matches("insert_task(").count() - text.matches("fn insert_task(").count();
+            for _ in 0..calls {
+                raises.push(path.clone());
+            }
+        }
+
+        let engine = "workflow/service/engine.rs";
+        assert!(
+            checks.len() == 1 && checks[0].ends_with(engine),
+            "the raise check is called once, by the engine: {checks:?}"
+        );
+        assert!(
+            raises.len() == 1 && raises[0].ends_with(engine),
+            "a task is raised in one place, by the engine: {raises:?}"
+        );
+
+        let text = &files
+            .iter()
+            .find(|(path, _)| path.ends_with(engine))
+            .expect("the engine")
+            .1;
+        let start = text.find("async fn enter_once(").expect("enter_once");
+        let body = &text[start..start + text[start..].find("\n}\n").expect("its end")];
+        let check = body
+            .find("assignment::refuse_unless_an_edge_resolves(")
+            .expect("enter_once asks the check");
+        let raise = body
+            .find("task::insert_task(")
+            .expect("enter_once raises the task");
+        assert!(check < raise, "the task is written before it is judged");
     }
 
     fn code(error: AppError) -> String {
