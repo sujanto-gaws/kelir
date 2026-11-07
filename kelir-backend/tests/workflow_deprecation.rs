@@ -3992,6 +3992,260 @@ async fn a_returned_document_resubmits_on_its_pinned_revision_after_a_rebind_acr
     );
 }
 
+// ---------------------------------------------------------------------------
+// #774, the test-engineer's campaign (2026-11-07)
+// ---------------------------------------------------------------------------
+//
+// The builder's tests hold the foreign revision `ACTIVE` and compare the
+// foreign and the absent refusal only as `engine::start` returns them, and no
+// test reads which miss `definition_of_instance` reported. The three below
+// drive both misses through the route, with the foreign revision also
+// deprecated and soft-deleted in its own tenant, repeat the refusal in a
+// single-tenant app, and read the repository's answer directly. The two route
+// tests were red against b00be2f (500). Mutants, each reverted after the run:
+//
+// | Mutant | Builder's #774 tests | Red |
+// |---|---|---|
+// | X1 the foreign check fires only for an `ACTIVE` row, so a deprecated foreign revision is loaded and refused `WORKFLOW_NOT_PUBLISHED`, "deleted", naming `del_theirs` | green | *a foreign binding answers…* |
+// | X2 the absent miss keeps the pre-#774 `Internal` | red | *a foreign binding answers…* (500); *a start refuses…* |
+// | X3 the absent miss words its message apart ("which does not exist") | red | *a foreign binding answers…*; *a start refuses…* |
+// | X4 `definition_of_instance` reads `deleted_at IS NULL` | red | *a submit of a type bound to a deleted revision…*, *a submit waiting on a delete…*, *a resubmit under a held delete…* |
+// | X5 `definition_of_instance` scoped `AND tenant_id = $2`, which AC5 rules out | green (the whole binary, and `workflow_definition_scope`) | *definition_of_instance tells…* |
+
+/// What a route answered, with `id` written as `{id}`: the whole envelope, so
+/// two refusals that differ in any field but the quoted id differ here.
+fn body_but_for(body: &Value, id: Uuid) -> String {
+    body.to_string().replace(&id.to_string(), "{id}")
+}
+
+/// **A foreign binding answers the same body, byte for byte but for the id,
+/// whatever its revision's state in its own tenant, as a binding to no
+/// definition at all** ([#774] AC3, AC5).
+///
+/// Three foreign states — `ACTIVE`, `DEPRECATED`, and soft-deleted — and one
+/// absent id, each bound to its own type and submitted through the route. The
+/// absent one needs the binding's foreign key out of the way, which is the only
+/// way such a binding can exist; the key is dropped in this test's own
+/// database. Every envelope is compared whole, so a status, a key or a name
+/// that leaked into any field, or a field present for one miss and not the
+/// other, is a difference.
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn a_foreign_binding_answers_as_an_absent_one_whatever_its_state_in_its_tenant() {
+    let Across {
+        app,
+        token,
+        mine,
+        theirs,
+        other,
+        type_id,
+        document,
+    } = across("PR_DEL_ALIKE", None).await;
+
+    sqlx::query(
+        "ALTER TABLE document_type_workflows \
+         DROP CONSTRAINT fk_document_type_workflows_workflow_definition_id",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("drop the binding's foreign key in this test's database");
+
+    let absent = Uuid::now_v7();
+    let absent_type = document_type(&app, &token, "PR_DEL_ABSENT", mine).await;
+    let absent_draft = draft(&app, &token, absent_type).await;
+    rebind(&app, absent_type, absent).await;
+    let absent_body = submit(&app, &token, absent_draft).await;
+    assert_eq!(
+        absent_body.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        absent_body.body
+    );
+    let expected = body_but_for(&absent_body.body, absent);
+    assert_eq!(
+        absent_body.body["error"]["details"],
+        json!([{
+            "path": "documentTypeId",
+            "rule": "reference",
+            "code": "WORKFLOW_NOT_FOUND",
+            "message": not_found_message(absent),
+        }]),
+    );
+
+    rebind(&app, type_id, theirs).await;
+    for (state, change) in [
+        ("ACTIVE", None),
+        (
+            "DEPRECATED",
+            Some("UPDATE workflow_definitions SET status = 'DEPRECATED' WHERE id = $1"),
+        ),
+        (
+            "soft-deleted",
+            Some("UPDATE workflow_definitions SET deleted_at = now() WHERE id = $1"),
+        ),
+    ] {
+        if let Some(change) = change {
+            sqlx::query(change)
+                .bind(theirs)
+                .execute(&app.pool)
+                .await
+                .expect("move their revision");
+        }
+
+        let refused = submit(&app, &token, document).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "their revision {state}: {}",
+            refused.body
+        );
+        assert_eq!(
+            body_but_for(&refused.body, theirs),
+            expected,
+            "their revision {state} answered other than an absent one"
+        );
+        assert_leaks_nothing(&refused.body, other, state);
+        let text = refused.body.to_string();
+        for leak in [
+            "DEPRECATED",
+            "deprecated",
+            "deleted",
+            "WORKFLOW_NOT_PUBLISHED",
+        ] {
+            assert!(
+                !text.contains(leak),
+                "their revision {state}: the refusal said `{leak}`: {text}"
+            );
+        }
+        assert_eq!(document_status(&app, document).await, "DRAFT", "{state}");
+        assert_eq!(document_number(&app, document).await, None, "{state}");
+        assert!(instance_of(&app, document).await.is_none(), "{state}");
+    }
+}
+
+/// **`definition_of_instance` tells another tenant's revision from none, and
+/// loads this tenant's own** ([#774] AC5: "tells foreign apart from absent …
+/// Its SQL `WHERE` is not scoped").
+///
+/// The route answers both misses alike on purpose, so no route test can see
+/// the difference; a `WHERE` scoped to the tenant would turn the foreign row
+/// into no row and silence the log line that names both ends of the broken
+/// link. This reads the repository's answer, which is where the difference
+/// is kept. A deleted revision of this tenant is still loaded: the read has no
+/// `deleted_at` filter, and the start refuses it as `WORKFLOW_NOT_PUBLISHED`.
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn definition_of_instance_tells_another_tenants_revision_from_none() {
+    use definition_repo::DefinitionOfInstance;
+
+    let Across {
+        app, mine, theirs, ..
+    } = across("PR_DEL_REPO", None).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+
+    let read = |id| definition_repo::definition_of_instance(&app.pool, tenant, id);
+    assert!(
+        matches!(
+            read(theirs).await.expect("read theirs"),
+            DefinitionOfInstance::InAnotherTenant
+        ),
+        "another tenant's revision was not reported as another tenant's"
+    );
+    assert!(
+        matches!(
+            read(Uuid::now_v7()).await.expect("read none"),
+            DefinitionOfInstance::Absent
+        ),
+        "an id nobody has was not reported absent"
+    );
+    assert!(
+        matches!(
+            read(mine).await.expect("read mine"),
+            DefinitionOfInstance::Loaded(ref loaded) if loaded.workflow_key == "del_mine"
+        ),
+        "this tenant's revision was not loaded"
+    );
+
+    sqlx::query("UPDATE workflow_definitions SET deleted_at = now() WHERE id = $1")
+        .bind(mine)
+        .execute(&app.pool)
+        .await
+        .expect("soft-delete mine");
+    assert!(
+        matches!(
+            read(mine).await.expect("read mine, deleted"),
+            DefinitionOfInstance::Loaded(_)
+        ),
+        "this tenant's deleted revision was not loaded"
+    );
+}
+
+/// **A single-tenant app refuses a binding to another tenant's revision the
+/// same way** ([#774] AC1–4). The criterion is phrased for a multi-tenant app;
+/// nothing on the path reads the mode, and this pins that it does not start
+/// to. The other tenant cannot sign in here, so its revision is written as
+/// only SQL can write it.
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn a_single_tenant_app_refuses_a_binding_to_another_tenants_revision_alike() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mine = published(&app, &token, "del_mine").await;
+    let type_id = document_type(&app, &token, "PR_DEL_SINGLE", mine).await;
+    let document = draft(&app, &token, type_id).await;
+
+    let other = fixtures::create_tenant(&app.pool, OTHER_CODE, OTHER_NAME).await;
+    let theirs = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO workflow_definitions \
+             (id, tenant_id, workflow_key, name, version, jwss_version, definition_json, \
+              initial_state, status) \
+         SELECT $1, $2, $3, name, version, jwss_version, definition_json, initial_state, \
+                'ACTIVE' \
+         FROM workflow_definitions WHERE id = $4",
+    )
+    .bind(theirs)
+    .bind(other)
+    .bind(THEIR_KEY)
+    .bind(mine)
+    .execute(&app.pool)
+    .await
+    .expect("file a revision under the other tenant");
+    rebind(&app, type_id, theirs).await;
+
+    let written_before = rows_written(&app).await;
+    let refused = submit(&app, &token, document).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"],
+        json!([{
+            "path": "documentTypeId",
+            "rule": "reference",
+            "code": "WORKFLOW_NOT_FOUND",
+            "message": not_found_message(theirs),
+        }]),
+        "{}",
+        refused.body
+    );
+    assert_leaks_nothing(&refused.body, other, "the single-tenant refusal");
+    assert_eq!(document_status(&app, document).await, "DRAFT");
+    assert_eq!(document_number(&app, document).await, None);
+    assert_eq!(
+        rows_written(&app).await,
+        written_before,
+        "a refused submit wrote"
+    );
+}
+
 /// **The deadlock guard counts a deadlock it is shown** ([#712] AC10). Every
 /// race above asserts that `deadlocks_once_settled` equals `deadlocks_so_far`
 /// read at the start, which would pass as well if nothing were ever counted.
