@@ -1158,12 +1158,25 @@ pub async fn deadlocks_so_far(app: &TestApp) -> i64 {
 /// `pg_stat_activity`, so waiting for the database's backends to be gone makes
 /// the read final rather than early.
 ///
-/// **An idle backend the closed pool left behind is ended here** ([#637]). In
-/// CI one connection in four runs outlived `close()`: opened up to six seconds
-/// before it, idle in `ClientRead`, having run no statement, with the pool
-/// reporting itself closed and still counting one connection. Nothing was
-/// going to hang it up, so waiting for it timed out. It holds no lock and no
-/// transaction, and ending it flushes its statistics as any exit does.
+/// **An idle backend the closed pool left behind is ended here** ([#637]),
+/// because sqlx-core 0.8.6's `Pool::close()` can return with a connection
+/// still in its idle queue ([#645], launchbadge/sqlx#3217). Dropping a
+/// `PoolConnection` spawns `return_to_pool` (`src/pool/connection.rs`), which
+/// checks `is_closed()` and then pings the connection before `release()` pushes
+/// it onto `idle_conns` and returns its permit. `PoolInner::close`
+/// (`src/pool/inner.rs`) drains `idle_conns`, then waits for each permit
+/// count up to `max_connections`, and returns after the last wait without
+/// draining again. A return whose `is_closed()` came before the close and
+/// whose `release()` comes after the last drain is therefore left behind: the
+/// pool reports itself closed and still counts the connection, and its backend
+/// sits idle in `ClientRead` until the last `Pool` handle drops. In CI that was
+/// one run in four. Nothing was going to hang it up, so waiting for it timed
+/// out. It holds no lock and no transaction, and ending it flushes its
+/// statistics as any exit does.
+///
+/// launchbadge/sqlx#3952 fixes `close()` in the 0.9 line, and no 0.8 release
+/// has it. `tests/pool_close.rs` pins the leak: **when it goes red after a sqlx
+/// upgrade, this ending of idle backends is to be removed**.
 ///
 /// **A backend that is not idle is never ended**: one that is running a
 /// statement, is inside a transaction or waits on a lock is work the closed
@@ -1171,6 +1184,7 @@ pub async fn deadlocks_so_far(app: &TestApp) -> i64 {
 /// waits for it and, at the deadline, fails naming it.
 ///
 /// [#637]: https://github.com/sujanto-gaws/kelir/issues/637
+/// [#645]: https://github.com/sujanto-gaws/kelir/issues/645
 pub async fn deadlocks_once_settled(app: &TestApp) -> i64 {
     use std::time::Duration;
     use tokio::time::Instant;
