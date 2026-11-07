@@ -1,6 +1,6 @@
 # Kelir Documentation
 
-**Status:** Living · **Last updated:** 2026-11-04
+**Status:** Living · **Last updated:** 2026-11-07
 
 Kelir is a metadata-driven, document-centric, workflow-enabled full-stack framework for building enterprise business applications rapidly — Rust (Axum + SQLx + PostgreSQL) on the backend, Vue 3 (Vite + Pinia + shadcn-vue + Tailwind CSS v4) on the frontend. This folder is the complete documentation set; this file is its map.
 
@@ -53,7 +53,7 @@ Early exploratory documents. Still valid for intent and examples, but **supersed
 | [04. Kelir Plugin and Extension Management Concept.md](architectures/04.%20Kelir%20Plugin%20and%20Extension%20Management%20Concept.md) | Plugin platform: registry, lifecycle, permissions, hooks, settings, sandboxing |
 | [05. Core - Master Data - Party.md](architectures/05.%20Core%20-%20Master%20Data%20-%20Party.md) | Party master-data model as a JSON Schema aggregate (OFBiz-style) |
 | [06. Building an ERP on Kelir.md](architectures/06.%20Building%20an%20ERP%20on%20Kelir.md) | **Draft, nothing scheduled** — the layering an ERP over Kelir would take: what the platform provides, the ledger concepts it has none of, the posting seam, and the platform gaps an ERP forces. Scope is issue [#371](https://github.com/sujanto-gaws/kelir/issues/371) |
-| [07. Entity and Business Metadata.md](architectures/07.%20Entity%20and%20Business%20Metadata.md) | **Draft, nothing scheduled** — the post-`v1.0.0` theme **D-124** approved: tenant-defined entities (EDS), line records with identity, typed relations, revisions with migration, computed fields, invariants, lifecycle and events; input to the storage ADR D-124 owes first. Its ten decisions are Product Backlog §6.2's D-125 to D-134 |
+| [07. Entity and Business Metadata.md](architectures/07.%20Entity%20and%20Business%20Metadata.md) | **Draft, nothing scheduled** — the post-`v1.0.0` theme **D-124** approved: tenant-defined entities (EDS) as physical tables generated at publish, one schema per tenant (**D-125** B, 2026-11-07), line tables with identity, relations as foreign keys, revisions with a migration window, computed fields, invariants, lifecycle and events. Its decisions are Product Backlog §6's D-125 to D-134 and D-143 to D-146 |
 
 ### architectures/adr/
 
