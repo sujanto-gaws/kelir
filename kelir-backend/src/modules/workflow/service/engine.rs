@@ -342,7 +342,8 @@ pub struct Started {
 ///
 /// **Holds the revision `FOR SHARE` before it reads it, and decides under that
 /// hold** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)): a
-/// revision that is deleted, or not `ACTIVE`, is refused with the same 422. A
+/// revision that is deleted, or not `ACTIVE`, is refused with 422
+/// `WORKFLOW_NOT_PUBLISHED`. A
 /// deprecate and a delete hold the revision `FOR UPDATE` before they read it,
 /// so a submit waiting on either reads what it committed, and one sent while a
 /// submit is in flight waits for it: no approval starts on a revision once its
@@ -385,7 +386,18 @@ pub async fn start(
     .await?
     {
         DefinitionOfInstance::Loaded(loaded) => loaded,
-        DefinitionOfInstance::InAnotherTenant | DefinitionOfInstance::Absent => {
+        // The foreign case is logged, naming both tenants, by
+        // `definition_of_instance`; an absent one is logged here, as the
+        // `Internal` it replaced was.
+        DefinitionOfInstance::InAnotherTenant => {
+            return Err(not_found(request.workflow_definition_id));
+        }
+        DefinitionOfInstance::Absent => {
+            tracing::warn!(
+                tenant_id = %request.tenant_id,
+                workflow_definition_id = %request.workflow_definition_id,
+                "a document type's binding names a workflow definition that does not exist"
+            );
             return Err(not_found(request.workflow_definition_id));
         }
     };
@@ -1929,10 +1941,6 @@ fn no_transition(
     )])
 }
 
-/// [`start`]'s refusal of a revision it cannot start on: `status` is the
-/// revision's status, or `deleted`. One 422 for both, at `documentTypeId`,
-/// because what the administrator does about either is the same: bind the
-/// type to a published revision.
 /// The refusal of a binding that names no workflow definition of the caller's
 /// tenant ([#774](https://github.com/sujanto-gaws/kelir/issues/774)).
 ///
@@ -1953,6 +1961,10 @@ fn not_found(workflow_definition_id: Uuid) -> AppError {
     )])
 }
 
+/// [`start`]'s refusal of a revision it cannot start on: `status` is the
+/// revision's status, or `deleted`. One 422 for both, at `documentTypeId`,
+/// because what the administrator does about either is the same: bind the
+/// type to a published revision.
 fn not_published(workflow_key: &str, status: &str) -> AppError {
     AppError::validation(vec![ValidationDetail::new(
         "documentTypeId",
