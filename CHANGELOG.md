@@ -11,6 +11,16 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **A draft naming a department code that is not live no longer publishes**
+  ([#764](https://github.com/sujanto-gaws/kelir/issues/764), **D-142**). A
+  draft, or a revision cloned from a published one, whose `DEPARTMENT_ROLE`
+  `departmentScope` names a deleted department or a code no department has
+  is refused at publish with `DEPARTMENT_NOT_LIVE`. Create or restore the
+  department, or edit the scope, then publish again. No query lists such
+  drafts in advance; the publish names each place. Published revisions are
+  not re-checked, and a task or decision scoped to such a code is still
+  refused at run time as `ASSIGNMENT_UNRESOLVED` (Installation and
+  Deployment §9 gives the remedies).
 - **Unclaimed tasks nobody can decide leave their inboxes at the upgrade**
   ([#761](https://github.com/sujanto-gaws/kelir/issues/761)). An open task
   that no one has claimed, whose state has `APPROVE`, `REJECT` or `RETURN`
@@ -674,6 +684,31 @@ While the major version is `0`, the public API may change in any release.
   person still has no finder
   ([#893](https://github.com/sujanto-gaws/kelir/issues/893)). JWSS takes R-22,
   which changes no shape. No migration.
+- **Publishing a workflow definition refuses a department code that is not
+  live** ([#764](https://github.com/sujanto-gaws/kelir/issues/764),
+  construction plan 21 row 29, **D-142**). A `DEPARTMENT_ROLE` rule in a
+  task's `assignment` or a transition's `allowedBy` whose `departmentScope`
+  is a department code, not `REQUESTED_DEPARTMENT` or `OWNER_DEPARTMENT`,
+  must name a live department of the tenant. Until now a code that was
+  deleted, or that no department had, published cleanly, and every task or
+  decision scoped to it was then refused as `ASSIGNMENT_UNRESOLVED` in front
+  of whoever reached it. The publish now answers 422 `VALIDATION_ERROR` with a
+  detail at each such `…departmentScope`, `rule: "liveDepartment"`, coded
+  `DEPARTMENT_NOT_LIVE`, whose message names the code; these details come
+  after the `ROLE_NOT_LIVE` ones, and the revision stays a draft. An
+  `INACTIVE` department is live; another tenant's department of the same code
+  is not. A `ROLE` rule's scope (still `ROLE_TAKES_NO_SCOPE`) and a task's
+  `escalation.assignment` are not checked. The publish holds the departments
+  `FOR KEY SHARE`, after its roles, and a department delete now locks its row
+  `FOR UPDATE` in one transaction with its dependents count and its write, so
+  the two do not interleave: a publish waiting on a delete is refused, and a
+  delete waiting on a publish then deletes. The delete's lock also makes it
+  wait for any open transaction that is inserting a row pointing at the
+  department, and it then counts that row. No delete is refused because a
+  published revision names the department, which is
+  [#902](https://github.com/sujanto-gaws/kelir/issues/902)'s, and a revision
+  already published is not re-checked. JWSS takes R-23, which changes no
+  shape. No migration.
 
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers

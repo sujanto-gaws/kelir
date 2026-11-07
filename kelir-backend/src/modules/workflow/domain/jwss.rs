@@ -86,7 +86,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use super::graph::RoleReference;
+use super::graph::{DepartmentReference, RoleReference};
 use super::task_type;
 use crate::error::ValidationDetail;
 use crate::modules::rad::domain::engine::{
@@ -148,6 +148,10 @@ pub const RESOLVABLE_ASSIGNEE_TYPES: &[&str] = &["USER", "ROLE", "DEPARTMENT_ROL
 /// The detail code a publish refuses a role that is not live with
 /// ([`dead_role_errors`]).
 pub const ROLE_NOT_LIVE: &str = "ROLE_NOT_LIVE";
+
+/// The detail code a publish refuses a department code that is not live with
+/// ([`dead_department_errors`]).
+pub const DEPARTMENT_NOT_LIVE: &str = "DEPARTMENT_NOT_LIVE";
 
 /// The detail code a publish refuses a `departmentScope` on a `ROLE` rule with
 /// ([`role_scope_errors`]).
@@ -466,6 +470,47 @@ pub fn dead_role_errors(
                      ASSIGNMENT_UNRESOLVED, so the definition is not published. Create the \
                      role, or name a live one (JWSS §5.3)",
                     reference.role_code
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The refusal a publish gives for each department code a definition names
+/// that is not live ([JWSS §5.3](../../../../../docs/schema/JSON%20Workflow%20Schema.md),
+/// **D-142**, [#764]).
+///
+/// **[`dead_role_errors`] for departments, and pure in the same way.**
+/// `references` are `graph::department_references`': the literal
+/// `departmentScope` codes on `DEPARTMENT_ROLE` rules, never a reserved word,
+/// a `ROLE` rule's scope or an escalation's. `live` is the codes
+/// `service::definition::publish_definition` found live in the tenant, read
+/// `FOR KEY SHARE` in the publish's transaction. Each reference whose code is
+/// not among them is one detail at its path, in the S-rule detail shape.
+///
+/// A live department is a `departments` row in the tenant whose `deleted_at`
+/// is `NULL`. **An `INACTIVE` department is live**: `assignment::direct`
+/// resolves one, and its status only stops it being chosen for new records.
+///
+/// [#764]: https://github.com/sujanto-gaws/kelir/issues/764
+pub fn dead_department_errors(
+    references: &[DepartmentReference],
+    live: &BTreeSet<String>,
+) -> Vec<ValidationDetail> {
+    references
+        .iter()
+        .filter(|reference| !live.contains(&reference.department_code))
+        .map(|reference| {
+            detail(
+                reference.path.clone(),
+                "liveDepartment",
+                DEPARTMENT_NOT_LIVE,
+                format!(
+                    "`{}` is not a live department in this tenant: it was deleted, or no \
+                     department has that code. Every task or decision scoped to it would be \
+                     refused as ASSIGNMENT_UNRESOLVED, so the definition is not published. \
+                     Create the department, or name a live one (JWSS §5.3)",
+                    reference.department_code
                 ),
             )
         })
@@ -1181,6 +1226,101 @@ mod tests {
             1
         );
         assert!(dead_role_errors(&[reference("p", "APPROVER")], &live).is_empty());
+    }
+
+    fn department(path: &str, code: &str) -> DepartmentReference {
+        DepartmentReference {
+            path: path.to_owned(),
+            department_code: code.to_owned(),
+        }
+    }
+
+    #[test]
+    fn every_department_code_that_is_not_live_is_refused_at_its_path() {
+        let references = [
+            department(
+                "definition.states.0.task.assignment.departmentScope",
+                "GONE",
+            ),
+            department(
+                "definition.states.2.task.assignment.departmentScope",
+                "LIVE",
+            ),
+            department("definition.transitions.1.allowedBy.departmentScope", "GONE"),
+            department(
+                "definition.transitions.3.allowedBy.departmentScope",
+                "NEVER",
+            ),
+        ];
+        let live = BTreeSet::from(["LIVE".to_owned()]);
+
+        let details = dead_department_errors(&references, &live);
+
+        // One detail a place, in the order the references came.
+        let found: Vec<(&str, &str, &str)> = details
+            .iter()
+            .map(|detail| {
+                (
+                    detail.path.as_str(),
+                    detail.rule.as_str(),
+                    detail.code.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "definition.states.0.task.assignment.departmentScope",
+                    "liveDepartment",
+                    DEPARTMENT_NOT_LIVE
+                ),
+                (
+                    "definition.transitions.1.allowedBy.departmentScope",
+                    "liveDepartment",
+                    DEPARTMENT_NOT_LIVE
+                ),
+                (
+                    "definition.transitions.3.allowedBy.departmentScope",
+                    "liveDepartment",
+                    DEPARTMENT_NOT_LIVE
+                ),
+            ]
+        );
+        assert!(
+            details[0].message.contains("`GONE`"),
+            "{}",
+            details[0].message
+        );
+        assert!(
+            details[0]
+                .message
+                .contains("deleted, or no department has that code"),
+            "{}",
+            details[0].message
+        );
+        assert!(
+            details[2].message.contains("`NEVER`"),
+            "{}",
+            details[2].message
+        );
+    }
+
+    #[test]
+    fn a_department_code_is_matched_exactly() {
+        // As `assignment::direct` looks it up: `department_code = $2`.
+        let live = BTreeSet::from(["DEPT-FIN".to_owned()]);
+
+        assert_eq!(
+            dead_department_errors(&[department("p", "dept-fin")], &live).len(),
+            1
+        );
+        assert_eq!(
+            dead_department_errors(&[department("p", "DEPT-FIN ")], &live).len(),
+            1
+        );
+        assert!(dead_department_errors(&[department("p", "DEPT-FIN")], &live).is_empty());
+        assert!(dead_department_errors(&[], &BTreeSet::new()).is_empty());
     }
 
     /// A definition with one task state and one edge, each holding `rule`.

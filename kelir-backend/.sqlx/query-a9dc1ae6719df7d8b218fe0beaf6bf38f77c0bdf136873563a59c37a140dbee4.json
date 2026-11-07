@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"found!\" FROM departments\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a9dc1ae6719df7d8b218fe0beaf6bf38f77c0bdf136873563a59c37a140dbee4"
+}
