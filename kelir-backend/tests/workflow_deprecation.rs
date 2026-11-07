@@ -28,7 +28,10 @@ use std::time::Duration;
 use axum::http::{Method, StatusCode};
 use common::gate::{a_delete_follows, ReadGate};
 use common::{deadlocks_once_settled, deadlocks_so_far, fixtures, TestApp};
+use kelir_backend::error::AppError;
 use kelir_backend::modules::workflow::repository::definition as definition_repo;
+use kelir_backend::modules::workflow::service::assignment::{AssignmentContext, OwnerDepartment};
+use kelir_backend::modules::workflow::service::engine;
 use serde_json::{json, Value};
 use sqlx::{Connection, PgConnection};
 use tokio::task::JoinHandle;
@@ -3420,37 +3423,123 @@ async fn send_back(app: &TestApp, approver: &str, document: Uuid, reason: &str) 
     assert_eq!(document_status(app, document).await, "RETURNED");
 }
 
-/// **A type bound to another tenant's revision fails its submit with 500 and
-/// starts nothing** ([#712], the builder's first untested path). Pinned, not
-/// endorsed.
-///
-/// No route writes such a binding: the binding is checked in the caller's
-/// tenant, and its foreign key names the revision by id alone, so only SQL
-/// can. `engine::start`'s lock is scoped to the caller's tenant, so it finds
-/// no row and holds nothing in the other tenant, whether it runs before
-/// `repo::definition_of_instance` or after it. That read then logs both ends
-/// of the broken link and answers `INTERNAL_ERROR`, as it did before #712: the
-/// submit is rolled back whole, the document stays a draft with no number, and
-/// the other tenant's revision is untouched. Whether the answer should be a
-/// 422 is not #712's to decide.
-///
-/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
-#[tokio::test]
-async fn a_type_bound_across_tenants_fails_its_submit_and_starts_nothing() {
+// ===========================================================================
+// #774: a binding that names no definition of this tenant is a 422
+// ===========================================================================
+//
+// No route writes a binding to another tenant's revision: the binding is
+// checked in the caller's tenant, and its foreign key names the revision by id
+// alone, so only SQL can. #745 pinned what a submit then did, a 500, and the
+// product owner decided on 2026-11-07 that it is a 422 naming the binding,
+// `WORKFLOW_NOT_FOUND`, the same for a definition that does not exist at all.
+//
+// # Seen to fail (coding standard §2.9), 2026-11-07
+//
+// The four tests below were run against `main` at b00be2f first. Three were
+// red: the flipped #745 test (500 `INTERNAL_ERROR`), the start called directly
+// (`AppError::Internal`), and the resubmit test at its fresh draft (500; its
+// resubmission was already green). The not-selected test was green there, as
+// it should be; it is here for M7. Each mutant was then built against the fix,
+// these four and the three same-tenant refusals named under M6 run, and the
+// mutant reverted. Every mutant reddened at least one.
+//
+// | Mutant | Red |
+// |---|---|
+// | M1 the check dropped (both misses back to `Internal`) | *a type bound across tenants…* (500); *a start refuses…* (`Internal`); *a returned document…* (its fresh draft, 500) |
+// | M2 the predicate inverted (`if row.in_tenant`) | all seven: every same-tenant submit refused `WORKFLOW_NOT_FOUND`, and their revision loaded and refused `WORKFLOW_NOT_PUBLISHED`, "deleted", naming `del_theirs` |
+// | M3 a "deleted" refusal before the check | *a type bound across tenants…*, *a start refuses…*, *a returned document…*: `WORKFLOW_NOT_PUBLISHED` |
+// | M4 the message carries the revision's `workflow_key` and name | *a type bound across tenants…* (the message); *a start refuses…* (the two texts differ) |
+// | M5 a reference allocated and the instance inserted before the refusal | *a start refuses…*: one instance in the start's transaction. The submits stay green: the rollback hides it |
+// | M6 the new code widened to same-tenant deleted and deprecated revisions (`not_published` answers `WORKFLOW_NOT_FOUND`) | *a submit of a type bound to a deleted revision…*, *a type bound to a deprecated revision…*, *a deprecated first-priority binding…* |
+// | M7 the submit refuses when any live binding of the type is another tenant's | *a foreign binding the type does not select…* (400); the two cross-tenant refusals answered 400, not 422 |
+// | M8 the resubmit refuses when the type's binding loads nothing | *a returned document…*: the resubmission answered 400 |
+// | M9 the path `workflows.0.workflowDefinitionId`; the rule `exists` | each: *a type bound across tenants…*; *a start refuses…* |
+// | M10 `lock_for_start` without its tenant | *a start refuses…*: their revision could not be taken `FOR UPDATE NOWAIT` |
+// | (extra) `lock_bindable_definition` without its tenant | *a type bound across tenants…*: the PUT naming their revision answered 200 |
+
+/// The refusal's message for a binding naming `id`, as an administrator reads
+/// it. Spelled out here so that a change to it is a change a test sees.
+fn not_found_message(id: Uuid) -> String {
+    format!(
+        "this document type's workflow binding names workflow definition `{id}`, which \
+         this tenant does not have; no approval can be started against it. Bind the type \
+         to a published revision of this tenant"
+    )
+}
+
+/// What a submit may write anywhere: instances, tasks and their history, the
+/// instance history, the documents' status history, outbox and audit rows.
+async fn rows_written(app: &TestApp) -> Vec<i64> {
+    let mut counts = Vec::new();
+    for table in [
+        "workflow_instances",
+        "workflow_tasks",
+        "workflow_task_history",
+        "workflow_history",
+        "document_status_history",
+        "outbox_events",
+        "audit_events",
+    ] {
+        counts.push(
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&app.pool)
+                .await
+                .expect("count the rows"),
+        );
+    }
+    counts
+}
+
+/// A multi-tenant app with a draft of a type bound to this tenant's revision,
+/// and another tenant holding a published revision of its own.
+struct Across {
+    app: TestApp,
+    token: String,
+    mine: Uuid,
+    theirs: Uuid,
+    other: Uuid,
+    type_id: Uuid,
+    document: Uuid,
+}
+
+/// The other tenant's code, name, workflow key and workflow name: what a
+/// refusal or a read must not echo.
+const OTHER_CODE: &str = "OTHER-START";
+const OTHER_NAME: &str = "Other tenant";
+const THEIR_KEY: &str = "del_theirs";
+
+async fn across(code: &str, mine_definition: Option<Value>) -> Across {
     let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
     let token = app
         .sign_in_to("SYSTEM", common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
         .await;
 
-    let mine = published(&app, &token, "del_mine").await;
-    let type_id = document_type(&app, &token, "PR_DEL_ACROSS", mine).await;
+    let mine = match mine_definition {
+        None => published(&app, &token, "del_mine").await,
+        Some(definition) => {
+            approver_role(&app, fixtures::SYSTEM_TENANT_ID).await;
+            let created = app
+                .post(
+                    DEFINITIONS,
+                    Some(&token),
+                    json!({ "workflowKey": "del_mine", "name": "Mine",
+                            "definition": definition }),
+                )
+                .await;
+            assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+            let id = id_of(&created.body["data"]);
+            assert_eq!(publish(&app, &token, id).await.status, StatusCode::OK);
+            id
+        }
+    };
+    let type_id = document_type(&app, &token, code, mine).await;
     let document = draft(&app, &token, type_id).await;
 
-    let other = fixtures::create_tenant(&app.pool, "OTHER-START", "Other tenant").await;
+    let other = fixtures::create_tenant(&app.pool, OTHER_CODE, OTHER_NAME).await;
     let outsider = caller_holding(
         &app,
         other,
-        Some("OTHER-START"),
+        Some(OTHER_CODE),
         "other.publisher",
         &[
             "workflow:definition:read",
@@ -3460,49 +3549,447 @@ async fn a_type_bound_across_tenants_fails_its_submit_and_starts_nothing() {
     )
     .await;
     approver_role(&app, other).await;
-    let theirs = saved(&app, &outsider, "del_theirs").await;
+    let theirs = saved(&app, &outsider, THEIR_KEY).await;
     let published = publish(&app, &outsider, theirs).await;
     assert_eq!(published.status, StatusCode::OK, "{}", published.body);
 
+    Across {
+        app,
+        token,
+        mine,
+        theirs,
+        other,
+        type_id,
+        document,
+    }
+}
+
+/// Points every binding of `type_id` at `workflow`, as only SQL can.
+async fn rebind(app: &TestApp, type_id: Uuid, workflow: Uuid) {
     sqlx::query(
         "UPDATE document_type_workflows SET workflow_definition_id = $1 \
          WHERE document_type_id = $2",
     )
-    .bind(theirs)
+    .bind(workflow)
     .bind(type_id)
     .execute(&app.pool)
     .await
     .expect("bind the type across tenants");
+}
+
+/// `body` echoes nothing of the other tenant or of its revision.
+fn assert_leaks_nothing(body: &Value, other: Uuid, what: &str) {
+    let text = body.to_string();
+    for leak in [
+        THEIR_KEY,
+        "Standard approval",
+        OTHER_CODE,
+        OTHER_NAME,
+        &other.to_string(),
+    ] {
+        assert!(!text.contains(leak), "{what} echoed `{leak}`: {text}");
+    }
+}
+
+/// **A type bound to another tenant's revision is refused with 422
+/// `WORKFLOW_NOT_FOUND` and starts nothing** ([#774], flipping what [#745]
+/// pinned for [#712]: a 500).
+///
+/// `engine::start`'s lock is scoped to the caller's tenant and finds no row;
+/// `repo::definition_of_instance` reads the row unscoped, finds it filed under
+/// the other tenant, logs both ends of the broken link, and says so; the start
+/// refuses before the "deleted" branch could call it deleted. The answer is one
+/// detail at `documentTypeId`, rule `reference`, naming the bound id and
+/// nothing of the other tenant: not its code or name, nor the revision's key,
+/// name, version or status. The submit is rolled back whole: the draft stays a
+/// draft with no number, no row is written anywhere, and their revision is as
+/// it was.
+///
+/// The reads show the binding's id and nothing of theirs, the read the type
+/// dialog's chooser makes to name the bound revision answers 404, and a PUT naming
+/// their revision is still refused `NOT_FOUND` at the binding: #774 added no
+/// write-time check, because the write already had one.
+///
+/// [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+/// [#745]: https://github.com/sujanto-gaws/kelir/issues/745
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn a_type_bound_across_tenants_fails_its_submit_and_starts_nothing() {
+    let Across {
+        app,
+        token,
+        mine,
+        theirs,
+        other,
+        type_id,
+        document,
+    } = across("PR_DEL_ACROSS", None).await;
+    rebind(&app, type_id, theirs).await;
+
+    let theirs_before = (
+        stamps(&app, theirs).await,
+        revision_facts(&app, theirs).await,
+    );
+    let written_before = rows_written(&app).await;
 
     let failed = submit(&app, &token, document).await;
     assert_eq!(
         failed.status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a submit bound across tenants answered other than before #712: {}",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a submit bound to another tenant's revision was not refused as the binding's: {}",
         failed.body
     );
     assert_eq!(
         failed.error_code(),
-        Some("INTERNAL_ERROR"),
+        Some("VALIDATION_ERROR"),
         "{}",
         failed.body
     );
+    assert_eq!(
+        failed.body["error"]["details"],
+        json!([{
+            "path": "documentTypeId",
+            "rule": "reference",
+            "code": "WORKFLOW_NOT_FOUND",
+            "message": not_found_message(theirs),
+        }]),
+        "{}",
+        failed.body
+    );
+    assert_leaks_nothing(&failed.body, other, "the refusal");
+    let message = failed.body["error"]["details"][0]["message"]
+        .as_str()
+        .expect("a message");
+    for leak in ["ACTIVE", "version"] {
+        assert!(
+            !message.contains(leak),
+            "the refusal said `{leak}`: {message}"
+        );
+    }
 
     assert_eq!(document_status(&app, document).await, "DRAFT");
     assert!(instance_of(&app, document).await.is_none());
     assert_eq!(document_number(&app, document).await, None);
+    assert_eq!(
+        rows_written(&app).await,
+        written_before,
+        "a refused submit wrote"
+    );
+    assert_eq!(
+        (
+            stamps(&app, theirs).await,
+            revision_facts(&app, theirs).await
+        ),
+        theirs_before,
+        "their revision moved"
+    );
 
-    let theirs_after = stamps(&app, theirs).await;
-    assert_eq!(theirs_after.status, "ACTIVE");
-    assert!(theirs_after.deleted_at.is_none());
-    let started_on_theirs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_instances WHERE workflow_definition_id = $1",
+    // The reads: the binding's id, and nothing of theirs.
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types/{type_id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(
+        read.body["data"]["workflows"][0]["workflowDefinitionId"],
+        json!(theirs)
+    );
+    assert_leaks_nothing(&read.body, other, "the type's read");
+
+    let listed = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/document-types?workflowDefinitionId={theirs}"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(
+        listed.body["data"][0]["id"],
+        json!(type_id),
+        "{}",
+        listed.body
+    );
+    assert_leaks_nothing(&listed.body, other, "the filtered list");
+
+    // What the type dialog's chooser asks to name the bound revision.
+    let named = app
+        .send(
+            Method::GET,
+            &format!("{DEFINITIONS}/{theirs}"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(named.status, StatusCode::NOT_FOUND, "{}", named.body);
+    assert_leaks_nothing(&named.body, other, "the chooser's read");
+
+    // The write: naming their revision is refused at the binding, as before.
+    let second = document_type(&app, &token, "PR_DEL_ACROSS_PUT", mine).await;
+    let put = app
+        .put(
+            &format!("/api/v1/document-types/{second}"),
+            Some(&token),
+            json!({ "workflows": [{ "workflowDefinitionId": theirs }] }),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", put.body);
+    assert_eq!(
+        put.body["error"]["details"][0]["code"], "NOT_FOUND",
+        "{}",
+        put.body
+    );
+    assert_eq!(
+        put.body["error"]["details"][0]["path"], "workflows.0.workflowDefinitionId",
+        "{}",
+        put.body
+    );
+}
+
+/// **`engine::start` refuses another tenant's revision and one that does not
+/// exist alike, before it writes anything, and holds neither** ([#774] AC3–5).
+///
+/// Called directly, in a transaction left open after the refusal, so that what
+/// the start wrote before refusing is still visible to it and what it locked is
+/// still held: no instance and no instance reference were taken, and their
+/// revision can be taken `FOR UPDATE NOWAIT` from another connection. The two
+/// refusals are the same detail with the same text but for the id each quotes,
+/// so a caller learns nothing about whether the id exists elsewhere.
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn a_start_refuses_a_foreign_and_an_absent_definition_alike_and_holds_neither() {
+    let Across {
+        app,
+        theirs,
+        type_id,
+        document,
+        ..
+    } = across("PR_DEL_DIRECT", None).await;
+    let tenant = fixtures::SYSTEM_TENANT_ID;
+    let absent = Uuid::now_v7();
+
+    let evaluation = engine::EvaluationContext {
+        document: json!({}),
+        form_data: json!({}),
+        variables: json!({}),
+        actor: json!({}),
+    };
+    let request = |workflow_definition_id| engine::StartRequest {
+        tenant_id: tenant,
+        document_id: document,
+        workflow_definition_id,
+        business_key: Some("PR_DEL_DIRECT-1"),
+        actor: None,
+        context: AssignmentContext {
+            document_type_id: type_id,
+            owner_user_id: None,
+            requested_department_id: None,
+            owner_department: OwnerDepartment::Unset,
+        },
+        evaluation: &evaluation,
+    };
+
+    let mut transaction = app.pool.begin().await.expect("a transaction");
+    let references = "SELECT count(*) FROM workflow_ref_sequences WHERE tenant_id = $1";
+    let references_before: i64 = sqlx::query_scalar(references)
+        .bind(tenant)
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("count the references");
+
+    let mut messages = Vec::new();
+    for (id, what) in [(theirs, "their revision"), (absent, "an absent one")] {
+        let refused = engine::start(&mut transaction, &request(id)).await;
+        let details = match refused {
+            Err(AppError::Validation { details }) => details,
+            Err(other) => panic!("{what} was refused other than as a 422: {other:?}"),
+            Ok(_) => panic!("{what} started an approval"),
+        };
+        assert_eq!(details.len(), 1, "{what}");
+        assert_eq!(
+            (
+                details[0].path.as_str(),
+                details[0].rule.as_str(),
+                details[0].code.as_str()
+            ),
+            ("documentTypeId", "reference", "WORKFLOW_NOT_FOUND"),
+            "{what}: {}",
+            details[0].message
+        );
+        assert!(details[0].message.contains(&id.to_string()), "{what}");
+        messages.push(details[0].message.replace(&id.to_string(), "{id}"));
+
+        let instances: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow_instances WHERE document_id = $1")
+                .bind(document)
+                .fetch_one(&mut *transaction)
+                .await
+                .expect("count the instances");
+        assert_eq!(instances, 0, "{what}: the start inserted before refusing");
+        let references_after: i64 = sqlx::query_scalar(references)
+            .bind(tenant)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("count the references");
+        assert_eq!(
+            references_after, references_before,
+            "{what}: a reference was taken"
+        );
+    }
+    assert_eq!(
+        messages[0], messages[1],
+        "the two refusals read differently"
+    );
+
+    // Their revision is not held by the start's still-open transaction.
+    let mut elsewhere = app.pool.acquire().await.expect("a second connection");
+    let taken = sqlx::query("SELECT 1 FROM workflow_definitions WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(theirs)
+        .execute(&mut *elsewhere)
+        .await;
+    assert!(
+        taken.is_ok(),
+        "the start held another tenant's revision: {taken:?}"
+    );
+
+    transaction.rollback().await.expect("roll back");
+}
+
+/// **A foreign binding the type does not select refuses nothing** ([#774]
+/// AC6). The type's own revision is bound at priority 2; another tenant's is
+/// bound at priority 1 with a window that closed yesterday, and at priority 3.
+/// `workflow_binding` selects the live priority-2 row as it always did, and the
+/// submit starts on it.
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn a_foreign_binding_the_type_does_not_select_refuses_nothing() {
+    let Across {
+        app,
+        token,
+        mine,
+        theirs,
+        type_id,
+        document,
+        ..
+    } = across("PR_DEL_UNSELECTED", None).await;
+
+    sqlx::query("UPDATE document_type_workflows SET priority = 2 WHERE document_type_id = $1")
+        .bind(type_id)
+        .execute(&app.pool)
+        .await
+        .expect("move the type's own binding to priority 2");
+    for (priority, valid_to) in [
+        (
+            1,
+            Some(
+                chrono::Utc::now()
+                    .date_naive()
+                    .pred_opt()
+                    .expect("yesterday"),
+            ),
+        ),
+        (3, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO document_type_workflows \
+                 (id, tenant_id, document_type_id, workflow_definition_id, priority, valid_to) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(fixtures::SYSTEM_TENANT_ID)
+        .bind(type_id)
+        .bind(theirs)
+        .bind(priority)
+        .bind(valid_to)
+        .execute(&app.pool)
+        .await
+        .expect("bind their revision beside mine");
+    }
+
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(
+        submitted.status,
+        StatusCode::OK,
+        "a binding the type did not select refused the submit: {}",
+        submitted.body
+    );
+    assert_eq!(
+        instance_of(&app, document).await.expect("an instance").0,
+        mine
+    );
+}
+
+/// **A returned document resubmits on its pinned revision after its type is
+/// rebound across tenants** ([#774] AC7). The resubmit fires on the instance's
+/// revision and never reads the type's binding, so the binding naming another
+/// tenant's revision does not touch it; the type's next draft is refused
+/// `WORKFLOW_NOT_FOUND`. #260's case, an *instance* pointing across tenants
+/// (`workflow_definition_scope.rs`), is another path and is unchanged.
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+#[tokio::test]
+async fn a_returned_document_resubmits_on_its_pinned_revision_after_a_rebind_across_tenants() {
+    let Across {
+        app,
+        token,
+        mine,
+        theirs,
+        type_id,
+        document,
+        ..
+    } = across("PR_DEL_RESUBMIT", Some(returnable_workflow("del_mine"))).await;
+    let role = approver_role(&app, fixtures::SYSTEM_TENANT_ID).await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "across.approver",
+        "across.approver@example.test",
+        common::ADMIN_PASSWORD,
+        &[role],
     )
-    .bind(theirs)
-    .fetch_one(&app.pool)
-    .await
-    .expect("count the instances on their revision");
-    assert_eq!(started_on_theirs, 0);
+    .await;
+    let approver = app
+        .sign_in_to("SYSTEM", "across.approver", common::ADMIN_PASSWORD)
+        .await;
+
+    assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
+    send_back(
+        &app,
+        &approver,
+        document,
+        "The quotation is for 12 desks, not 2.",
+    )
+    .await;
+
+    rebind(&app, type_id, theirs).await;
+
+    let resubmitted = submit(&app, &token, document).await;
+    assert_eq!(resubmitted.status, StatusCode::OK, "{}", resubmitted.body);
+    let (pinned, state, _) = instance_of(&app, document).await.expect("the instance");
+    assert_eq!(pinned, mine, "the resubmission moved to another revision");
+    assert_eq!(state, "MANAGER_APPROVAL");
+    assert_eq!(document_status(&app, document).await, "PENDING_APPROVAL");
+
+    let next = draft(&app, &token, type_id).await;
+    let refused = submit(&app, &token, next).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        refused.body
+    );
+    assert_eq!(
+        refused.body["error"]["details"][0]["code"], "WORKFLOW_NOT_FOUND",
+        "{}",
+        refused.body
+    );
 }
 
 /// **The deadlock guard counts a deadlock it is shown** ([#712] AC10). Every

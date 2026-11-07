@@ -943,6 +943,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A document type bound to another tenant's workflow, or to none, refuses
+  its submissions with 422** ([#774](https://github.com/sujanto-gaws/kelir/issues/774),
+  construction plan 21 row 30). No route writes such a binding, since a
+  binding is checked in the caller's tenant when it is saved, but a row
+  written directly could, and its submit answered 500 (pinned by
+  [#745](https://github.com/sujanto-gaws/kelir/issues/745) for
+  [#712](https://github.com/sujanto-gaws/kelir/issues/712)). It now answers
+  422 `VALIDATION_ERROR` with one detail at `documentTypeId`, rule
+  `reference` and the new code `WORKFLOW_NOT_FOUND`, whose message quotes the
+  bound `workflowDefinitionId` and says to bind a published revision of this
+  tenant. A binding naming a definition that does not exist at all gets the
+  same answer, word for word, so it tells nobody what another tenant holds.
+  Nothing is written: the document stays a draft with no number. A deleted or
+  deprecated revision of the caller's own tenant is still refused as
+  `WORKFLOW_NOT_PUBLISHED`. Which binding a submit selects, a resubmit on its
+  approval's pinned revision, the reads of a document type and the check when
+  a binding is saved are unchanged. No migration, and no schema change.
 - **A claimed task whose user or owner never resolves is no longer *waiting
   for you*** ([#762](https://github.com/sujanto-gaws/kelir/issues/762),
   construction plan 21 row 23). #530 and #635 judged a decision edge's role
