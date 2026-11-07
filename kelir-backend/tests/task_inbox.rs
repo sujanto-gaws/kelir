@@ -3393,6 +3393,100 @@ async fn claim_or_place(app: &TestApp, token: &str, task: Uuid) {
     );
 }
 
+/// The sentence a raise refused for its decision edges ends with ([#765]).
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+const UNDECIDABLE: &str = "No APPROVE, REJECT or RETURN edge out of this state resolves, so \
+                           nobody could ever decide the task this transition would create, and \
+                           the transition is refused rather than raising it";
+
+/// Submits `document` as `token`'s user, and **raises its task with its
+/// edges swapped when the submit is refused because none of them resolves**
+/// ([#765]).
+///
+/// Since #765 a submit whose task no decision edge out of its state can
+/// decide is refused, so the #530, #635 and #762 fixtures whose edges never
+/// resolved at the raise can no longer raise their task. The state they test
+/// is still reached: a task raised while an edge resolved, whose user, owner
+/// or department changed since, and every task raised before #765 shipped. So
+/// the bound revision's `definition_json`, which the engine reads, has those
+/// decision edges replaced by the task's own `ROLE` for the one submit, and
+/// is put back at once; the projection the inbox reads is not touched. The
+/// fallback is taken only for a refusal whose every detail is the raise's
+/// own, [`UNDECIDABLE`]; any other refusal fails the test, as before.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+async fn submit_or_place(app: &TestApp, token: &str, document: Uuid) {
+    let path = format!("/api/v1/documents/{document}/submission");
+    let submit = || app.send(Method::POST, &path, Some(token), None);
+
+    let submitted = submit().await;
+    if submitted.status == StatusCode::OK {
+        return;
+    }
+    assert_eq!(
+        submitted.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        submitted.body
+    );
+    let details = submitted.body["error"]["details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("details: {}", submitted.body));
+    assert!(
+        details
+            .iter()
+            .all(|detail| detail["code"] == "ASSIGNMENT_UNRESOLVED"
+                && detail["message"]
+                    .as_str()
+                    .is_some_and(|message| message.ends_with(UNDECIDABLE))),
+        "the submit was refused, and not only for its decision edges: {}",
+        submitted.body
+    );
+
+    let (definition, kept): (Uuid, Value) = sqlx::query_as(
+        "SELECT w.id, w.definition_json
+           FROM documents d
+           JOIN document_type_workflows b
+             ON b.document_type_id = d.document_type_id AND b.deleted_at IS NULL
+           JOIN workflow_definitions w ON w.id = b.workflow_definition_id
+          WHERE d.id = $1",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the definition the document's type binds");
+
+    let initial = kept["initialState"].as_str().expect("an initial state");
+    let queue = kept["states"]
+        .as_array()
+        .expect("states")
+        .iter()
+        .find(|state| state["code"] == initial)
+        .and_then(|state| state["task"]["assignment"]["roleCode"].as_str())
+        .expect("the initial state's task is offered to a role");
+    let mut swapped = kept.clone();
+    for transition in swapped["transitions"].as_array_mut().expect("transitions") {
+        if transition["from"] == initial
+            && ["APPROVE", "REJECT", "RETURN"]
+                .contains(&transition["action"].as_str().unwrap_or(""))
+        {
+            transition["allowedBy"] = json!({ "assigneeType": "ROLE", "roleCode": queue });
+        }
+    }
+
+    let rewrite = |json: Value| {
+        sqlx::query("UPDATE workflow_definitions SET definition_json = $2 WHERE id = $1")
+            .bind(definition)
+            .bind(json)
+            .execute(&app.pool)
+    };
+    rewrite(swapped).await.expect("swap the edges");
+    let placed = submit().await;
+    rewrite(kept).await.expect("put the edges back");
+    assert_eq!(placed.status, StatusCode::OK, "{}", placed.body);
+}
+
 /// **The stranded-task query lists what nobody can decide, and says whose it
 /// is** ([#529], [#533]).
 ///
@@ -3720,8 +3814,9 @@ fn two_edge_workflow(key: &str, queue: &str, approve: Value, reject: Value) -> V
     definition
 }
 
-/// Submits a document of a new type on `definition`, claims its task as
-/// `holder` ([`claim_or_place`]), and dates the task a day late. Returns the task.
+/// Submits a document of a new type on `definition` ([`submit_or_place`]),
+/// claims its task as `holder` ([`claim_or_place`]), and dates the task a day
+/// late. Returns the task.
 async fn claimed_late_task(
     app: &TestApp,
     admin: &str,
@@ -3731,7 +3826,16 @@ async fn claimed_late_task(
 ) -> Uuid {
     let workflow = publish_workflow_definition(app, admin, key, definition).await;
     let type_id = document_type(app, admin, &key.to_uppercase(), workflow).await;
-    let document = submitted_document(app, admin, type_id, key).await;
+    let created = app
+        .post(
+            "/api/v1/documents",
+            Some(admin),
+            json!({ "documentTypeId": type_id, "title": key, "formData": { "amount": 1_000 } }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let document = id_of(&created.body["data"]);
+    submit_or_place(app, admin, document).await;
     let task = open_task_of(app, document).await;
 
     claim_or_place(app, holder, task).await;
@@ -9564,7 +9668,7 @@ async fn a_decision_that_loses_its_compare_and_swap_is_told_how_the_task_closed(
 // | M11 the clause dropped from `list_for_caller` | AC13, and 13 of the 26 |
 // | M11 the clause dropped from `count_for_caller` | AC13, and 13 of the 26 |
 // | M11 the clause dropped from `is_visible_to` | AC13, and 12 of the 26 |
-// | M12 `hold_deciding_roles` refuses, at the raise, a scope `normalize` refuses | AC12, `an_owner_department_edge_with_no_live_department_refuses_the_decision`, and the nine tests here that raise such a task |
+// | M12 `hold_deciding_roles` refuses, at the raise, a scope `normalize` refuses | AC12, `an_owner_department_edge_with_no_live_department_refuses_the_decision`, and the nine tests here that raise such a task. Since #765 (2026-11-07) the raise refuses a state none of whose decision edges resolves, which is M12 for a state whose every edge is refused; M12 itself, refusing for any one edge, is still a mutant |
 // | ~~M13 the clause applied to the unclaimed arm~~ | ~~AC14, and #530's unclaimed-arm test~~ M13 is the implementation since #761 (2026-11-06), and its inverse is #761's M1 and M2 below |
 // | M14 the department read from the task's snapshot | AC1, AC2, AC3, AC6, AC7, AC8, AC10, AC11 |
 // | M15 the reserved words tested after the code lookup | AC9 |
@@ -9787,7 +9891,8 @@ async fn set_requested_department(app: &TestApp, task: Uuid, department: Option<
 }
 
 /// [`claimed_late_task`], with the document drafted and submitted by `owner`
-/// and requested for `requested`. `admin` publishes the workflow and the type.
+/// ([`submit_or_place`]) and requested for `requested`. `admin` publishes the
+/// workflow and the type.
 async fn owned_late_claim(
     app: &TestApp,
     admin: &str,
@@ -9829,15 +9934,7 @@ async fn owned_late_offer(
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     let document = id_of(&created.body["data"]);
 
-    let submitted = app
-        .send(
-            Method::POST,
-            &format!("/api/v1/documents/{document}/submission"),
-            Some(owner),
-            None,
-        )
-        .await;
-    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    submit_or_place(app, owner, document).await;
 
     let task = open_task_of(app, document).await;
     sqlx::query("UPDATE workflow_tasks SET due_at = now() - interval '1 day' WHERE id = $1")
@@ -9919,10 +10016,11 @@ async fn assert_decided(app: &TestApp, token: &str, task: Uuid, action: &str) {
 ///
 /// Both decision edges are `DEPARTMENT_ROLE` scoped to `OWNER_DEPARTMENT`, and
 /// the document's creator, the administrator, has no `users.department_id`.
-/// The submit raises the task, because `hold_deciding_roles` reads only the
-/// role (#689), the holder claims it, and it is late. It was on every surface
-/// while every decision refused as `ASSIGNMENT_UNRESOLVED`. It is reachable
-/// through the API alone: a user is created with no department.
+/// The submit raised the task until #765, because `hold_deciding_roles` reads
+/// only the role (#689), the holder claims it, and it is late. It was on every
+/// surface while every decision refused as `ASSIGNMENT_UNRESOLVED`. Since
+/// #765 such a submit is refused, and the task is raised by
+/// [`submit_or_place`], as one raised before #765 shipped.
 ///
 /// **The control** is the same shape on a document whose creator is in a live
 /// department. It stays, and is approved.
@@ -12972,5 +13070,283 @@ async fn a_claim_reads_its_edges_under_the_instance_lock() {
         claim_footprint(&app, task).await,
         before,
         "a refused claim wrote something"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #765 — a task none of whose decision edges resolves is not raised
+// ---------------------------------------------------------------------------
+//
+// **D-141**, option E: the raise refuses a task the clause would hide. The
+// engine's own tests, and the mutant table, are `workflow_engine.rs`'s #765
+// section. The fixtures above that raised a task whose edges never resolved
+// at the raise now raise it while an edge resolves, and break the data after:
+// the state they test is a task stranded after its raise, which #765 leaves
+// as it is.
+
+/// The role every #765 agreement task is offered to.
+const RAISE_QUEUE: &str = "TI-765-QUEUE";
+
+/// A draft of `type_id` by `token`, requested for `requested`.
+async fn draft_requested(
+    app: &TestApp,
+    token: &str,
+    type_id: Uuid,
+    title: &str,
+    requested: Option<Uuid>,
+) -> Uuid {
+    let mut body = json!({
+        "documentTypeId": type_id,
+        "title": title,
+        "formData": { "amount": 1_000 },
+    });
+    if let Some(department) = requested {
+        body["requestedForDepartmentId"] = json!(department);
+    }
+    let created = app.post("/api/v1/documents", Some(token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    id_of(&created.body["data"])
+}
+
+async fn submit_of(app: &TestApp, token: &str, document: Uuid) -> common::TestResponse {
+    app.send(
+        Method::POST,
+        &format!("/api/v1/documents/{document}/submission"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+/// **A raise is refused if and only if the task, once claimed, would be
+/// hidden from the inbox, for every edge kind** ([#765] criterion 8).
+///
+/// Each row has a type of its own whose `APPROVE` and `REJECT` carry the
+/// row's rules, and two drafts of it by the row's owner. The first is
+/// submitted while every rule resolves, and its task is claimed by the
+/// holder. Then the data each row names is broken: a user, an owner, a role
+/// and three departments are deleted. Then, under the same data, two things
+/// are read: whether the claimed task is on the holder's inbox and through
+/// the detail gate, and whether the second draft's submit is refused as
+/// `ASSIGNMENT_UNRESOLVED`. They must disagree on no row, and each row's
+/// answer is pinned too, so the two cannot agree by both being wrong.
+///
+/// For each kind there is a row that resolves and a row that does not, and
+/// two rows mix kinds: one where one edge still resolves, and one where
+/// neither does. A deleted `ROLE` is refused at the raise by the dead-role
+/// rule ([#509]), which is still a refusal.
+///
+/// **Seen red, 2026-11-07**, against `e5859a3`: every row the inbox hides was
+/// raised with 200.
+///
+/// [#509]: https://github.com/sujanto-gaws/kelir/issues/509
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn the_raise_and_the_inbox_agree_on_every_edge_kind() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, RAISE_QUEUE).await;
+    bare_role(&app, "TI-765-EDGE").await;
+    let doomed_role = bare_role(&app, "TI-765-GONE").await;
+    let (holder_id, holder) = waiting_holder(&app, "TI-765-BASE", "ti.765.holder", &[queue]).await;
+
+    let (kept_user, _) = placed_owner(&app, "ti.765.kept", None).await;
+    let (gone_user, _) = placed_owner(&app, "ti.765.gone", None).await;
+    let (gone_owner, gone_owner_token) = placed_owner(&app, "ti.765.gone.owner", None).await;
+    let kept_department = department(&app, "TI-765-KEPT").await;
+    let owner_department = department(&app, "TI-765-OWNER-GONE").await;
+    let requested_department = department(&app, "TI-765-REQ-GONE").await;
+    let code_department = department(&app, "TI-765-CODE-GONE").await;
+    let (_, kept_placed) = placed_owner(&app, "ti.765.placed", Some(kept_department)).await;
+    let (_, gone_placed) = placed_owner(&app, "ti.765.unplaced", Some(owner_department)).await;
+
+    let user = |id: Uuid| user_rule(&id.to_string());
+    let role = |code: &str| json!({ "assigneeType": "ROLE", "roleCode": code });
+    let scoped = |scope: &str| {
+        json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": "TI-765-EDGE",
+                "departmentScope": scope })
+    };
+
+    /// The row, its two rules, whose token drafts, the requested department,
+    /// and whether the raise is refused.
+    type Row<'a> = (&'a str, Value, Value, &'a str, Option<Uuid>, bool);
+    let rows: Vec<Row> = vec![
+        (
+            "USER live",
+            user(kept_user),
+            user(kept_user),
+            &token,
+            None,
+            false,
+        ),
+        (
+            "USER deleted",
+            user(gone_user),
+            user(gone_user),
+            &token,
+            None,
+            true,
+        ),
+        (
+            "OWNER live",
+            json!("OWNER"),
+            json!("OWNER"),
+            &token,
+            None,
+            false,
+        ),
+        (
+            "OWNER deleted",
+            json!("OWNER"),
+            json!("OWNER"),
+            &gone_owner_token,
+            None,
+            true,
+        ),
+        (
+            "ROLE live",
+            role("TI-765-EDGE"),
+            role("TI-765-EDGE"),
+            &token,
+            None,
+            false,
+        ),
+        (
+            "ROLE deleted",
+            role("TI-765-GONE"),
+            role("TI-765-GONE"),
+            &token,
+            None,
+            true,
+        ),
+        (
+            "DEPARTMENT_ROLE, owner's department live",
+            scoped("OWNER_DEPARTMENT"),
+            scoped("OWNER_DEPARTMENT"),
+            &kept_placed,
+            None,
+            false,
+        ),
+        (
+            "DEPARTMENT_ROLE, owner's department deleted",
+            scoped("OWNER_DEPARTMENT"),
+            scoped("OWNER_DEPARTMENT"),
+            &gone_placed,
+            None,
+            true,
+        ),
+        (
+            "DEPARTMENT_ROLE, requested department deleted",
+            scoped("REQUESTED_DEPARTMENT"),
+            scoped("REQUESTED_DEPARTMENT"),
+            &token,
+            Some(requested_department),
+            true,
+        ),
+        (
+            "DEPARTMENT_ROLE, code deleted",
+            scoped("TI-765-CODE-GONE"),
+            scoped("TI-765-CODE-GONE"),
+            &token,
+            None,
+            true,
+        ),
+        (
+            "a deleted user beside a live role",
+            user(gone_user),
+            role("TI-765-EDGE"),
+            &token,
+            None,
+            false,
+        ),
+        (
+            "a deleted user beside a deleted requested department",
+            user(gone_user),
+            scoped("REQUESTED_DEPARTMENT"),
+            &token,
+            Some(requested_department),
+            true,
+        ),
+    ];
+
+    let mut cases = Vec::new();
+    for (index, (row, approve, reject, drafter, requested, refused)) in rows.iter().enumerate() {
+        let key = format!("ti_765_ag_{index}");
+        let workflow = publish_workflow_definition(
+            &app,
+            &token,
+            &key,
+            two_edge_workflow(&key, RAISE_QUEUE, approve.clone(), reject.clone()),
+        )
+        .await;
+        let type_id = document_type(&app, &token, &key.to_uppercase(), workflow).await;
+
+        let claimed = draft_requested(&app, drafter, type_id, &key, *requested).await;
+        let fresh = draft_requested(&app, drafter, type_id, &key, *requested).await;
+        let submitted = submit_of(&app, &token, claimed).await;
+        assert_eq!(
+            submitted.status,
+            StatusCode::OK,
+            "{row}: {}",
+            submitted.body
+        );
+        let task = open_task_of(&app, claimed).await;
+        claim(&app, &holder, task).await;
+
+        cases.push((*row, task, fresh, *refused));
+    }
+
+    for user in [gone_user, gone_owner] {
+        sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+            .bind(user)
+            .execute(&app.pool)
+            .await
+            .expect("delete the user");
+    }
+    soft_delete_role(&app, doomed_role).await;
+    for department in [owner_department, requested_department, code_department] {
+        soft_delete_department(&app, department).await;
+    }
+
+    let page = inbox_of(&app, &holder, "scope=open&pageSize=100").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    let listed = ids_in(&page.body["data"]);
+
+    let mut disagreements = Vec::new();
+    for (row, task, fresh, expected) in cases {
+        let hidden = !listed.contains(&task);
+        if is_visible_to(&app, holder_id, task).await == hidden {
+            disagreements.push(format!("{row}: the gate and the inbox disagree"));
+        }
+
+        let raised = submit_of(&app, &token, fresh).await;
+        let refused = raised.status == StatusCode::UNPROCESSABLE_ENTITY
+            && raised.body.to_string().contains("ASSIGNMENT_UNRESOLVED");
+        if !refused {
+            assert_eq!(
+                raised.status,
+                StatusCode::OK,
+                "{row}: neither raised nor refused for its edges: {}",
+                raised.body
+            );
+        }
+
+        if refused != hidden {
+            disagreements.push(format!(
+                "{row}: the raise refused {refused}, the claimed task hidden {hidden}"
+            ));
+        }
+        if refused != expected {
+            disagreements.push(format!(
+                "{row}: expected the raise refused {expected}, it was {refused}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "the raise and the inbox disagree:\n{}",
+        disagreements.join("\n")
     );
 }

@@ -202,13 +202,25 @@
 //!
 //! **A hidden task is not lost**, and it is one of three kinds.
 //!
+//! **None of them is raised any more** ([#765], **D-141** E). Where a task is
+//! raised, `assignment::refuse_unless_an_edge_resolves` refuses the
+//! transition as `ASSIGNMENT_UNRESOLVED` when the state has a decision edge
+//! and none resolves, by `normalize` and `direct`, the steps this clause is
+//! written from. So the task this clause hides was raised while an edge
+//! resolved and stranded by data that changed since, or was raised before
+//! #765 shipped, and the raise takes no lock on a user or a department, so
+//! one deleted while the raise commits can strand it too. Nothing re-judges a
+//! raised task: this clause, the claim and the decision are what stand
+//! between it and anybody, as before, and the remedies below are unchanged.
+//!
 //! * **Its edges name a deleted role.** This is residue from a role deleted
 //!   before **D-89**'s refusal shipped. An administrator finds it with the
 //!   stranded task query in Installation and Deployment §9. That query is its
 //!   only finder: a refused role delete lists the tasks of a role that is still
 //!   live, and this role is already gone.
 //! * **Its edges' department does not resolve.** This is reachable through the
-//!   API: a user created with no department is enough. The edges' role is
+//!   API after the raise: an owner moved out of their department is enough.
+//!   The edges' role is
 //!   live, so the Roles screen's open-tasks list for that role finds the task
 //!   (`repository::task::open_tasks_needing_roles`), and the stranded task
 //!   query does not. A reassign is refused as `TARGET_CANNOT_DECIDE`, because
@@ -249,6 +261,7 @@
 //! [#635]: https://github.com/sujanto-gaws/kelir/issues/635
 //! [#762]: https://github.com/sujanto-gaws/kelir/issues/762
 //! [#763]: https://github.com/sujanto-gaws/kelir/issues/763
+//! [#765]: https://github.com/sujanto-gaws/kelir/issues/765
 //! [#767]: https://github.com/sujanto-gaws/kelir/issues/767
 //! [#893]: https://github.com/sujanto-gaws/kelir/issues/893
 //! [#902]: https://github.com/sujanto-gaws/kelir/issues/902

@@ -11,6 +11,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **A submit, resubmit or decision that would raise a task nobody can decide
+  is now refused** ([#765](https://github.com/sujanto-gaws/kelir/issues/765),
+  **D-141** E). Transitions that succeeded before and raised such a task now
+  answer 422 `ASSIGNMENT_UNRESOLVED` at the transition, and the document
+  keeps its status: for example, `OWNER_DEPARTMENT` edges on a document whose
+  owner has no department, `REQUESTED_DEPARTMENT` edges on a document naming
+  none, `USER` edges naming a deleted user or a `userId` that is not a uuid,
+  and `OWNER` edges whose creator was deleted, where no other `APPROVE`,
+  `REJECT` or `RETURN` edge out of the state resolves. The refusal names each
+  edge and its reason; fix the data it names, or the workflow definition.
+  Nothing in the data changes on upgrade, and there is no migration. Tasks
+  already raised that way are not touched: they stay hidden and refused as
+  before, and Installation and Deployment §9 gives their repair.
 - **A draft naming a department code that is not live no longer publishes**
   ([#764](https://github.com/sujanto-gaws/kelir/issues/764), **D-142**). A
   draft, or a revision cloned from a published one, whose `DEPARTMENT_ROLE`
@@ -709,6 +722,37 @@ While the major version is `0`, the public API may change in any release.
   [#902](https://github.com/sujanto-gaws/kelir/issues/902)'s, and a revision
   already published is not re-checked. JWSS takes R-23, which changes no
   shape. No migration.
+- **A transition that would raise a task nobody can decide is refused**
+  ([#765](https://github.com/sujanto-gaws/kelir/issues/765), construction plan
+  21 row 29, **D-141** E). #509 refused the raise only when an edge out of the
+  state named a role that is not live. An edge whose department scope, user
+  or owner could not resolve did not stop it, so a submit, resubmit or
+  decision answered 200 and raised a task every decision on which was then
+  refused as `ASSIGNMENT_UNRESOLVED`, and which #530, #635, #762 and #761 then
+  hid. Where a task is raised, after its own `assignment` and after #509's
+  role check, the state's `APPROVE`, `REJECT` and `RETURN` edges are now
+  judged by the meaning the inbox hides a task by: a `USER` whose `userId`
+  parses as a uuid and names a live user of the tenant, `OWNER` with a live
+  creator, a live `ROLE`, and a `DEPARTMENT_ROLE` with a live role and a
+  scope that resolves. An `INACTIVE` department and a user's `status` are not
+  read. One resolving edge is enough. When there is at least one and none
+  resolves, the transition answers 422 `VALIDATION_ERROR` with one detail per
+  decision edge, in definition order, coded `ASSIGNMENT_UNRESOLVED`, `rule:
+  "assignment"`, at `transitions.<from>.<action>.allowedBy.<field>`, whose
+  message gives the edge's reason, and writes nothing: a refused submit leaves
+  the document `DRAFT` with no instance, task, history row or outbox event, a
+  refused resubmit leaves it `RETURNED` with its number, and a refused
+  decision leaves its task open and the document's status unchanged. A
+  `GAPLESS` numbering rule uses no number; a rule that allows gaps loses the
+  first submission's, as it already did for `OWNER_DEPARTMENT` (#699). A state
+  with no decision edge, such as a correction task that only `RESUBMIT`
+  leaves, raises its task as before. No lock is added: users and departments
+  are read unlocked, so one deleted between the check and the commit can
+  still strand a raised task, which every decision then refuses and the inbox
+  hides. A task already raised is not re-judged, and nothing cancels one
+  (ADR-0042 stands whole); its repair stays the data (Installation and
+  Deployment §9). JWSS takes R-24, which changes no shape. See *Upgrade
+  notes*. No migration.
 
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers
@@ -1364,7 +1408,8 @@ While the major version is `0`, the public API may change in any release.
   `REQUESTED_DEPARTMENT` while the document names none, or a department code
   naming no live department is raised, and every decision on it is refused
   as `ASSIGNMENT_UNRESOLVED`. The submit that raises it still answers 200
-  when only its edges carry the scope (#689); one whose own `assignment`
+  when only its edges carry the scope (#689; until #765, under *Changed*);
+  one whose own `assignment`
   cannot resolve is refused at the submit, as before. Once claimed, it stayed
   on its holder's inbox, its count, both dashboard cards and its page. It is
   now left off them as #530's tasks are, and its page answers 404; an
