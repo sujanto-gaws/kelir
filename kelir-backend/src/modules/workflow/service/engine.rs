@@ -139,6 +139,7 @@ use super::super::domain::task as task_domain;
 use super::super::domain::{
     DecisionAction, Graph, InstanceOutcome, State, TaskStatus, TransitionAction,
 };
+use super::super::repository::definition::DefinitionOfInstance;
 use super::super::repository::reference::RefKind;
 use super::super::repository::{
     definition as definition_repo, history, instance as repo, reference, task,
@@ -333,9 +334,16 @@ pub struct Started {
 /// gives an administrator a message they can act on, and this is what stops a
 /// document routing to a revision nobody stands behind.
 ///
+/// **Refuses a definition that is not this tenant's**, or that does not exist,
+/// as `WORKFLOW_NOT_FOUND` (422) at `documentTypeId`
+/// ([#774](https://github.com/sujanto-gaws/kelir/issues/774)). No route binds
+/// either; only a row written directly can, and the binding is what has to
+/// change.
+///
 /// **Holds the revision `FOR SHARE` before it reads it, and decides under that
 /// hold** ([#712](https://github.com/sujanto-gaws/kelir/issues/712)): a
-/// revision that is deleted, or not `ACTIVE`, is refused with the same 422. A
+/// revision that is deleted, or not `ACTIVE`, is refused with 422
+/// `WORKFLOW_NOT_PUBLISHED`. A
 /// deprecate and a delete hold the revision `FOR UPDATE` before they read it,
 /// so a submit waiting on either reads what it committed, and one sent while a
 /// submit is in flight waits for it: no approval starts on a revision once its
@@ -360,18 +368,39 @@ pub async fn start(
     )
     .await?;
 
-    let loaded = definition_repo::definition_of_instance(
+    // **A binding naming no definition of this tenant is refused as the
+    // binding's** ([#774]): another tenant's revision and one that does not
+    // exist answer the same 422, quoting only the bound id, so the answer says
+    // nothing about what exists elsewhere. Decided here, before the "deleted"
+    // branch below, because the hold above is scoped to this tenant and finds no
+    // row for either: read the other way round, another tenant's revision would
+    // be reported as this tenant's, deleted. A deleted or deprecated revision
+    // of *this* tenant is loaded, and is refused below as before.
+    //
+    // [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+    let loaded = match definition_repo::definition_of_instance(
         &mut **transaction,
         request.tenant_id,
         request.workflow_definition_id,
     )
     .await?
-    .ok_or_else(|| AppError::Internal {
-        source: anyhow::anyhow!(
-            "document type binds workflow definition {} which does not exist",
-            request.workflow_definition_id
-        ),
-    })?;
+    {
+        DefinitionOfInstance::Loaded(loaded) => loaded,
+        // The foreign case is logged, naming both tenants, by
+        // `definition_of_instance`; an absent one is logged here, as the
+        // `Internal` it replaced was.
+        DefinitionOfInstance::InAnotherTenant => {
+            return Err(not_found(request.workflow_definition_id));
+        }
+        DefinitionOfInstance::Absent => {
+            tracing::warn!(
+                tenant_id = %request.tenant_id,
+                workflow_definition_id = %request.workflow_definition_id,
+                "a document type's binding names a workflow definition that does not exist"
+            );
+            return Err(not_found(request.workflow_definition_id));
+        }
+    };
 
     let (definition_json, workflow_key, _, _) = (
         loaded.definition_json,
@@ -1909,6 +1938,26 @@ fn no_transition(
         "transition",
         "NO_SUCH_TRANSITION",
         message,
+    )])
+}
+
+/// The refusal of a binding that names no workflow definition of the caller's
+/// tenant ([#774](https://github.com/sujanto-gaws/kelir/issues/774)).
+///
+/// **One text whether the definition is another tenant's or nobody's**, and it
+/// quotes the bound id and nothing read from the row: not its key, name,
+/// version or status, nor its tenant. The server log keeps both tenants
+/// (`definition_of_instance`).
+fn not_found(workflow_definition_id: Uuid) -> AppError {
+    AppError::validation(vec![ValidationDetail::new(
+        "documentTypeId",
+        "reference",
+        "WORKFLOW_NOT_FOUND",
+        format!(
+            "this document type's workflow binding names workflow definition \
+             `{workflow_definition_id}`, which this tenant does not have; no approval can \
+             be started against it. Bind the type to a published revision of this tenant"
+        ),
     )])
 }
 

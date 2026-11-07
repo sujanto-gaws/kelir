@@ -693,6 +693,7 @@ async fn refuse_unless_target_can_decide(
         instance.workflow_definition_id,
     )
     .await?
+    .into_loaded()
     .ok_or_else(|| AppError::Internal {
         source: anyhow::anyhow!(
             "instance {} runs definition {} which does not exist",
@@ -904,6 +905,7 @@ pub async fn decide(
         instance_row.workflow_definition_id,
     )
     .await?
+    .into_loaded()
     .ok_or_else(|| AppError::Internal {
         source: anyhow::anyhow!(
             "instance {} runs definition {} which does not exist",
