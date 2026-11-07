@@ -42,13 +42,6 @@ use common::{with_database, TestApp, TEST_POOL_MAX_CONNECTIONS};
 use sqlx::{Connection, PgConnection};
 use tokio::time::Instant;
 
-/// The server the harness runs against, as `common` finds it.
-fn server() -> String {
-    std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("KELIR_DATABASE_URL"))
-        .expect("the server's URL")
-}
-
 /// The state of backend `pid`, if it is still there.
 async fn backend_state(server: &mut PgConnection, pid: i32) -> Option<String> {
     sqlx::query_scalar("SELECT COALESCE(state, '') FROM pg_stat_activity WHERE pid = $1")
@@ -77,7 +70,7 @@ async fn wait_for_exit(server: &mut PgConnection, pid: i32, why: &str) {
 async fn round(app: &TestApp, server: &mut PgConnection, yield_first: bool) -> bool {
     // The application's own pool options, over the test's database.
     let pool = kelir_backend::db::create_pool_with_max_connections(
-        &with_database(&self::server(), &app.database_name),
+        &with_database(&common::server_url(), &app.database_name),
         TEST_POOL_MAX_CONNECTIONS,
     )
     .expect("a pool");
@@ -141,7 +134,7 @@ async fn round(app: &TestApp, server: &mut PgConnection, yield_first: bool) -> b
 #[tokio::test]
 async fn a_connection_returning_while_the_pool_closes_outlives_close() {
     let app = TestApp::spawn().await;
-    let mut server = PgConnection::connect(&server())
+    let mut server = PgConnection::connect(&common::server_url())
         .await
         .expect("reach the server");
 
@@ -166,7 +159,7 @@ async fn a_connection_returning_while_the_pool_closes_outlives_close() {
 #[tokio::test]
 async fn a_connection_returning_after_the_close_began_is_closed() {
     let app = TestApp::spawn().await;
-    let mut server = PgConnection::connect(&server())
+    let mut server = PgConnection::connect(&common::server_url())
         .await
         .expect("reach the server");
 

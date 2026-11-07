@@ -963,7 +963,7 @@ fn test_config(database_url: &str) -> AppConfig {
 /// against at compile time, so the database the tests run on is the database the
 /// queries were checked against. `KELIR_DATABASE_URL` is accepted as a fallback
 /// because that is what a developer running the app already has set.
-fn server_url() -> String {
+pub fn server_url() -> String {
     std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("KELIR_DATABASE_URL"))
         .ok()
