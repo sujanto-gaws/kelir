@@ -753,7 +753,6 @@ While the major version is `0`, the public API may change in any release.
   (ADR-0042 stands whole); its repair stays the data (Installation and
   Deployment §9). JWSS takes R-24, which changes no shape. See *Upgrade
   notes*. No migration.
-
 - **The SRS names the builder pair** ([#685](https://github.com/sujanto-gaws/kelir/issues/685)).
   FR-RAD-013 (`Should`): a form definition is authored from the browser, with nested containers
   and visually built expressions. FR-WF-018 (`Should`): a workflow definition is authored,
@@ -1409,9 +1408,9 @@ While the major version is `0`, the public API may change in any release.
   naming no live department is raised, and every decision on it is refused
   as `ASSIGNMENT_UNRESOLVED`. The submit that raises it still answers 200
   when only its edges carry the scope (#689; until #765, under *Changed*);
-  one whose own `assignment`
-  cannot resolve is refused at the submit, as before. Once claimed, it stayed
-  on its holder's inbox, its count, both dashboard cards and its page. It is
+  one whose own `assignment` cannot resolve is refused at the submit, as
+  before. Once claimed, it stayed on its holder's inbox, its count, both
+  dashboard cards and its page. It is
   now left off them as #530's tasks are, and its page answers 404; an
   unclaimed one is unchanged (until #761, under *Changed*).
   The edge reads its department live, so the task returns when the

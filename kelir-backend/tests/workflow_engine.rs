@@ -6221,6 +6221,16 @@ async fn a_decision_through_a_deleted_requested_department_is_refused_and_writes
 // | K9 `DEPARTMENT_ROLE` edges skipped | the four red-first tests, `one_decision_edge_that_resolves_raises_the_task`, the agreement test |
 // | K10 a raised task judged again at its decision (`fire` asks the check of its `from` state after `permits`) | `the_raise_is_judged_in_one_place` only: after `permits` it is equivalent, since `permits` refuses the chosen edge first and the check passes when it resolves |
 // | K10b the same, before `permits` | `a_task_stranded_after_its_raise_is_not_touched`, `an_owner_department_edge_with_no_live_department_refuses_the_decision` |
+// | M1 (test-engineer) a `USER` or `OWNER` edge refused when `users.status` is not `ACTIVE` | `the_raise_and_the_inbox_agree_beyond_deletion` (task_inbox) |
+// | M2 (test-engineer) a department scope refused when `departments.status` is not `ACTIVE` | `the_raise_and_the_inbox_agree_beyond_deletion` |
+// | M3 (test-engineer) `OWNER_DEPARTMENT` reads the creator's `deleted_at` | `the_raise_and_the_inbox_agree_beyond_deletion` |
+// | M6 (test-engineer) conditioned decision edges skipped | `the_raise_and_the_inbox_agree_beyond_deletion` |
+// | S1 (test-engineer) `insert_task` named outside the engine as a function value | `a_task_row_is_written_by_one_statement_reached_from_the_engine_alone` |
+// | M10 (test-engineer) an edge with no `allowedBy` skipped instead of resolving | equivalent: no published decision edge fails to parse (meta-schema S5, D-37) |
+//
+// K5 and K5b read `documents.status`; M1 and M2 are the other reading of the
+// required mutant "make the check read `status`": criterion 2 reads no
+// `users.status` or `departments.status`, and the builder's suite passed both.
 //
 // K6–K9 skip an edge of that kind as if it were not a decision edge. A
 // skipped `ROLE` edge that names a deleted role is still refused, by
@@ -6792,4 +6802,77 @@ async fn a_decision_raising_a_task_nobody_can_decide_is_refused() {
     );
     assert_eq!(count_rows(&app, history, id).await, history_before);
     assert_eq!(outbox_events(&app).await, outbox_before);
+}
+
+/// **A task row is written by one statement, reached from one place**
+/// (test-engineer, [#765] criterion 6).
+///
+/// `assignment.rs`'s `the_raise_is_judged_in_one_place` counts the calls
+/// spelled `insert_task(`. A raise written another way is not counted there:
+/// a second `INSERT INTO workflow_tasks`, or `insert_task` imported under
+/// another name, or passed as a value. Either would raise a task the check
+/// never judged. So the source is read for the statement and for the name,
+/// in any spelling: the statement is in `repository/task.rs` alone, and the
+/// name appears nowhere but its definition and `engine.rs`.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[test]
+fn a_task_row_is_written_by_one_statement_reached_from_the_engine_alone() {
+    fn visit(directory: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(directory).expect("the directory reads") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                visit(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                out.push((
+                    path.to_string_lossy().replace('\\', "/"),
+                    std::fs::read_to_string(&path).expect("the source reads"),
+                ));
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    visit(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    assert!(sources.len() > 50, "the scan is not reading the crate");
+
+    let mut statements = Vec::new();
+    let mut names = Vec::new();
+    for (path, text) in &sources {
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let upper = words.to_uppercase();
+        for _ in upper.matches("INSERT INTO WORKFLOW_TASKS") {
+            statements.push(path.clone());
+        }
+        // The definition's file, the engine, and `assignment.rs`, whose own
+        // source test names the function in strings, may name it.
+        if [
+            "workflow/repository/task.rs",
+            "workflow/service/engine.rs",
+            "workflow/service/assignment.rs",
+        ]
+        .iter()
+        .any(|allowed| path.ends_with(allowed))
+        {
+            continue;
+        }
+        let named = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .any(|line| line.contains("insert_task"));
+        if named {
+            names.push(path.clone());
+        }
+    }
+
+    assert!(
+        statements.len() == 1 && statements[0].ends_with("workflow/repository/task.rs"),
+        "a task row is inserted by one statement, in the task repository: {statements:?}"
+    );
+    assert!(
+        names.is_empty(),
+        "`insert_task` is reached from somewhere other than the engine: {names:?}"
+    );
 }
