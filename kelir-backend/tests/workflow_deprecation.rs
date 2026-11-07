@@ -3796,7 +3796,22 @@ async fn a_start_refuses_a_foreign_and_an_absent_definition_alike_and_holds_neit
     };
 
     let mut transaction = app.pool.begin().await.expect("a transaction");
-    let references = "SELECT count(*) FROM workflow_ref_sequences WHERE tenant_id = $1";
+    // The tenant's instance counters already exist, so an allocation before
+    // the refusal would bump a counter rather than add a row: the guard sums
+    // the counters and counts the rows, and sees either.
+    sqlx::query(
+        "INSERT INTO workflow_ref_sequences (id, tenant_id, reference_key, next_sequence) \
+         SELECT gen_random_uuid(), $1, 'WFI-' || y, 7 \
+         FROM generate_series(extract(year FROM now())::int - 1, \
+                              extract(year FROM now())::int + 1) AS y \
+         ON CONFLICT (tenant_id, reference_key) DO NOTHING",
+    )
+    .bind(tenant)
+    .execute(&mut *transaction)
+    .await
+    .expect("seed the instance counters");
+    let references = "SELECT COALESCE(sum(next_sequence), 0)::bigint + count(*) \
+                      FROM workflow_ref_sequences WHERE tenant_id = $1";
     let references_before: i64 = sqlx::query_scalar(references)
         .bind(tenant)
         .fetch_one(&mut *transaction)
