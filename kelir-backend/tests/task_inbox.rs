@@ -3485,6 +3485,27 @@ async fn submit_or_place(app: &TestApp, token: &str, document: Uuid) {
     let placed = submit().await;
     rewrite(kept).await.expect("put the edges back");
     assert_eq!(placed.status, StatusCode::OK, "{}", placed.body);
+
+    // The fallback is for a task the inbox hides too, as `claim_or_place`'s
+    // is. Without this, a raise refusing a task the clause would keep is
+    // placed by the swap and its row stays green, so a fixture that means a
+    // resolving edge proves nothing about the raise (test-engineer, #765).
+    let task = open_task_of(app, document).await;
+    let tenant: Uuid = sqlx::query_scalar("SELECT tenant_id FROM documents WHERE id = $1")
+        .bind(document)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the document's tenant");
+    assert!(
+        !kelir_backend::modules::workflow::repository::inbox::can_be_decided(
+            &app.pool, tenant, task
+        )
+        .await
+        .expect("ask the clause"),
+        "the submit was refused as undecidable, but the inbox clause decides the task by \
+         its own edges: {}",
+        submitted.body
+    );
 }
 
 /// **The stranded-task query lists what nobody can decide, and says whose it
@@ -13340,6 +13361,546 @@ async fn the_raise_and_the_inbox_agree_on_every_edge_kind() {
         if refused != expected {
             disagreements.push(format!(
                 "{row}: expected the raise refused {expected}, it was {refused}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "the raise and the inbox disagree:\n{}",
+        disagreements.join("\n")
+    );
+}
+
+/// What a row of [`the_raise_and_the_inbox_agree_beyond_deletion`] changes on
+/// its two documents or its definition once its first task is claimed.
+enum Then {
+    /// Nothing per row: the row's data is changed with everybody else's.
+    Nothing,
+    /// `documents.created_by` of both documents.
+    Creator(Option<Uuid>),
+    /// `documents.requested_for_department_id` of both documents.
+    Requested(Option<Uuid>),
+    /// Both decision edges' `userId`, as JSON text ([`set_edge_user_ids`]).
+    UserId(String),
+}
+
+/// A definition whose task is offered to [`RAISE_QUEUE`] and whose edges out
+/// of `MANAGER_APPROVAL` are `edges`, each `(to, action, allowedBy,
+/// condition)`. A `RETURNED` correction state, left by `RESUBMIT`, is
+/// declared when an edge goes to it.
+fn edges_out(key: &str, edges: Vec<(&str, &str, Value, Option<Value>)>) -> Value {
+    let mut definition = workflow_for(key, RAISE_QUEUE);
+    let returns = edges.iter().any(|(to, ..)| *to == "RETURNED");
+    let mut transitions: Vec<Value> = edges
+        .into_iter()
+        .map(|(to, action, rule, condition)| {
+            let mut edge = json!({ "from": "MANAGER_APPROVAL", "to": to, "action": action,
+                                   "allowedBy": rule });
+            if let Some(condition) = condition {
+                edge["condition"] = condition;
+            }
+            edge
+        })
+        .collect();
+    if returns {
+        definition["states"]
+            .as_array_mut()
+            .expect("states")
+            .push(json!({
+                "code": "RETURNED", "name": "Returned", "mapsToDocumentStatus": "RETURNED",
+                "task": { "taskDefinitionKey": "correct_it", "taskName": "Correct it",
+                          "assignment": { "assigneeType": "OWNER" } }
+            }));
+        transitions.push(json!({ "from": "RETURNED", "to": "MANAGER_APPROVAL",
+                                 "action": "RESUBMIT", "allowedBy": "OWNER" }));
+    }
+    definition["transitions"] = Value::Array(transitions);
+    definition
+}
+
+/// The workflow instance of `document`, if one was written.
+async fn instance_of_document(app: &TestApp, document: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT id FROM workflow_instances WHERE document_id = $1")
+        .bind(document)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("read the instance")
+}
+
+/// **The raise and the inbox agree beyond deletion: on status, on spelling,
+/// on tenancy, and on the shape of a state's edges** (test-engineer, [#765]
+/// criteria 2, 3 and 8).
+///
+/// [`the_raise_and_the_inbox_agree_on_every_edge_kind`] breaks an edge by
+/// deleting what it names. Each row here breaks it, or leaves it whole, in a
+/// way that table does not reach, and each is a place the two texts could
+/// differ: the clause reads no `users.status` and no `departments.status`,
+/// `OWNER_DEPARTMENT` ignores the creator's `deleted_at` where `OWNER` reads
+/// it, a `userId` is matched against the `uuid` crate's spellings only, a
+/// department or user of another tenant does not count, a role recreated
+/// under a deleted one's code does, and every decision edge counts, a
+/// conditioned one and a `RETURN` included.
+///
+/// As there, each row has a type of its own and two drafts. The first is
+/// submitted while its edges resolve and its task claimed; then the data is
+/// changed; then the claimed task's place on the inbox, through the gate and
+/// by `can_be_decided` is read, and the second draft is submitted. The raise
+/// is refused if and only if the task is hidden, each row's answer is pinned,
+/// and a task the raise lets through is one the clause keeps.
+///
+/// [#765]: https://github.com/sujanto-gaws/kelir/issues/765
+#[tokio::test]
+async fn the_raise_and_the_inbox_agree_beyond_deletion() {
+    use kelir_backend::modules::workflow::repository::inbox::can_be_decided;
+
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let queue = bare_role(&app, RAISE_QUEUE).await;
+    bare_role(&app, "TI-765X-EDGE").await;
+    let recreated = bare_role(&app, "TI-765X-RE").await;
+    let doomed_role = bare_role(&app, "TI-765X-SCOPED-GONE").await;
+    let (holder_id, holder) =
+        waiting_holder(&app, "TI-765X-BASE", "ti.765x.holder", &[queue]).await;
+
+    let abroad = fixtures::create_tenant(&app.pool, "TNT-765X", "Another tenant").await;
+    let abroad_department = department_in(&app, abroad, "TI-765X-ABROAD").await;
+    department_in(&app, abroad, "TI-765X-TWIN").await;
+    let abroad_user = fixtures::create_user(
+        &app.pool,
+        abroad,
+        "ti.765x.abroad",
+        "ti.765x.abroad@example.test",
+        common::ADMIN_PASSWORD,
+        &[],
+    )
+    .await;
+
+    let kept_department = department(&app, "TI-765X-KEPT").await;
+    let asleep_requested = department(&app, "TI-765X-REQ-ASLEEP").await;
+    let asleep_code = department(&app, "TI-765X-ASLEEP").await;
+    let asleep_owner_department = department(&app, "TI-765X-OWN-ASLEEP").await;
+    let twin = department(&app, "TI-765X-TWIN").await;
+
+    let (kept_user, _) = placed_owner(&app, "ti.765x.kept", None).await;
+    let (asleep_user, _) = placed_owner(&app, "ti.765x.asleep", None).await;
+    let (locked_user, _) = placed_owner(&app, "ti.765x.locked", None).await;
+    let (gone_user, _) = placed_owner(&app, "ti.765x.gone", None).await;
+    let (asleep_owner, asleep_owner_token) = placed_owner(&app, "ti.765x.asleep.owner", None).await;
+    let (gone_placed, gone_placed_token) =
+        placed_owner(&app, "ti.765x.gone.placed", Some(kept_department)).await;
+    let (_, asleep_placed_token) =
+        placed_owner(&app, "ti.765x.asleep.placed", Some(asleep_owner_department)).await;
+    let (moved_out, moved_out_token) =
+        placed_owner(&app, "ti.765x.moved.out", Some(kept_department)).await;
+    let (moved_abroad, moved_abroad_token) =
+        placed_owner(&app, "ti.765x.moved.abroad", Some(kept_department)).await;
+
+    let role = |code: &str| json!({ "assigneeType": "ROLE", "roleCode": code });
+    let scoped = |code: &str, scope: Option<&str>| {
+        let mut rule = json!({ "assigneeType": "DEPARTMENT_ROLE", "roleCode": code });
+        if let Some(scope) = scope {
+            rule["departmentScope"] = json!(scope);
+        }
+        rule
+    };
+    let edge = |scope: &str| scoped("TI-765X-EDGE", Some(scope));
+
+    let kept = kept_user.to_string();
+    let gone = gone_user.to_string();
+    let simple = kept_user.simple().to_string();
+    let every_four = simple
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).expect("hex"))
+        .collect::<Vec<_>>()
+        .join("-");
+
+    /// The row; its `APPROVE`/`REJECT` rule, or its whole edge list; whose
+    /// token drafts; the requested department; what changes on the row alone;
+    /// and whether the raise is refused.
+    enum Edges {
+        Both(Value),
+        Out(Vec<(&'static str, &'static str, Value, Option<Value>)>),
+    }
+    type Row<'a> = (&'a str, Edges, &'a str, Option<Uuid>, Then, bool);
+    use Edges::{Both, Out};
+    use Then::{Creator, Nothing, Requested, UserId};
+    let rows: Vec<Row> = vec![
+        // Status is read by neither.
+        (
+            "USER inactive",
+            Both(user_rule(&asleep_user.to_string())),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "USER locked",
+            Both(user_rule(&locked_user.to_string())),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "OWNER, creator inactive",
+            Both(json!("OWNER")),
+            &asleep_owner_token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "OWNER_DEPARTMENT, department inactive",
+            Both(edge("OWNER_DEPARTMENT")),
+            &asleep_placed_token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "REQUESTED_DEPARTMENT, department inactive",
+            Both(edge("REQUESTED_DEPARTMENT")),
+            &token,
+            Some(asleep_requested),
+            Nothing,
+            false,
+        ),
+        (
+            "a department code, department inactive",
+            Both(edge("TI-765X-ASLEEP")),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        // OWNER_DEPARTMENT follows a deleted creator; OWNER does not.
+        (
+            "OWNER_DEPARTMENT, creator deleted, department live",
+            Both(edge("OWNER_DEPARTMENT")),
+            &gone_placed_token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "OWNER_DEPARTMENT, owner moved out of every department",
+            Both(edge("OWNER_DEPARTMENT")),
+            &moved_out_token,
+            None,
+            Nothing,
+            true,
+        ),
+        (
+            "OWNER_DEPARTMENT, owner moved to another tenant's department",
+            Both(edge("OWNER_DEPARTMENT")),
+            &moved_abroad_token,
+            None,
+            Nothing,
+            true,
+        ),
+        // Tenancy and absence, per document.
+        (
+            "OWNER, no creator recorded",
+            Both(json!("OWNER")),
+            &token,
+            None,
+            Creator(None),
+            true,
+        ),
+        (
+            "OWNER, creator another tenant's user",
+            Both(json!("OWNER")),
+            &token,
+            None,
+            Creator(Some(abroad_user)),
+            true,
+        ),
+        (
+            "REQUESTED_DEPARTMENT, none requested",
+            Both(edge("REQUESTED_DEPARTMENT")),
+            &token,
+            Some(kept_department),
+            Requested(None),
+            true,
+        ),
+        (
+            "REQUESTED_DEPARTMENT, another tenant's department",
+            Both(edge("REQUESTED_DEPARTMENT")),
+            &token,
+            Some(kept_department),
+            Requested(Some(abroad_department)),
+            true,
+        ),
+        (
+            "a department code live only in another tenant",
+            Both(edge("TI-765X-TWIN")),
+            &token,
+            None,
+            Nothing,
+            true,
+        ),
+        (
+            "DEPARTMENT_ROLE, no scope",
+            Both(scoped("TI-765X-EDGE", None)),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "DEPARTMENT_ROLE, live scope, role deleted",
+            Both(scoped("TI-765X-SCOPED-GONE", Some("TI-765X-KEPT"))),
+            &token,
+            None,
+            Nothing,
+            true,
+        ),
+        (
+            "ROLE recreated under the deleted one's code",
+            Both(role("TI-765X-RE")),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        // The spellings of a userId.
+        (
+            "USER, 32 digits",
+            Both(user_rule(&simple)),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "USER, braced",
+            Both(user_rule(&format!("{{{kept}}}"))),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "USER, urn",
+            Both(user_rule(&format!("urn:uuid:{kept}"))),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "USER, upper case",
+            Both(user_rule(&kept.to_uppercase())),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "USER, not a uuid",
+            Both(user_rule(&kept)),
+            &token,
+            None,
+            UserId("\"not-a-uuid\"".to_owned()),
+            true,
+        ),
+        (
+            "USER, a hyphen every four digits",
+            Both(user_rule(&kept)),
+            &token,
+            None,
+            UserId(format!("\"{every_four}\"")),
+            true,
+        ),
+        (
+            "USER, braced 32 digits",
+            Both(user_rule(&kept)),
+            &token,
+            None,
+            UserId(format!("\"{{{simple}}}\"")),
+            true,
+        ),
+        (
+            "USER, a number",
+            Both(user_rule(&kept)),
+            &token,
+            None,
+            UserId("12345".to_owned()),
+            true,
+        ),
+        (
+            "USER, another tenant's user",
+            Both(user_rule(&kept)),
+            &token,
+            None,
+            UserId(format!("\"{abroad_user}\"")),
+            true,
+        ),
+        // Every decision edge counts, whatever its action or condition.
+        (
+            "only a RETURN edge resolves",
+            Out(vec![
+                ("COMPLETED", "APPROVE", user_rule(&gone), None),
+                ("REJECTED", "REJECT", user_rule(&gone), None),
+                ("RETURNED", "RETURN", role("TI-765X-EDGE"), None),
+            ]),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+        (
+            "a RETURN edge too, none resolving",
+            Out(vec![
+                ("COMPLETED", "APPROVE", user_rule(&gone), None),
+                ("REJECTED", "REJECT", user_rule(&gone), None),
+                ("RETURNED", "RETURN", user_rule(&gone), None),
+            ]),
+            &token,
+            None,
+            Nothing,
+            true,
+        ),
+        (
+            "only a conditioned edge resolves, its condition false",
+            Out(vec![
+                (
+                    "REJECTED",
+                    "APPROVE",
+                    role("TI-765X-EDGE"),
+                    Some(json!({ "==": [1, 2] })),
+                ),
+                ("COMPLETED", "APPROVE", user_rule(&gone), None),
+                ("REJECTED", "REJECT", user_rule(&gone), None),
+            ]),
+            &token,
+            None,
+            Nothing,
+            false,
+        ),
+    ];
+
+    let mut cases = Vec::new();
+    for (index, (row, edges, drafter, requested, then, refused)) in rows.into_iter().enumerate() {
+        let key = format!("ti_765x_{index}");
+        let definition = match edges {
+            Both(rule) => two_edge_workflow(&key, RAISE_QUEUE, rule.clone(), rule),
+            Out(edges) => edges_out(&key, edges),
+        };
+        let workflow = publish_workflow_definition(&app, &token, &key, definition).await;
+        let type_id = document_type(&app, &token, &key.to_uppercase(), workflow).await;
+
+        let claimed = draft_requested(&app, drafter, type_id, &key, requested).await;
+        let fresh = draft_requested(&app, drafter, type_id, &key, requested).await;
+        let submitted = submit_of(&app, &token, claimed).await;
+        assert_eq!(
+            submitted.status,
+            StatusCode::OK,
+            "{row}: {}",
+            submitted.body
+        );
+        let task = open_task_of(&app, claimed).await;
+        claim(&app, &holder, task).await;
+
+        for document in [claimed, fresh] {
+            let statement = match &then {
+                Nothing | UserId(_) => continue,
+                Creator(creator) => {
+                    sqlx::query("UPDATE documents SET created_by = $1 WHERE id = $2").bind(*creator)
+                }
+                Requested(department) => sqlx::query(
+                    "UPDATE documents SET requested_for_department_id = $1 WHERE id = $2",
+                )
+                .bind(*department),
+            };
+            statement
+                .bind(document)
+                .execute(&app.pool)
+                .await
+                .expect("change the document");
+        }
+        if let UserId(user_id) = &then {
+            set_edge_user_ids(&app, task, Some(user_id)).await;
+        }
+
+        cases.push((row, task, fresh, refused));
+    }
+
+    for user in [asleep_user, asleep_owner] {
+        set_user_status(&app, user, "INACTIVE").await;
+    }
+    set_user_status(&app, locked_user, "LOCKED").await;
+    for user in [gone_user, gone_placed] {
+        sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+            .bind(user)
+            .execute(&app.pool)
+            .await
+            .expect("delete the user");
+    }
+    place_user_in(&app, moved_out, None).await;
+    place_user_in(&app, moved_abroad, Some(abroad_department)).await;
+    for department in [asleep_requested, asleep_code, asleep_owner_department] {
+        set_department_status(&app, department, "INACTIVE").await;
+    }
+    soft_delete_department(&app, twin).await;
+    soft_delete_role(&app, doomed_role).await;
+    soft_delete_role(&app, recreated).await;
+    bare_role(&app, "TI-765X-RE").await;
+
+    let page = inbox_of(&app, &holder, "scope=open&pageSize=100").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    let listed = ids_in(&page.body["data"]);
+
+    let mut disagreements = Vec::new();
+    for (row, task, fresh, expected) in cases {
+        let hidden = !listed.contains(&task);
+        if is_visible_to(&app, holder_id, task).await == hidden {
+            disagreements.push(format!("{row}: the gate and the inbox disagree"));
+        }
+        let decidable = can_be_decided(&app.pool, fixtures::SYSTEM_TENANT_ID, task)
+            .await
+            .expect("ask the clause");
+        if decidable == hidden {
+            disagreements.push(format!("{row}: can_be_decided and the inbox disagree"));
+        }
+
+        let raised = submit_of(&app, &token, fresh).await;
+        let refused = raised.status == StatusCode::UNPROCESSABLE_ENTITY
+            && raised.body.to_string().contains("ASSIGNMENT_UNRESOLVED");
+        if refused {
+            assert!(
+                instance_of_document(&app, fresh).await.is_none(),
+                "{row}: a refused raise left an instance"
+            );
+        } else {
+            assert_eq!(
+                raised.status,
+                StatusCode::OK,
+                "{row}: neither raised nor refused for its edges: {}",
+                raised.body
+            );
+            let raised_task = open_task_of(&app, fresh).await;
+            let kept = can_be_decided(&app.pool, fixtures::SYSTEM_TENANT_ID, raised_task)
+                .await
+                .expect("ask the clause");
+            if !kept {
+                disagreements.push(format!("{row}: raised a task the clause hides"));
+            }
+        }
+
+        if refused != hidden {
+            disagreements.push(format!(
+                "{row}: the raise refused {refused}, the claimed task hidden {hidden}"
+            ));
+        }
+        if refused != expected {
+            disagreements.push(format!(
+                "{row}: expected the raise refused {expected}, it was {refused}: {}",
+                raised.body
             ));
         }
     }
