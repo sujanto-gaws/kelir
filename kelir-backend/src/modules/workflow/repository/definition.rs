@@ -629,12 +629,13 @@ pub async fn has_live_instances<'e, E: PgExecutor<'e>>(
 ///
 /// **Every caller passes an id it read from a row already scoped to that
 /// tenant** — an instance row, or the document type's workflow binding. There
-/// are five, and there were five when the comment here said there was one:
+/// were five when the comment here said there was one, and there are six:
 /// [`super::super::service::engine`], [`super::super::service::task`],
-/// [`super::super::service::inbox`], [`super::super::service::instance`], and
-/// `document::service::submit`. A count is the wrong thing to write down,
-/// because it goes stale the first time somebody adds a caller and reads no
-/// further than the signature — which is exactly what happened.
+/// [`super::super::service::inbox`], [`super::super::service::instance`],
+/// [`super::super::service::after_hooks`] and `document::service::submit`. A
+/// count is the wrong thing to write down, because it goes stale the first
+/// time somebody adds a caller and reads no further than the signature — which
+/// is exactly what happened, twice.
 ///
 /// So the property is checked here instead of promised here.
 ///
@@ -643,14 +644,25 @@ pub async fn has_live_instances<'e, E: PgExecutor<'e>>(
 /// **`WHERE id = $1 AND tenant_id = $2` would be worse**, and the original
 /// reasoning for the unscoped read is why: a definition linked from another
 /// tenant's row is a broken link, and a scoped `WHERE` turns it into *no row* —
-/// indistinguishable from a definition that was never there, which the engine
-/// reports as a binding to something that does not exist. The link is fetched,
-/// the mismatch is named in the log with both tenants, and only then does the
-/// answer become `None`. The outcome is the same and the diagnosis is not.
+/// indistinguishable from a definition that was never there. The link is
+/// fetched, the mismatch is named in the log with both ends, and the answer
+/// says which of the three it found: [`DefinitionOfInstance::Loaded`],
+/// [`DefinitionOfInstance::InAnotherTenant`] or [`DefinitionOfInstance::Absent`]
+/// ([#774]). Nothing of another tenant's row leaves this function.
 ///
-/// It cannot happen today: `workflow_definitions.id` is a foreign key from rows
-/// that were themselves written under a tenant. This is what makes that
-/// stay true rather than remain true by nobody having broken it.
+/// **What each caller does with the two misses is its own.** `engine::start`
+/// refuses both as one 422, `WORKFLOW_NOT_FOUND`, because the id came from the
+/// type's binding and the binding is what an administrator changes; the same
+/// text for both, so the answer tells nobody what exists elsewhere. Every other
+/// caller reads an instance's revision, takes
+/// [`DefinitionOfInstance::into_loaded`], and treats either miss as it treated
+/// `None` before: an internal error on a write path, a state shown by its code
+/// on a read path.
+///
+/// No route writes such a link: a binding is checked in the caller's tenant
+/// when it is written, and an instance pins the revision its start loaded.
+/// Only a row written directly can, which is what makes this stay true rather
+/// than remain true by nobody having broken it.
 ///
 /// # What was considered and not done
 ///
@@ -671,11 +683,12 @@ pub async fn has_live_instances<'e, E: PgExecutor<'e>>(
 /// is.
 ///
 /// [#260]: https://github.com/sujanto-gaws/kelir/issues/260
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
 pub async fn definition_of_instance<'e, E: PgExecutor<'e>>(
     executor: E,
     tenant_id: Uuid,
     workflow_definition_id: Uuid,
-) -> Result<Option<ExecutableDefinition>, sqlx::Error> {
+) -> Result<DefinitionOfInstance, sqlx::Error> {
     let row = sqlx::query!(
         r#"
         SELECT definition_json, workflow_key, version, name, status,
@@ -690,12 +703,12 @@ pub async fn definition_of_instance<'e, E: PgExecutor<'e>>(
     .await?;
 
     let Some(row) = row else {
-        return Ok(None);
+        return Ok(DefinitionOfInstance::Absent);
     };
 
     if !row.in_tenant {
-        // Loud, and with both ends of the broken link, because the caller
-        // cannot tell this from a missing definition and will report it as one.
+        // Loud, and with both ends of the broken link: the caller is told only
+        // that the definition is another tenant's, and none of the row.
         tracing::error!(
             workflow_definition_id = %workflow_definition_id,
             tenant_id = %tenant_id,
@@ -703,16 +716,41 @@ pub async fn definition_of_instance<'e, E: PgExecutor<'e>>(
              the definition was not loaded"
         );
 
-        return Ok(None);
+        return Ok(DefinitionOfInstance::InAnotherTenant);
     }
 
-    Ok(Some(ExecutableDefinition {
+    Ok(DefinitionOfInstance::Loaded(ExecutableDefinition {
         definition_json: row.definition_json,
         workflow_key: row.workflow_key,
         version: row.version,
         name: row.name,
         status: row.status,
     }))
+}
+
+/// What [`definition_of_instance`] found for an id ([#774]).
+///
+/// [#774]: https://github.com/sujanto-gaws/kelir/issues/774
+pub enum DefinitionOfInstance {
+    /// The definition, filed under the caller's tenant. Deleted and deprecated
+    /// revisions are loaded too: the read has no `deleted_at` or status filter.
+    Loaded(ExecutableDefinition),
+    /// A definition with this id exists and is another tenant's. Nothing of it
+    /// is carried.
+    InAnotherTenant,
+    /// No definition has this id.
+    Absent,
+}
+
+impl DefinitionOfInstance {
+    /// The definition if it was loaded, and `None` for either miss — what this
+    /// function answered before it told them apart.
+    pub fn into_loaded(self) -> Option<ExecutableDefinition> {
+        match self {
+            Self::Loaded(definition) => Some(definition),
+            Self::InAnotherTenant | Self::Absent => None,
+        }
+    }
 }
 
 /// A definition as the engine executes it.

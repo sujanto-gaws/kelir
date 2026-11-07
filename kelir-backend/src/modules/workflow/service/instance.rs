@@ -100,6 +100,7 @@ async fn load_instance(
     let state_name =
         definition_repo::definition_of_instance(&state.pool, tenant_id, row.workflow_definition_id)
             .await?
+            .into_loaded()
             .map(|definition| Graph::parse(&definition.definition_json, definition.version))
             .and_then(|graph| {
                 graph

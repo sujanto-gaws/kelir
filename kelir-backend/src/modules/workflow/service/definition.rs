@@ -56,6 +56,9 @@
 //!   nothing. The administrator rebinds the type; a binding that names a
 //!   deprecated revision is refused as `NOT_PUBLISHED`
 //!   (`document_type::service::check_workflow_bindings`).
+//!   `WORKFLOW_NOT_PUBLISHED` always names a revision of the caller's own
+//!   tenant: a binding to another tenant's revision, or to none, is refused as
+//!   `WORKFLOW_NOT_FOUND` before its status is read ([#774]).
 //! * **A role it names stops being held by it** once its running approvals
 //!   finish (`repo::definitions_naming_role`, **D-91** (3)).
 //!
@@ -97,6 +100,7 @@
 //! [#573]: https://github.com/sujanto-gaws/kelir/issues/573
 //! [#613]: https://github.com/sujanto-gaws/kelir/issues/613
 //! [#712]: https://github.com/sujanto-gaws/kelir/issues/712
+//! [#774]: https://github.com/sujanto-gaws/kelir/issues/774
 //! [#785]: https://github.com/sujanto-gaws/kelir/issues/785
 
 use std::collections::BTreeSet;

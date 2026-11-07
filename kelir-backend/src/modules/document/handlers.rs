@@ -165,7 +165,7 @@ async fn delete_document(
         (status = 403, description = "Missing document:submit"),
         (status = 404, description = "No such document"),
         (status = 409, description = "The document is not a draft or a returned document, or its workflow changed while it was being submitted"),
-        (status = 422, description = "The form data does not satisfy its definition, or the type has no numbering rule")
+        (status = 422, description = "The form data does not satisfy its definition, the type has no numbering rule, or its selected workflow binding cannot start an approval: WORKFLOW_NOT_PUBLISHED at documentTypeId for a deleted or deprecated revision of the tenant, WORKFLOW_NOT_FOUND there for one of another tenant or none (#774)")
     ),
     security(("bearer" = []))
 )]

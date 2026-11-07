@@ -467,6 +467,7 @@ pub async fn get_task(
         instance.workflow_definition_id,
     )
     .await?
+    .into_loaded()
     .map(|definition| Graph::parse(&definition.definition_json, definition.version));
 
     let (current_state_name, decisions) = match &graph {

@@ -115,7 +115,7 @@ pub async fn deliver(
         instance.workflow_definition_id,
     )
     .await?
-    else {
+    .into_loaded() else {
         return Ok(Delivery::Delivered);
     };
 

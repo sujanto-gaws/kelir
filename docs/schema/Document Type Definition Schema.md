@@ -2,7 +2,7 @@
 **Version:** 1.0.0
 **Status:** Draft Standard
 **Target Stack:** Rust (Document Type Service), Vue.js (Document Type Builder)
-**Last updated:** 2026-10-21
+**Last updated:** 2026-11-07
 
 ---
 
@@ -15,7 +15,7 @@ Like the Party aggregate (architectures/05), the DTDS document is an **exchange 
 ### 1.1 Core Philosophy
 
 - **Configuration Is the Application:** A complete business application (form + list + numbering + workflow + attachments + hooks) is one DTDS document. Creating a new document-based application means authoring one of these, not writing code.
-- **Bind by Key, Pin at Use:** The aggregate references forms, lists, and workflows by their stable keys. Revision pinning happens at runtime — a document pins its form revision at creation; workflow selection resolves to the latest `ACTIVE` workflow revision at submit time. *Kelir note (2026-10-10):* Kelir binds a specific workflow revision id rather than the key, and refuses a submission whose selected binding names a `DEPRECATED` revision with `WORKFLOW_NOT_PUBLISHED`, without trying the next rule (§4; [JWSS](JSON%20Workflow%20Schema.md) §9, [#573](https://github.com/sujanto-gaws/kelir/issues/573)).
+- **Bind by Key, Pin at Use:** The aggregate references forms, lists, and workflows by their stable keys. Revision pinning happens at runtime — a document pins its form revision at creation; workflow selection resolves to the latest `ACTIVE` workflow revision at submit time. *Kelir note (2026-10-10):* Kelir binds a specific workflow revision id rather than the key, and refuses a submission whose selected binding names a `DEPRECATED` revision with `WORKFLOW_NOT_PUBLISHED`, without trying the next rule (§4; [JWSS](JSON%20Workflow%20Schema.md) §9, [#573](https://github.com/sujanto-gaws/kelir/issues/573)). *Kelir note (2026-11-07):* a selected binding whose revision id is not a workflow definition of the type's own tenant, another tenant's or none at all, is refused at submit with `WORKFLOW_NOT_FOUND`, one text for both that quotes the bound id and nothing else ([#774](https://github.com/sujanto-gaws/kelir/issues/774)).
 - **One Condition Language:** All conditions (`workflowSelectionRules[].condition`, `attachmentRules[].requiredIf`) are JSON Logic restricted to ~~the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)~~ the [JFSS Calculation Rule Registry](JFSS%20Calculation%20Rule%20Registry.md)'s **§2.5 conditional tier** (S6; corrected 2026-10-09), evaluated against the same context as JWSS conditions. String expressions in older examples are superseded.
 - **Hooks, Not Switches:** Behavior beyond configuration attaches through Hook Registration Entries ([Lifecycle Hook Contract](Lifecycle%20Hook%20Contract.md) §3) in the document-type priority band.
 
@@ -96,7 +96,7 @@ Evaluated at submit by the `before_workflow_select` stage: ascending `priority`,
 
 | Property | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `workflowKey` | `string` | Yes | JWSS `workflowKey`. Resolves to the latest `ACTIVE` revision at submit time. *Kelir note (2026-10-10):* Kelir binds a specific revision id, not the key (`document_type_workflows.workflow_definition_id`, [Database Schema](../design/02.%20Database%20Schema.md) §6.4), so nothing resolves at submit. A binding to a `DEPRECATED` revision is refused at submit with `WORKFLOW_NOT_PUBLISHED`, and the next rule is not tried ([JWSS](JSON%20Workflow%20Schema.md) §9, [#573](https://github.com/sujanto-gaws/kelir/issues/573)). |
+| `workflowKey` | `string` | Yes | JWSS `workflowKey`. Resolves to the latest `ACTIVE` revision at submit time. *Kelir note (2026-10-10):* Kelir binds a specific revision id, not the key (`document_type_workflows.workflow_definition_id`, [Database Schema](../design/02.%20Database%20Schema.md) §6.4), so nothing resolves at submit. A binding to a `DEPRECATED` revision is refused at submit with `WORKFLOW_NOT_PUBLISHED`, and the next rule is not tried ([JWSS](JSON%20Workflow%20Schema.md) §9, [#573](https://github.com/sujanto-gaws/kelir/issues/573)). A binding to a revision id that is not this tenant's workflow definition, another tenant's or none, is refused at submit with `WORKFLOW_NOT_FOUND` (added 2026-11-07, [#774](https://github.com/sujanto-gaws/kelir/issues/774)). |
 | `condition` | `object` | No | JSON Logic over the condition context (JWSS §6.1). Absent = fallback rule. |
 | `priority` | `integer` | No (default `100`) | Lower evaluated first. |
 
@@ -238,6 +238,7 @@ This specification is a **`Draft Standard`** ([naming convention](../standards/0
 | Revision | Date | Change |
 | :--- | :--- | :--- |
 | **R-1** | 2026-10-21 | **§4's, §5's and §9's examples read the amount as `formData.amount`, not `document.amount`** — [#706](https://github.com/sujanto-gaws/kelir/issues/706), **D-115** B. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. The examples follow the condition context these conditions share with JWSS (§1.1), and [JWSS](JSON%20Workflow%20Schema.md) §6.1 drops `document.amount` in its R-17: a document has no amount of its own, so a condition wanting one reads the form. Nothing in Kelir evaluates a `workflowSelectionRules[].condition` or a `requiredIf` today, so no behaviour changes. |
+| **R-2** | 2026-11-07 | **§1's and §4's Kelir notes say a binding naming no workflow definition of the type's tenant is refused at submit** — [#774](https://github.com/sujanto-gaws/kelir/issues/774), construction plan 21 row 30. **No change to the shape**: no property is added, removed or re-typed, and the meta-schema is untouched. Kelir binds a revision id, which only a row written directly can point at another tenant's revision or at none; a submit selecting such a binding answered 500, and now answers 422 `WORKFLOW_NOT_FOUND` at `documentTypeId`, writing nothing. Which binding is selected is unchanged. |
 
 ---
 

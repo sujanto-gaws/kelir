@@ -630,6 +630,7 @@ async fn resubmit_workflow(
         instance.workflow_definition_id,
     )
     .await?
+    .into_loaded()
     .ok_or_else(|| AppError::Internal {
         source: anyhow::anyhow!(
             "instance {instance_id} runs definition {} which does not exist",
