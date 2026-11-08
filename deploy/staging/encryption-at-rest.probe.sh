@@ -29,6 +29,21 @@
 #     --network <project>_default -e KELIR_BACKUP_NETWORK=<project>_default ... \
 #     <that image> /work/deploy/staging/encryption-at-rest.probe.sh objects <marker>
 #
+# **Or on a disposable CI runner, which is not the host it protects** (#807;
+# the product owner, 2026-11-08). The backend job in `.github/workflows/ci.yml`
+# runs `deploy` and `backup` on GitHub's hosted runner: a virtual machine made
+# for one job and destroyed after it, holding no Kelir data, no store key and
+# no backup identity but the throwaway ones the job makes. What the rule above
+# guards against, the probe's root, its trace and its scratch databases and
+# stores touching a host with something to lose, cannot happen there. The
+# backup runs as root in the container above, `postgres:16` with the tools
+# installed, so its client matches the job's PostgreSQL 16 service (the
+# runner's own `pg_dump` is newer, and its `pg_restore` sends a setting 16
+# refuses). It runs against a database and a keyed MinIO of the job's own,
+# seeded first by `encryption-at-rest.seed.sh`, because over an empty
+# database and bucket every comparison here passes with encryption off.
+# `objects` is not run in CI: it reads MinIO's data volume from outside MinIO.
+#
 # Settings:
 #   KELIR_PROBE_ENV_FILE      the stack's .env, for MinIO's pair (objects, backup)
 #   KELIR_BACKUP_NETWORK      the stack's network (objects, backup)
@@ -164,8 +179,20 @@ count_rows() { psql -tA -d "$1" -c "SELECT (SELECT count(*) FROM documents) || '
 # is left out. A write whose file strace could not name is listed as one
 # nobody can vouch for: without CAP_SYS_PTRACE that is every write `pg_dump`
 # makes once it is `postgres`, and the check fails rather than pass blind.
+#
+# **A kernel-side copy is judged by where it lands** (#807). `splice`,
+# `tee`, `sendfile` and `copy_file_range` move bytes strace does not show, and
+# coreutils 9 uses them: on ubuntu-26.04, `tee` splices the store half into
+# kelir-backup's counting FIFO and `wc -c` splices it out to /dev/null. So the
+# destination descriptor is read (the third argument of `splice` and
+# `copy_file_range`, the second of `tee`, the first of `sendfile`). Into a
+# pipe, a socket, /dev, /proc, /sys or a FIFO the run made, it is not the
+# disk and is left out. Into a regular file, it is listed as a write whose
+# bytes nobody saw, which fails; so is one whose destination strace did not
+# name.
 first_writes() {
     awk '
+        function entry(path, first) { order[++n] = path; bytes[n] = first }
         match($0, /mknod(at)?\([^"]*"[^"]+", S_IFIFO/) {
             path = substr($0, RSTART, RLENGTH)
             sub(/^[^"]*"/, "", path)
@@ -180,18 +207,29 @@ first_writes() {
             sub(/>, .*$/, "", path)
             if (path ~ /^\/(dev|proc|sys)\// || path in seen) next
             seen[path] = 1
-            order[++n] = path
-            bytes[path] = substr($0, RSTART + RLENGTH, 40)
+            entry(path, substr($0, RSTART + RLENGTH, 40))
         }
-        /^[0-9]+ +(copy_file_range|sendfile|splice|tee)\(.*<\// { order[++n] = "unread:" $0 }
+        match($0, /^[0-9]+ +(copy_file_range|sendfile|splice|tee)\(/) {
+            call = substr($0, RSTART, RLENGTH)
+            sub(/^[0-9]+ +/, "", call)
+            sub(/\($/, "", call)
+            split(substr($0, RSTART + RLENGTH), argument, ", ")
+            out = argument[(call == "sendfile") ? 1 : (call == "tee") ? 2 : 3]
+            if (out !~ /^[0-9]+<[^>]*>$/) { entry("unread:" $0, ""); next }
+            path = out
+            sub(/^[0-9]+</, "", path)
+            sub(/>$/, "", path)
+            if (path !~ /^\// || path ~ /^\/(dev|proc|sys)\//) next
+            entry(path, "(" call ": bytes not traced)")
+        }
         match($0, /^[0-9]+ +(write|pwrite64|writev)\([0-9]+, /) {
             call = substr($0, 1, RLENGTH - 2)
             gsub(/ +/, " ", call)
-            if (!(call in unnamed)) { unnamed[call] = 1; order[++n] = "a write strace could not name, by pid " call }
+            if (!(call in unnamed)) { unnamed[call] = 1; entry("a write strace could not name, by pid " call, "") }
         }
         END {
             for (i = 1; i <= n; i++) {
-                if (!(order[i] in fifo)) printf "%s\t%s\n", order[i], bytes[order[i]]
+                if (!(order[i] in fifo)) printf "%s\t%s\n", order[i], bytes[i]
             }
         }' "$1"
 }

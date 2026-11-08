@@ -16,6 +16,7 @@ deploy/
     ├── kelir-backup.sh          the encrypted backup pair: database and object store
     ├── kelir-restore-objects.sh writes a store archive back into an object store
     ├── encryption-at-rest.probe.sh  reads the store and the archives raw (#778)
+    ├── encryption-at-rest.seed.sh   seeds a scratch database and store for the probe's backup mode (#807)
     ├── deploy.sh                deploy a version to a hostname, over TLS
     ├── deploy-local.sh          deploy to http://<host-ip>:<port> for testing
     ├── docker-compose.staging.yml
