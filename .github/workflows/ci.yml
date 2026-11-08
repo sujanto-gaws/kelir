@@ -202,6 +202,145 @@ jobs:
              && mc mb --ignore-existing ci/kelir-test \
              && mc encrypt set sse-s3 ci/kelir-test"
 
+      # **Encryption at rest is probed here, not only by hand** (#807, plan 21
+      # row 41). `deploy/staging/encryption-at-rest.probe.sh` was written for a
+      # Linux container and run by hand before a release; these five steps run
+      # its `deploy` and `backup` modes on every push. Its `objects` mode reads
+      # MinIO's data volume from outside MinIO and is not run here. The
+      # product owner allowed a disposable runner as the probe's host
+      # (2026-11-08); the probe's header says why that is not the host it
+      # protects.
+      #
+      # **Before the cargo steps, deliberately**: they take about forty
+      # minutes, and a mutant of the backup scripts should be seen red in two.
+      # Each step names what it runs and prints what it ran with, so a red run
+      # on a runner image nobody has tried says which fact was wrong.
+      - name: Install the encryption probe's tools
+        working-directory: .
+        # `age` and `strace` from Ubuntu's archive, after the narrowing the
+        # browser job uses (#408): a third-party source refusing an update
+        # must not hold this job shut either. `jq`, `psql`, `pg_dump`,
+        # `pg_restore`, `runuser` and `ps` come with the runner image, and the
+        # step says where each was found rather than assuming it.
+        run: |
+          set -euo pipefail
+          sudo "${GITHUB_WORKSPACE}/scripts/narrow-apt-to-ubuntu.sh"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age strace
+          for tool in age age-keygen jq strace psql pg_dump pg_restore runuser ps docker; do
+            path="$(command -v "${tool}")" || { echo "::error::${tool} is not on this runner"; exit 1; }
+            echo "${tool}: ${path} ($(dpkg -S "$(readlink -f "${path}")" 2>/dev/null | cut -d: -f1 || echo 'no package'))"
+          done
+          age --version
+          jq --version
+          strace -V | head -1
+          pg_dump --version
+          psql "${DATABASE_URL}" -tA -c 'SHOW server_version'
+          # The staging host's PostgreSQL package makes this user, and the
+          # backup runs `pg_dump` as it. Made here only if the image lacks it,
+          # and said so.
+          id postgres || { echo "::notice::no postgres OS user on this image; adding one"; sudo useradd --system --no-create-home postgres; id postgres; }
+          # The probe's trace needs ptrace as root, across `runuser`. Asked
+          # here once, so a refusal names itself before the probe starts.
+          sudo strace -f -qq -o /dev/null runuser -u postgres -- true
+          echo "strace traces through runuser as root"
+
+      - name: Probe deploy.sh's refusals (encryption at rest, deploy mode)
+        working-directory: .
+        # On stubs: no compose, no stack, no database. `docker`, `systemctl`,
+        # `sudo`, `curl`, `runuser` and `pg_dump` are the probe's own scripts.
+        run: ./deploy/staging/encryption-at-rest.probe.sh deploy
+
+      - name: Start the probe's keyed object storage
+        working-directory: .
+        # **A second MinIO, and not the one above**: `kelir-backup` reaches
+        # its store as `http://minio:9000` from an `mc` container on a named
+        # Docker network, and the probe starts its scratch store on that
+        # network by name. The store above is on the host's network, which
+        # has neither. So: a user-defined bridge, this store aliased `minio`
+        # on it, a bucket `kelir` encrypting by default, as `minio-init` makes
+        # it (`minio_init_scripts_agree.rs` holds this step to that script).
+        #
+        # **A key and a pair made for this run, never the development key**,
+        # so a backup that reads the wrong store cannot pass on a key the
+        # whole repository knows. The pair is kept in `$RUNNER_TEMP`, mode
+        # 600, and the password is masked in the log. **The images are
+        # read from the staging compose file**, as `kelir-backup` reads its
+        # `mc`, so a bump there is a bump here (**D-62**, **D-92**).
+        run: |
+          set -euo pipefail
+          compose=deploy/staging/docker-compose.staging.yml
+          minio_image="$(grep -oE 'ghcr\.io/sujanto-gaws/minio:[^[:space:]]+' "${compose}" | head -1)"
+          mc_image="$(grep -oE 'ghcr\.io/sujanto-gaws/mc:[^[:space:]]+' "${compose}" | head -1)"
+          [[ -n "${minio_image}" && -n "${mc_image}" ]] || { echo "::error::no pinned minio or mc image in ${compose}"; exit 1; }
+          echo "minio: ${minio_image}"
+          echo "mc:    ${mc_image}"
+
+          export MINIO_ROOT_USER=kelir-ci-probe
+          export MINIO_ROOT_PASSWORD="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          export MINIO_KMS_SECRET_KEY="kelir-ci-probe:$(head -c 32 /dev/urandom | base64)"
+          echo "::add-mask::${MINIO_ROOT_PASSWORD}"
+          env_file="${RUNNER_TEMP}/kelir-probe.env"
+          printf 'KELIR_MINIO_USER=%s\nKELIR_MINIO_PASSWORD=%s\n' "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" > "${env_file}"
+          chmod 600 "${env_file}"
+
+          docker network create kelir-probe
+          docker run -d --name kelir-probe-minio --network kelir-probe --network-alias minio \
+            -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD -e MINIO_KMS_SECRET_KEY \
+            "${minio_image}" server /data
+          export MC_HOST_kelir="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000"
+          docker run --rm --network kelir-probe -e MC_HOST_kelir --entrypoint bash "${mc_image}" -c '
+            set -euo pipefail
+            for attempt in $(seq 1 60); do mc ls kelir > /dev/null 2>&1 && break; sleep 1; done
+            mc mb --ignore-existing kelir/kelir
+            mc encrypt set sse-s3 kelir/kelir
+            mc encrypt info --json kelir/kelir'
+
+          {
+            echo "KELIR_BACKUP_NETWORK=kelir-probe"
+            echo "KELIR_BACKUP_MC_IMAGE=${mc_image}"
+            echo "KELIR_PROBE_MINIO_IMAGE=${minio_image}"
+            echo "KELIR_PROBE_ENV_FILE=${env_file}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Seed the probe's database and store
+        working-directory: .
+        # **A database of its own**, `kelir_probe`, migrated as the job's is,
+        # so the rows the probe needs never meet the integration tests. The
+        # seed script stores an object carrying the marker and the rows that
+        # name it, then reads both back; the probe compares, and over nothing
+        # it would compare nothing (AC-41-4).
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: kelir
+          PGPASSWORD: kelir
+          KELIR_DB_NAME: kelir_probe
+          KELIR_PROBE_MARKER: KELIR-PROBE-MARKER-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          psql -X -v ON_ERROR_STOP=1 -q -d postgres -c 'CREATE DATABASE kelir_probe'
+          for migration in kelir-backend/migrations/*.sql; do
+            psql -X -v ON_ERROR_STOP=1 -q -d kelir_probe -f "${migration}"
+          done
+          ./deploy/staging/encryption-at-rest.seed.sh "${KELIR_PROBE_MARKER}"
+
+      - name: Probe the backup (encryption at rest, backup mode)
+        working-directory: .
+        # **As root, because the unit runs it as root** and the probe checks
+        # root's 700 and 600. `sudo -E` keeps the settings above; `pg_dump`
+        # runs as the runner image's `postgres` OS user, through `runuser`, as
+        # on the staging host. `strace` traces as root, so it can name the
+        # file each write lands in once `pg_dump` is `postgres`.
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: kelir
+          PGPASSWORD: kelir
+          KELIR_DB_NAME: kelir_probe
+          KELIR_PROBE_MARKER: KELIR-PROBE-MARKER-${{ github.run_id }}-${{ github.run_attempt }}
+        run: sudo -E ./deploy/staging/encryption-at-rest.probe.sh backup "${KELIR_PROBE_MARKER}"
+
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
 

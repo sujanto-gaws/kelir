@@ -29,6 +29,18 @@
 #     --network <project>_default -e KELIR_BACKUP_NETWORK=<project>_default ... \
 #     <that image> /work/deploy/staging/encryption-at-rest.probe.sh objects <marker>
 #
+# **Or on a disposable CI runner, which is not the host it protects** (#807;
+# the product owner, 2026-11-08). The backend job in `.github/workflows/ci.yml`
+# runs `deploy` and `backup` on GitHub's hosted runner: a virtual machine made
+# for one job and destroyed after it, holding no Kelir data, no store key and
+# no backup identity but the throwaway ones the job makes. What the rule above
+# guards against, the probe's root, its trace and its scratch databases and
+# stores touching a host with something to lose, cannot happen there. The
+# backup runs under `sudo -E`, against a database and a keyed MinIO of the
+# job's own, seeded first by `encryption-at-rest.seed.sh`, because over an
+# empty database and bucket every comparison here passes with encryption off.
+# `objects` is not run in CI: it reads MinIO's data volume from outside MinIO.
+#
 # Settings:
 #   KELIR_PROBE_ENV_FILE      the stack's .env, for MinIO's pair (objects, backup)
 #   KELIR_BACKUP_NETWORK      the stack's network (objects, backup)
