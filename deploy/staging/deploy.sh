@@ -272,6 +272,8 @@ generate_store_key="printf 'kelir-store:%s\\n' \"\$(openssl rand -base64 32)\""
 
 [[ -n "${store_key}" ]] \
     || die "KELIR_MINIO_KMS_SECRET_KEY is empty in .env; generate one with: ${generate_store_key}"
+[[ "${store_key}" != 'kelir-development:w7GPk50m0UH2qkpB+MZbHBZD4Tcd0+nwJx3VzoopMkk=' ]] \
+    || die "KELIR_MINIO_KMS_SECRET_KEY is the published development key; generate one with: ${generate_store_key}"
 [[ "${store_key}" =~ ^[A-Za-z0-9_-]+:[A-Za-z0-9+/]{43}=$ ]] \
     || die "KELIR_MINIO_KMS_SECRET_KEY is not a generated key (<name>:<32 bytes in base64>); generate one with: ${generate_store_key}"
 

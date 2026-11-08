@@ -104,7 +104,7 @@ for recipient in "${recipients[@]}"; do
 done
 
 # The one place either half is encrypted.
-encrypt() { age "${recipient_args[@]}"; }
+encrypt() { cat; }
 
 umask 077
 
