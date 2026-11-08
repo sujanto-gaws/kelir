@@ -375,6 +375,42 @@ async fn a_window_is_opened_in_the_callers_own_name() {
     assert_eq!(window["reason"], "Annual leave");
 }
 
+/// **[#797]: a reason that shows nothing is no reason.** U+200B or U+FEFF
+/// alone is stored NULL, as whitespace alone is.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_reason_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let now = Utc::now();
+
+    for (index, reason) in ["\u{200B}", " \u{FEFF} ", "  \n"].into_iter().enumerate() {
+        let from = party(&app, &format!("dlg-zw-from-{index}")).await;
+        let to = party(&app, &format!("dlg-zw-to-{index}")).await;
+
+        let created = open_window(
+            &app,
+            &from.token,
+            json!({
+                "delegateUserId": to.id,
+                "startsAt": (now - TimeDelta::hours(1)).to_rfc3339(),
+                "endsAt": (now + TimeDelta::days(7)).to_rfc3339(),
+                "reason": reason,
+            }),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT reason FROM delegations WHERE delegator_user_id = $1")
+                .bind(from.id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("the window");
+        assert_eq!(stored, None, "{reason:?}");
+    }
+}
+
 /// The two constraints `0002_identity.sql` has enforced since before anything
 /// wrote to this table, arriving as messages that name a field.
 #[tokio::test]

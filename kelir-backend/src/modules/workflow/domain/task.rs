@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use super::graph::TransitionAction;
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::non_blank;
 
 /// Where a task is in its own life (§7.6's `CHECK`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -198,7 +199,8 @@ pub struct DecisionRequest {
 /// Two normalizations, and each has a consequence rather than a tidiness
 /// motive:
 ///
-/// * **Trimmed, and whitespace becomes absent.** `"   "` is not a reason, and a
+/// * **Trimmed, and blank becomes absent.** `"   "` is not a reason, nor is
+///   U+200B alone (blank is `is_blank_text`, #797), and a
 ///   client that sends one has an empty box on the screen. Storing it would
 ///   satisfy a `requiresComment` edge with nothing, which is the requirement
 ///   defeated by a space bar.
@@ -210,11 +212,11 @@ pub fn normalize_comment(comment: Option<String>) -> Result<Option<String>, AppE
         return Ok(None);
     };
 
-    let trimmed = comment.trim();
-
-    if trimmed.is_empty() {
+    // Blank is `is_blank_text` (#797): a comment of U+200B alone is absent,
+    // so it cannot satisfy a `requiresComment` edge either.
+    let Some(trimmed) = non_blank(&comment) else {
         return Ok(None);
-    }
+    };
 
     if trimmed.chars().count() > MAX_COMMENT_LENGTH {
         return Err(AppError::validation(vec![ValidationDetail::new(
@@ -383,11 +385,7 @@ impl ReassignTaskRequest {
     /// absent in [`normalize_comment`], so `{"userId": …, "roleCode": " "}`
     /// names one target and `{"roleCode": ""}` names none.
     pub fn target(&self) -> Result<ReassignTarget, AppError> {
-        let role_code = self
-            .role_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|code| !code.is_empty());
+        let role_code = self.role_code.as_deref().and_then(non_blank);
 
         match (self.user_id, role_code) {
             (Some(user_id), None) => Ok(ReassignTarget::User(user_id)),
@@ -735,6 +733,25 @@ mod tests {
         );
     }
 
+    /// [#797]: a `roleCode` that shows nothing is absent, as a blank one is:
+    /// beside a user it is one target, and alone it names nobody.
+    #[test]
+    fn a_role_code_that_shows_nothing_is_absent() {
+        let user = Uuid::now_v7();
+
+        for blank in ["\u{200B}", " \u{FEFF} ", "   "] {
+            assert_eq!(
+                reassign(Some(user), Some(blank))
+                    .target()
+                    .expect("the user"),
+                ReassignTarget::User(user),
+                "{blank:?}"
+            );
+            let error = reassign(None, Some(blank)).target().expect_err("nobody");
+            assert_eq!(codes(error), ["ONE_TARGET_REQUIRED", "ONE_TARGET_REQUIRED"]);
+        }
+    }
+
     #[test]
     fn a_closed_task_is_not_reassigned() {
         let AppError::Conflict { message } = reassign_closed(TaskStatus::Cancelled) else {
@@ -879,6 +896,19 @@ mod tests {
         );
         assert_eq!(normalize_comment(Some(String::new())).unwrap(), None);
         assert_eq!(normalize_comment(None).unwrap(), None);
+    }
+
+    /// [#797]: blank is `is_blank_text`, so a comment of invisible characters
+    /// alone is no comment either; a visible one keeps an invisible edge.
+    #[test]
+    fn a_comment_that_shows_nothing_is_no_comment_at_all() {
+        for blank in ["\u{200B}", "\u{FEFF}", " \u{200B}\u{2060}\n"] {
+            assert_eq!(normalize_comment(Some(blank.to_owned())).unwrap(), None);
+        }
+        assert_eq!(
+            normalize_comment(Some(" \u{200B}late ".to_owned())).unwrap(),
+            Some("\u{200B}late".to_owned())
+        );
     }
 
     #[test]

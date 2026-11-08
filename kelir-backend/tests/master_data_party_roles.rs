@@ -144,6 +144,51 @@ fn role_path(party: Uuid, role_type: &str) -> String {
     format!("{PARTIES}/{party}/roles/{role_type}")
 }
 
+/// **[#797]: an optional profile text that shows nothing is absent.** A
+/// customer's `creditLimit`, `taxNumber` and `billingPartyId` of U+200B or
+/// U+FEFF alone are stored NULL, as whitespace-only ones are: the credit
+/// limit is not checked as a decimal and the billing party is not looked up.
+/// A credit limit that is visible and not a number is still
+/// `INVALID_FORMAT`.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_profile_text_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, blank) in ["\u{200B}", " \u{FEFF} ", "   "].into_iter().enumerate() {
+        let code = format!("PARTY-OPT-{index}");
+        let party = create_party(&app, &token, party_group(&code, "Acme")).await;
+        let mut body = customer_profile(&format!("CUS-OPT-{index}"));
+        body["profile"]["customer"]["creditLimit"] = json!(blank);
+        body["profile"]["customer"]["taxNumber"] = json!(blank);
+        body["profile"]["customer"]["billingPartyId"] = json!(blank);
+
+        let assigned = app
+            .put(&role_path(party, "CUSTOMER"), Some(&token), body)
+            .await;
+        assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+        let stored: (Option<String>, Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT credit_limit::text, tax_number, billing_party_id \
+             FROM mdm_customer_profiles WHERE party_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(party)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the profile");
+        assert_eq!(stored, (None, None, None), "{blank:?}");
+    }
+
+    let party = create_party(&app, &token, party_group("PARTY-NAN", "Acme")).await;
+    let mut body = customer_profile("CUS-0002");
+    body["profile"]["customer"]["creditLimit"] = json!("\u{200B}lots");
+    app.put(&role_path(party, "CUSTOMER"), Some(&token), body)
+        .await
+        .assert_refused_at("profile.customer.creditLimit", "INVALID_FORMAT");
+}
+
 /// **[#797] through the route: a business number.** A supplier number of
 /// U+200B alone is `REQUIRED` at its path, on the first assignment and on a
 /// change to it, and the stored number is left as it was.

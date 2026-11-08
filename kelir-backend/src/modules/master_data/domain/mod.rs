@@ -49,7 +49,7 @@ pub use role::*;
 pub use role_view::*;
 
 use crate::error::{AppError, ValidationDetail};
-use crate::utils::text::is_blank_text;
+use crate::utils::text::{is_blank_text, non_blank};
 
 /// Longest `partyId` the aggregate allows, and the bound
 /// `ck_mdm_parties_party_code_len` holds in the database.
@@ -201,7 +201,7 @@ pub(super) fn bounded(
 }
 
 pub(super) fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
+    value.and_then(non_blank)
 }
 
 pub(super) fn finish(details: Vec<ValidationDetail>) -> Result<(), AppError> {

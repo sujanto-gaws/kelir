@@ -27,6 +27,7 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
+use crate::utils::text::non_blank;
 
 pub async fn list_parties(
     state: &AppState,
@@ -761,7 +762,7 @@ async fn resolve_role_type(
     path: &str,
     details: &mut Vec<ValidationDetail>,
 ) -> Result<Option<Uuid>, AppError> {
-    let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
+    let Some(code) = code.and_then(non_blank) else {
         return Ok(None);
     };
 
@@ -922,10 +923,11 @@ fn contact_mech_fields<'a>(
         .collect()
 }
 
-/// Trims a supplied string and treats an all-whitespace one as absent, so a
+/// Trims a supplied string and treats a blank one (whitespace or invisible,
+/// #797) as absent, so a
 /// `COALESCE` update cannot overwrite a value with blanks.
 pub(super) fn trimmed(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
+    value.and_then(non_blank)
 }
 
 /// A unique violation on `mdm_parties` is a duplicate `partyId`, which is the

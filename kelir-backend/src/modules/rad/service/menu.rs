@@ -25,6 +25,7 @@ use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::state::AppState;
+use crate::utils::text::non_blank;
 
 /// The whole configured navigation.
 ///
@@ -341,7 +342,7 @@ fn duplicate_key(menu_key: &str) -> AppError {
 }
 
 fn trimmed(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
+    value.and_then(non_blank)
 }
 
 /// What actually moved, for the audit record (#135).

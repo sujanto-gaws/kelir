@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
 use crate::utils::serde::present_or_absent;
-use crate::utils::text::is_blank_text;
+use crate::utils::text::{is_blank_text, non_blank};
 
 /// Longest `menu_key` §5.9 holds — `menu_key VARCHAR(64)`.
 pub const MAX_MENU_KEY_LENGTH: usize = 64;
@@ -186,7 +186,7 @@ fn bounded(
 /// An entry with **no** route is a heading — the parent of other entries — which
 /// is why the field is optional rather than required.
 fn check_route(route: Option<&str>, details: &mut Vec<ValidationDetail>) {
-    let Some(route) = route.map(str::trim).filter(|route| !route.is_empty()) else {
+    let Some(route) = route.and_then(non_blank) else {
         return;
     };
 
@@ -302,6 +302,23 @@ mod tests {
     #[test]
     fn accepts_a_complete_entry() {
         assert!(validate_create_menu(&create()).is_ok());
+    }
+
+    /// [#797]: a route that shows nothing is no route, so it is not checked
+    /// for its form (a heading); a visible route still is.
+    #[test]
+    fn a_route_that_shows_nothing_is_absent() {
+        for blank in ["\u{200B}", " \u{FEFF} ", "   "] {
+            let mut request = create();
+            request.route_path = Some(blank.to_owned());
+            request.icon = Some(blank.to_owned());
+            assert!(validate_create_menu(&request).is_ok(), "{blank:?}");
+        }
+
+        let mut request = create();
+        request.route_path = Some("\u{200B}https://example.test".to_owned());
+        let refused = validate_create_menu(&request).expect_err("refused");
+        assert_eq!(refused.code_at("routePath"), Some("ROUTE_NOT_RELATIVE"));
     }
 
     /// Blank is `is_blank_text` (#797), on create and on update.

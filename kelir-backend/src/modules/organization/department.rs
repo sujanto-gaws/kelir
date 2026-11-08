@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::workflow::domain::jwss::RESERVED_DEPARTMENT_SCOPES;
 use crate::utils::serde::present_or_absent;
-use crate::utils::text::is_blank_text;
+use crate::utils::text::{is_blank_text, non_blank};
 
 /// Longest `departmentCode` §3.4 holds — `department_code VARCHAR(64)`.
 pub const MAX_DEPARTMENT_CODE_LENGTH: usize = 64;
@@ -198,7 +198,7 @@ pub fn validate_create(request: &CreateDepartmentRequest) -> Result<(), AppError
     // yet — but a caller naming its own code as the parent means something, and
     // "no such department" would be a confusing way to say it.
     if let Some(parent) = &request.parent_department_id {
-        if parent.trim() == request.department_id.trim() && !parent.trim().is_empty() {
+        if non_blank(parent) == Some(request.department_id.trim()) {
             details.push(ValidationDetail::new(
                 "parentDepartmentId",
                 "consistency",

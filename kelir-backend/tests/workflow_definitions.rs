@@ -131,6 +131,79 @@ async fn a_definition_is_stored_with_its_spec_version_and_initial_state() {
     assert_eq!(created.body["data"]["status"], "DRAFT");
 }
 
+/// **[#797]: a description that shows nothing is what whitespace gives.** On
+/// a create, U+200B or U+FEFF alone is stored NULL. On an edit and on a new
+/// revision, where an absent description keeps the stored one, it is stored
+/// as the empty string a whitespace-only description already was, and never
+/// as the invisible characters it was made of.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_description_that_shows_nothing_is_stored_as_whitespace_is() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, blank) in ["\u{200B}", " \u{FEFF} ", "  \t"].into_iter().enumerate() {
+        let key = format!("wf_desc_{index}");
+        let created = app
+            .post(
+                DEFINITIONS,
+                Some(&token),
+                json!({
+                    "workflowKey": key,
+                    "name": "Approval",
+                    "description": blank,
+                    "definition": approval_workflow(&key),
+                }),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let id = id_of(&created.body["data"]);
+
+        let stored = |id: Uuid| {
+            let pool = app.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT description FROM workflow_definitions WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("the definition")
+            }
+        };
+        assert_eq!(stored(id).await, None, "{blank:?} on a create");
+
+        let edited = app
+            .put(
+                &format!("{DEFINITIONS}/{id}"),
+                Some(&token),
+                json!({ "description": blank }),
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        assert_eq!(
+            stored(id).await.as_deref(),
+            Some(""),
+            "{blank:?} on an edit"
+        );
+
+        let revision = app
+            .post(
+                &format!("{DEFINITIONS}/{id}/revisions"),
+                Some(&token),
+                json!({ "description": blank }),
+            )
+            .await;
+        assert_eq!(revision.status, StatusCode::CREATED, "{}", revision.body);
+        assert_eq!(
+            stored(id_of(&revision.body["data"])).await.as_deref(),
+            Some(""),
+            "{blank:?} on a revision"
+        );
+    }
+}
+
 /// **[#797]: blank is `is_blank_text`.** A workflow key or name of U+200B
 /// alone shows nothing and is `REQUIRED` at its path, on create and on
 /// update; a name with a visible character keeps an invisible edge, as

@@ -532,7 +532,7 @@ async fn get_menu(
     responses(
         (status = 201, description = "Created, as a CONFIG entry", body = MenuEntry),
         (status = 403, description = "Missing rad:menu:create"),
-        (status = 422, description = "The key is taken, the route is not relative, or the parent is not this tenant's. A blank menuKey or label is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "The key is taken, the route is not relative, or the parent is not this tenant's. A blank menuKey or label is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). A blank icon, routePath or requiredPermission is absent: it is not checked and is stored NULL")
     ),
     security(("bearer" = []))
 )]
@@ -553,7 +553,7 @@ async fn create_menu(
         (status = 200, description = "The entry as it now stands", body = MenuEntry),
         (status = 403, description = "Missing rad:menu:update"),
         (status = 404, description = "No such entry"),
-        (status = 422, description = "The move would make a loop, or the parent is not this tenant's. A label sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "The move would make a loop, or the parent is not this tenant's. A label sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). An icon, routePath or requiredPermission sent blank is cleared, and is not checked")
     ),
     security(("bearer" = []))
 )]

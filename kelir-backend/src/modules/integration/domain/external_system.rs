@@ -10,6 +10,7 @@ use super::{code, required_text, Problems, MAX_NAME_LENGTH, MAX_URL_LENGTH};
 use crate::error::AppError;
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::non_blank;
 
 /// The shortest and longest request timeout a system may be configured with.
 ///
@@ -372,11 +373,10 @@ pub fn validate_update(request: &UpdateExternalSystemRequest) -> Result<(), AppE
 ///
 /// A blank value is not checked here — the service stores it as absent.
 fn base_url(value: &str, problems: &mut Problems) {
-    let trimmed = value.trim();
-
-    if trimmed.is_empty() {
+    // Blank is `is_blank_text` (#797), as `super::trimmed` reads it.
+    let Some(trimmed) = non_blank(value) else {
         return;
-    }
+    };
     if trimmed.chars().count() > MAX_URL_LENGTH {
         problems.push(
             "baseUrl",
@@ -524,6 +524,18 @@ mod tests {
     #[test]
     fn a_complete_registration_is_valid() {
         assert!(validate_register(&register()).is_ok());
+    }
+
+    /// [#797]: a base URL that shows nothing is absent and not checked for
+    /// its form, as a whitespace-only one is; the service stores it NULL.
+    /// Before, U+200B alone was `INVALID_FORMAT`.
+    #[test]
+    fn a_base_url_that_shows_nothing_is_absent() {
+        for blank in ["\u{200B}", " \u{FEFF} ", "   "] {
+            let mut request = register();
+            request.base_url = Some(blank.to_owned());
+            assert!(validate_register(&request).is_ok(), "{blank:?}");
+        }
     }
 
     /// Blank is `is_blank_text` (#797): a system code or name that shows

@@ -140,6 +140,59 @@ async fn a_department_code_or_name_that_shows_nothing_is_required() {
     assert_eq!(read.body["data"]["name"], "\u{200B}Finance");
 }
 
+/// **[#797]: an optional reference that shows nothing is absent.** A
+/// `parentDepartmentId` or `managerPartyId` of U+200B or U+FEFF alone names
+/// no department and no party: it is stored NULL on a create, and clears the
+/// stored parent on an edit, as a whitespace-only one does. Before, it was
+/// looked up as a code and refused `NOT_FOUND`.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_reference_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    department(&app, &token, "D-TOP", None).await;
+
+    for (index, blank) in ["\u{200B}", " \u{FEFF}", "  "].into_iter().enumerate() {
+        let created = create(
+            &app,
+            &token,
+            json!({
+                "departmentId": format!("D-OPT-{index}"),
+                "name": "N",
+                "parentDepartmentId": blank,
+                "managerPartyId": blank,
+            }),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let id: Uuid = created.body["data"]["id"]
+            .as_str()
+            .expect("an id")
+            .parse()
+            .expect("a uuid");
+
+        let stored = || async {
+            sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>)>(
+                "SELECT parent_department_id, manager_party_id FROM departments WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the department")
+        };
+        assert_eq!(stored().await, (None, None), "{blank:?}");
+
+        let moved = move_under(&app, &token, id, "D-TOP").await;
+        assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+        assert!(stored().await.0.is_some());
+
+        let cleared = move_under(&app, &token, id, blank).await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        assert_eq!(stored().await, (None, None), "{blank:?} on an edit");
+    }
+}
+
 /// The gap that made this the strongest of the four carry-overs.
 ///
 /// `master_data` validates a party role's department against `departments`, so

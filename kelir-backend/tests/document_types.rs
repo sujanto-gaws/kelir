@@ -406,6 +406,65 @@ async fn a_duplicate_type_code_is_a_conflict() {
     assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
 }
 
+/// **[#797]: an optional text that shows nothing is absent.** A
+/// `description` or `category` of U+200B or U+FEFF alone is stored NULL on a
+/// create, and clears the stored value on an edit, as a whitespace-only one
+/// does. The validator only skipped such a value; the normaliser kept it, so
+/// it was stored as sent.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_text_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, blank) in ["\u{200B}", "\u{FEFF} ", "  "].into_iter().enumerate() {
+        let created = app
+            .post(
+                "/api/v1/document-types",
+                Some(&token),
+                json!({
+                    "typeCode": format!("PR_OPT_{index}"),
+                    "name": "N",
+                    "description": blank,
+                    "category": blank,
+                }),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let id = id_of(&created.body["data"]);
+
+        let stored = || async {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT description, category FROM document_types WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the type")
+        };
+        assert_eq!(stored().await, (None, None), "{blank:?}");
+
+        let edited = put_type(
+            &app,
+            &token,
+            id,
+            json!({ "description": "Desks", "category": "PROCUREMENT" }),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let edited = put_type(
+            &app,
+            &token,
+            id,
+            json!({ "description": blank, "category": blank }),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        assert_eq!(stored().await, (None, None), "{blank:?} on an edit");
+    }
+}
+
 /// **[#797]: blank is `is_blank_text`.** A type code, a name or a numbering
 /// template of U+200B alone shows nothing and is `REQUIRED` at its path; a
 /// name with a visible character keeps an invisible edge, as `str::trim`

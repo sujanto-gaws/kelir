@@ -23,6 +23,7 @@ use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
+use crate::utils::text::non_blank;
 
 pub async fn list_facilities(
     state: &AppState,
@@ -508,7 +509,7 @@ async fn resolve_parent(
     tenant_id: Uuid,
     code: Option<&str>,
 ) -> Result<Option<Uuid>, AppError> {
-    let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
+    let Some(code) = code.and_then(non_blank) else {
         return Ok(None);
     };
 
@@ -533,7 +534,7 @@ async fn resolve_owner(
     tenant_id: Uuid,
     code: Option<&str>,
 ) -> Result<Option<Uuid>, AppError> {
-    let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
+    let Some(code) = code.and_then(non_blank) else {
         return Ok(None);
     };
 
