@@ -36,9 +36,10 @@
 # no backup identity but the throwaway ones the job makes. What the rule above
 # guards against, the probe's root, its trace and its scratch databases and
 # stores touching a host with something to lose, cannot happen there. The
-# backup runs under `sudo -E`, against a database and a keyed MinIO of the
-# job's own, seeded first by `encryption-at-rest.seed.sh`, because over an
-# empty database and bucket every comparison here passes with encryption off.
+# backup runs as root, its settings named through `sudo env`, against a
+# database and a keyed MinIO of the job's own, seeded first by
+# `encryption-at-rest.seed.sh`, because over an empty database and bucket
+# every comparison here passes with encryption off.
 # `objects` is not run in CI: it reads MinIO's data volume from outside MinIO.
 #
 # Settings:

@@ -328,10 +328,12 @@ jobs:
       - name: Probe the backup (encryption at rest, backup mode)
         working-directory: .
         # **As root, because the unit runs it as root** and the probe checks
-        # root's 700 and 600. `sudo -E` keeps the settings above; `pg_dump`
-        # runs as the runner image's `postgres` OS user, through `runuser`, as
-        # on the staging host. `strace` traces as root, so it can name the
-        # file each write lands in once `pg_dump` is `postgres`.
+        # root's 700 and 600. The settings are passed by name through `env`:
+        # ubuntu-26.04's sudo (sudo-rs) ignores `-E`, which preserved nothing
+        # on the first run. `pg_dump` runs as the runner image's `postgres` OS
+        # user, through `runuser`, as on the staging host. `strace` traces as
+        # root, so it can name the file each write lands in once `pg_dump` is
+        # `postgres`.
         env:
           PGHOST: localhost
           PGPORT: "5432"
@@ -339,7 +341,15 @@ jobs:
           PGPASSWORD: kelir
           KELIR_DB_NAME: kelir_probe
           KELIR_PROBE_MARKER: KELIR-PROBE-MARKER-${{ github.run_id }}-${{ github.run_attempt }}
-        run: sudo -E ./deploy/staging/encryption-at-rest.probe.sh backup "${KELIR_PROBE_MARKER}"
+        run: |
+          sudo env \
+            "PGHOST=${PGHOST}" "PGPORT=${PGPORT}" "PGUSER=${PGUSER}" \
+            "PGPASSWORD=${PGPASSWORD}" "KELIR_DB_NAME=${KELIR_DB_NAME}" \
+            "KELIR_BACKUP_NETWORK=${KELIR_BACKUP_NETWORK}" \
+            "KELIR_BACKUP_MC_IMAGE=${KELIR_BACKUP_MC_IMAGE}" \
+            "KELIR_PROBE_MINIO_IMAGE=${KELIR_PROBE_MINIO_IMAGE}" \
+            "KELIR_PROBE_ENV_FILE=${KELIR_PROBE_ENV_FILE}" \
+            ./deploy/staging/encryption-at-rest.probe.sh backup "${KELIR_PROBE_MARKER}"
 
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
