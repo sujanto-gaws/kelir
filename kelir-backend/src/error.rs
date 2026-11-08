@@ -197,6 +197,19 @@ impl AppError {
             _ => Vec::new(),
         }
     }
+
+    /// The code of the first validation detail at `path`, for a unit test
+    /// that asserts one field's refusal.
+    #[cfg(test)]
+    pub(crate) fn code_at(&self, path: &str) -> Option<&str> {
+        match self {
+            Self::Validation { details } => details
+                .iter()
+                .find(|detail| detail.path == path)
+                .map(|detail| detail.code.as_str()),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for AppError {

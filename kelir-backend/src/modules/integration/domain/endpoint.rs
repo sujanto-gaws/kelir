@@ -193,6 +193,39 @@ mod tests {
         }
     }
 
+    /// Blank is `is_blank_text` (#797): a code, name or path that shows
+    /// nothing is `REQUIRED` and nothing else, on create and on update.
+    #[test]
+    fn a_code_name_or_path_that_shows_nothing_is_required() {
+        let mut request = create("\u{200B}");
+        request.endpoint_code = "\u{200B}".to_owned();
+        request.name = "\u{FEFF}".to_owned();
+        let details = details(validate_create(&request).expect_err("refused"));
+        let found: Vec<(&str, &str)> = details
+            .iter()
+            .map(|detail| (detail.path.as_str(), detail.code.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("endpointCode", "REQUIRED"),
+                ("name", "REQUIRED"),
+                ("path", "REQUIRED")
+            ]
+        );
+
+        let update = UpdateIntegrationEndpointRequest {
+            name: Some("\u{200B}".to_owned()),
+            method: None,
+            path: Some("\u{200B}".to_owned()),
+            description: None,
+            status: None,
+        };
+        let refused = validate_update(&update).expect_err("refused");
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
+        assert_eq!(refused.code_at("path"), Some("REQUIRED"));
+    }
+
     #[test]
     fn a_relative_path_is_accepted() {
         for good in ["/purchase-orders", "/orders/{id}/lines?expand=true", "/"] {

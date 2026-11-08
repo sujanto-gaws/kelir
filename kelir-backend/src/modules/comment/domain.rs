@@ -9,6 +9,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// One comment, as the API reports it.
 ///
@@ -127,7 +128,7 @@ pub const MAX_COMMENT_BODY: usize = 4000;
 pub fn normalize_body(body: String) -> Result<String, AppError> {
     let trimmed = body.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         return Err(AppError::validation(vec![ValidationDetail::new(
             "body",
             "required",
@@ -188,6 +189,21 @@ mod tests {
         let refused = normalize_body("   \n\t ".to_owned());
 
         assert!(refused.is_err(), "whitespace was accepted as a comment");
+    }
+
+    /// Blank is `is_blank_text` (#797): code points that show nothing are
+    /// blank, and a visible body keeps an invisible edge as `str::trim` does.
+    #[test]
+    fn a_body_that_shows_nothing_is_refused_and_an_invisible_edge_is_kept() {
+        for blank in ["\u{200B}\u{200B}", " \u{FEFF} "] {
+            let refused = normalize_body(blank.to_owned()).expect_err(blank);
+            assert_eq!(refused.code_at("body"), Some("COMMENT_EMPTY"));
+        }
+
+        assert_eq!(
+            normalize_body(" \u{200B}ok ".to_owned()).expect("a body"),
+            "\u{200B}ok"
+        );
     }
 
     #[test]

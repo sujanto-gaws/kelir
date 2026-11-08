@@ -389,6 +389,19 @@ async fn a_tenant_code_is_one_tenant_however_it_is_spelled() {
 }
 
 #[tokio::test]
+async fn a_tenant_name_that_shows_nothing_is_required() {
+    // #797: blank is `is_blank_text`, so a name of U+200B alone is blank.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut body = create_body("ACME-ZW", "acme-zw-admin");
+    body["name"] = json!("\u{200B}");
+    let refused = app.post(TENANTS, Some(&token), body).await;
+
+    refused.assert_refused_at("name", "REQUIRED");
+}
+
+#[tokio::test]
 async fn the_administrators_fields_are_reported_under_the_paths_the_form_has() {
     // #67 one layer up: a per-field message against a field the form does not
     // have is a message nobody sees. The request nests the administrator, so

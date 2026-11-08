@@ -632,6 +632,25 @@ async fn an_empty_identifier_is_refused() {
     );
 }
 
+/// **[#797]: blank is `is_blank_text`.** An identifier of U+200B alone shows
+/// nothing and is `REQUIRED` at `username`, as whitespace is: before, it was
+/// looked up, matched nobody and answered 202.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_identifier_that_shows_nothing_is_refused() {
+    let app = TestApp::spawn().await;
+
+    app.send(
+        Method::POST,
+        "/api/v1/auth/forgot-password",
+        None,
+        Some(json!({ "username": "\u{200B}" })),
+    )
+    .await
+    .assert_refused_at("username", "REQUIRED");
+}
+
 /// Neither route needs a token, which is the point of them.
 #[tokio::test]
 async fn both_routes_are_reachable_without_signing_in() {

@@ -123,7 +123,7 @@ pub async fn get_external_system(
         (status = 201, description = "Registered", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:create"),
         (status = 409, description = "That systemCode is already in use in this tenant"),
-        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL)")
+        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL). A blank systemCode or systemName is REQUIRED, and a code is checked for its characters only once it is not blank; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -150,7 +150,7 @@ pub async fn register_external_system(
         (status = 200, description = "Updated", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:update"),
         (status = 404, description = "No such external system in this tenant"),
-        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL), and NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE")
+        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL), and NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE. A systemName sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -265,7 +265,7 @@ pub async fn get_endpoint(
         (status = 403, description = "Missing integration:external-system:update"),
         (status = 404, description = "No such external system in this tenant"),
         (status = 409, description = "The system already has an endpoint with that endpointCode"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A blank endpointCode, name or path is REQUIRED, and a code or path is checked for its form only once it is not blank; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -288,7 +288,7 @@ pub async fn create_endpoint(
         (status = 200, description = "Updated", body = IntegrationEndpoint),
         (status = 403, description = "Missing integration:external-system:update"),
         (status = 404, description = "No such external system in this tenant, or no such endpoint on it"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A name or path sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -407,7 +407,7 @@ pub async fn get_credential(
         (status = 201, description = "Created", body = IntegrationCredential),
         (status = 403, description = "Missing integration:credential:create"),
         (status = 404, description = "No such external system in this tenant"),
-        (status = 422, description = "Validation failed — NOT_A_SECRET_REFERENCE when secretReference is not a vault:// or env:// reference, WINDOW_INVERTED when validTo precedes validFrom")
+        (status = 422, description = "Validation failed — NOT_A_SECRET_REFERENCE when secretReference is not a vault:// or env:// reference, WINDOW_INVERTED when validTo precedes validFrom. A blank secretReference is REQUIRED, not NOT_A_SECRET_REFERENCE; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -429,7 +429,7 @@ pub async fn create_credential(
         (status = 200, description = "Updated", body = IntegrationCredential),
         (status = 403, description = "Missing integration:credential:update"),
         (status = 404, description = "No such external system in this tenant, or no such credential on it"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A secretReference sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

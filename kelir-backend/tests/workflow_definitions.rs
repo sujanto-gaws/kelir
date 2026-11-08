@@ -131,6 +131,39 @@ async fn a_definition_is_stored_with_its_spec_version_and_initial_state() {
     assert_eq!(created.body["data"]["status"], "DRAFT");
 }
 
+/// **[#797]: blank is `is_blank_text`.** A workflow key or name of U+200B
+/// alone shows nothing and is `REQUIRED` at its path, on create and on
+/// update; a name with a visible character keeps an invisible edge, as
+/// `str::trim` leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_workflow_key_or_name_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let definition = approval_workflow("wf_zw");
+
+    create(&app, &token, "\u{200B}", definition.clone())
+        .await
+        .assert_refused_at("workflowKey", "REQUIRED");
+    let body =
+        |name: &str| json!({ "workflowKey": "wf_zw", "name": name, "definition": definition });
+    app.post(DEFINITIONS, Some(&token), body("\u{200B}"))
+        .await
+        .assert_refused_at("name", "REQUIRED");
+
+    let created = app
+        .post(DEFINITIONS, Some(&token), body(" \u{200B}Approval "))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let uri = format!("{DEFINITIONS}/{}", id_of(&created.body["data"]));
+    app.put(&uri, Some(&token), json!({ "name": "\u{FEFF}" }))
+        .await
+        .assert_refused_at("name", "REQUIRED");
+    let read = app.get(&uri, Some(&token)).await;
+    assert_eq!(read.data()["name"], "\u{200B}Approval");
+}
+
 #[tokio::test]
 async fn a_document_that_is_not_jwss_is_refused_at_save() {
     let app = TestApp::spawn().await;

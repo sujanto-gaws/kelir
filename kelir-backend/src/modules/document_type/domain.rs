@@ -15,6 +15,7 @@ use crate::error::{AppError, ValidationDetail};
 use crate::modules::master_data::domain::GovernedEntity;
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// Longest `typeCode` §6.2 holds — `type_code VARCHAR(64)`.
 pub const MAX_TYPE_CODE_LENGTH: usize = 64;
@@ -389,7 +390,7 @@ fn bounded(
 ) {
     let trimmed = value.trim();
 
-    if required && trimmed.is_empty() {
+    if required && is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -605,6 +606,26 @@ mod tests {
         assert!(details(validate_create(&request).expect_err("refused"))
             .iter()
             .any(|detail| detail.path == "typeCode"));
+    }
+
+    /// Blank is `is_blank_text` (#797), on create and on update.
+    #[test]
+    fn a_type_code_or_name_that_shows_nothing_is_required() {
+        let mut request = create();
+        request.type_code = "\u{200B}".to_owned();
+        request.name = "\u{FEFF}".to_owned();
+        let refused = validate_create(&request).expect_err("refused");
+        assert_eq!(refused.code_at("typeCode"), Some("REQUIRED"));
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
+
+        let update: UpdateDocumentTypeRequest =
+            serde_json::from_value(serde_json::json!({ "name": "\u{200B}" })).expect("a request");
+        let refused = validate_update(&update).expect_err("refused");
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
+
+        request.type_code = "\u{200B}PR".to_owned();
+        request.name = "Name\u{200B}".to_owned();
+        assert!(validate_create(&request).is_ok());
     }
 
     #[test]

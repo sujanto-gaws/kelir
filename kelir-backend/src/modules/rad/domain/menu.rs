@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// Longest `menu_key` §5.9 holds — `menu_key VARCHAR(64)`.
 pub const MAX_MENU_KEY_LENGTH: usize = 64;
@@ -156,7 +157,7 @@ fn bounded(
 ) {
     let trimmed = value.trim();
 
-    if required && trimmed.is_empty() {
+    if required && is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -301,6 +302,22 @@ mod tests {
     #[test]
     fn accepts_a_complete_entry() {
         assert!(validate_create_menu(&create()).is_ok());
+    }
+
+    /// Blank is `is_blank_text` (#797), on create and on update.
+    #[test]
+    fn a_key_or_label_that_shows_nothing_is_required() {
+        let mut request = create();
+        request.menu_key = "\u{200B}".to_owned();
+        request.label = "\u{FEFF}".to_owned();
+        let refused = validate_create_menu(&request).expect_err("refused");
+        assert_eq!(refused.code_at("menuKey"), Some("REQUIRED"));
+        assert_eq!(refused.code_at("label"), Some("REQUIRED"));
+
+        let update: UpdateMenuRequest =
+            serde_json::from_value(serde_json::json!({ "label": "\u{200B}" })).expect("a request");
+        let refused = validate_update_menu(&update).expect_err("refused");
+        assert_eq!(refused.code_at("label"), Some("REQUIRED"));
     }
 
     #[test]

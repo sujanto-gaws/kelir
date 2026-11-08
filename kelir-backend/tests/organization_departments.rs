@@ -96,6 +96,50 @@ async fn a_department_is_created_read_back_and_listed() {
     assert!(!listed.body["data"].as_array().expect("a page").is_empty());
 }
 
+/// **[#797]: blank is `is_blank_text`.** A department code or name of U+200B
+/// alone shows nothing and is `REQUIRED` at its path, on create and on update;
+/// a name with a visible character keeps an invisible edge, as `str::trim`
+/// leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_department_code_or_name_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    create(
+        &app,
+        &token,
+        json!({ "departmentId": "\u{200B}", "name": "N" }),
+    )
+    .await
+    .assert_refused_at("departmentId", "REQUIRED");
+    create(
+        &app,
+        &token,
+        json!({ "departmentId": "D-ZW", "name": "\u{200B}" }),
+    )
+    .await
+    .assert_refused_at("name", "REQUIRED");
+
+    let created = create(
+        &app,
+        &token,
+        json!({ "departmentId": "D-ZW", "name": " \u{200B}Finance " }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let uri = format!(
+        "/api/v1/organization/departments/{}",
+        created.body["data"]["id"].as_str().expect("an id")
+    );
+    app.put(&uri, Some(&token), json!({ "name": "\u{FEFF}" }))
+        .await
+        .assert_refused_at("name", "REQUIRED");
+    let read = app.get(&uri, Some(&token)).await;
+    assert_eq!(read.body["data"]["name"], "\u{200B}Finance");
+}
+
 /// The gap that made this the strongest of the four carry-overs.
 ///
 /// `master_data` validates a party role's department against `departments`, so

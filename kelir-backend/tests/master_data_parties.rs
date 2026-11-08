@@ -138,6 +138,33 @@ async fn create_ok(app: &TestApp, token: &str, body: Value) -> Uuid {
 // Create and read
 // ---------------------------------------------------------------------------
 
+/// **[#797]: blank is `is_blank_text`.** A party code or group name of U+200B
+/// alone shows nothing and is `REQUIRED` at its path; a group name with a
+/// visible character keeps an invisible edge, as `str::trim` leaves it, and
+/// reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_party_code_or_name_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    app.post(PARTIES, Some(&token), party_group("\u{200B}", "Acme"))
+        .await
+        .assert_refused_at("partyId", "REQUIRED");
+    app.post(
+        PARTIES,
+        Some(&token),
+        party_group("ORG-ZW", "\u{200B}\u{FEFF}"),
+    )
+    .await
+    .assert_refused_at("partyGroup.groupName", "REQUIRED");
+
+    let id = create_ok(&app, &token, party_group("ORG-ZW", " Acme\u{200B} ")).await;
+    let read = app.get(&format!("{PARTIES}/{id}"), Some(&token)).await;
+    assert_eq!(read.data()["partyGroup"]["groupName"], "Acme\u{200B}");
+}
+
 #[tokio::test]
 async fn creates_a_person_party_and_reads_the_whole_aggregate_back() {
     let app = TestApp::spawn().await;

@@ -331,7 +331,7 @@ pub async fn delete_attachment(
         (status = 200, description = "The stored reference. It has no size, no scan status and no download", body = ExternalReference),
         (status = 403, description = "Missing attachment:reference or document:read"),
         (status = 404, description = "No such document, or it is not one this caller may see"),
-        (status = 422, description = "An empty label, a URL that is neither http nor https, or a categoryId this tenant does not have")
+        (status = 422, description = "An empty label, a URL that is neither http nor https, or a categoryId this tenant does not have. A blank label is LABEL_REQUIRED and a blank url URL_REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

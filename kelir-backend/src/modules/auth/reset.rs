@@ -67,6 +67,7 @@ use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::identity::domain::{validate_password_value, RevokeReason, UserStatus};
 use crate::modules::identity::repository as identity_repo;
 use crate::state::AppState;
+use crate::utils::text::is_blank_text;
 
 /// How long a reset link is good for.
 ///
@@ -129,6 +130,27 @@ pub fn generate_reset_token() -> ResetToken {
     }
 }
 
+/// The identifier a reset is requested for, as it is looked up, or a refusal
+/// when it is blank. Blank is [`is_blank_text`] (#797): an identifier that
+/// shows nothing matches no account anyone could have typed.
+///
+/// Not an enumeration signal: a blank identifier is malformed whoever sent it,
+/// and refusing it says nothing about any account.
+fn reset_identifier(username: &str) -> Result<&str, AppError> {
+    let identifier = username.trim();
+
+    if is_blank_text(identifier) {
+        return Err(AppError::validation(vec![ValidationDetail::new(
+            "username",
+            "required",
+            "REQUIRED",
+            "username is required",
+        )]));
+    }
+
+    Ok(identifier)
+}
+
 /// Starts a reset, and says nothing about whether it did.
 ///
 /// **Returns `Ok(())` in every case a caller could distinguish**, which is the
@@ -142,18 +164,7 @@ pub async fn request_reset(
     request: RequestResetRequest,
     ip: Option<&str>,
 ) -> Result<(), AppError> {
-    let identifier = request.username.trim();
-
-    if identifier.is_empty() {
-        // Not an enumeration signal: an empty identifier is malformed whoever
-        // sent it, and refusing it says nothing about any account.
-        return Err(AppError::validation(vec![ValidationDetail::new(
-            "username",
-            "required",
-            "REQUIRED",
-            "username is required",
-        )]));
-    }
+    let identifier = reset_identifier(&request.username)?;
 
     let Some(credentials) =
         identity_repo::find_credentials_by_username(&state.pool, tenant_id, identifier).await?
@@ -353,6 +364,20 @@ fn invalid_token() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Blank is `is_blank_text` (#797): an identifier that shows nothing is
+    /// `REQUIRED`, and a visible one is looked up as `str::trim` leaves it.
+    #[test]
+    fn an_identifier_that_shows_nothing_is_required() {
+        for blank in ["\u{200B}", " \u{FEFF} "] {
+            let refused = reset_identifier(blank).expect_err("refused");
+            assert_eq!(refused.code_at("username"), Some("REQUIRED"), "{blank:?}");
+        }
+        assert_eq!(
+            reset_identifier(" \u{200B}jane ").ok(),
+            Some("\u{200B}jane")
+        );
+    }
 
     #[test]
     fn a_generated_token_is_opaque_and_stored_as_a_digest() {

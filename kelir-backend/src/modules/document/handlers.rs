@@ -103,7 +103,7 @@ async fn get_document(
     responses(
         (status = 201, description = "Created as a draft, with its reference assigned and its form revision pinned", body = Document),
         (status = 403, description = "Missing document:create"),
-        (status = 422, description = "Validation failed, the type does not exist, or the form data is not what its definition accepts")
+        (status = 422, description = "Validation failed, the type does not exist, or the form data is not what its definition accepts. A blank title is REQUIRED and a blank metadata key EMPTY_KEY; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -124,7 +124,7 @@ async fn create_document(
         (status = 200, description = "Updated; a metadata object that is sent replaces the stored set", body = Document),
         (status = 404, description = "No such document"),
         (status = 409, description = "The document is no longer a draft"),
-        (status = 422, description = "Validation failed, or the form data is not what its definition accepts")
+        (status = 422, description = "Validation failed, or the form data is not what its definition accepts. A blank title is REQUIRED and a blank metadata key EMPTY_KEY; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

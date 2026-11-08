@@ -583,6 +583,68 @@ async fn a_caller_who_can_read_a_system_cannot_read_where_its_secrets_live() {
 /// plus the ids and timestamps. A field added to `IntegrationCredential` turns
 /// this red, which is the point — whoever adds one has to decide here that it
 /// is not a secret.
+/// **[#797]: blank is `is_blank_text`.** Every required text of a system, an
+/// endpoint and a credential, sent as U+200B alone, is `REQUIRED` at its path
+/// and nothing else. A system code and an endpoint code, a path and a secret
+/// reference were each refused before for their format; the code is now the
+/// one a blank value gets. A name with a visible character keeps an
+/// invisible edge, as `str::trim` leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_required_text_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let blank = "\u{200B}";
+
+    register(
+        &app,
+        &token,
+        json!({ "systemCode": blank, "systemName": "S" }),
+    )
+    .await
+    .assert_refused_at("systemCode", "REQUIRED");
+    register(
+        &app,
+        &token,
+        json!({ "systemCode": "ZW", "systemName": blank }),
+    )
+    .await
+    .assert_refused_at("systemName", "REQUIRED");
+
+    let created = register(
+        &app,
+        &token,
+        json!({ "systemCode": "ZW", "systemName": " \u{200B}Ledger " }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let system = id_of(&created);
+    let read = app.get(&format!("{BASE}/{system}"), Some(&token)).await;
+    assert_eq!(read.data()["systemName"], "\u{200B}Ledger");
+
+    let endpoints = format!("{BASE}/{system}/endpoints");
+    for (field, path) in [
+        ("endpointCode", "endpointCode"),
+        ("name", "name"),
+        ("path", "path"),
+    ] {
+        let mut body = json!({ "endpointCode": "EP", "name": "E", "method": "POST", "path": "/e" });
+        body[field] = json!(blank);
+        app.post(&endpoints, Some(&token), body)
+            .await
+            .assert_refused_at(path, "REQUIRED");
+    }
+
+    app.post(
+        &format!("{BASE}/{system}/credentials"),
+        Some(&token),
+        json!({ "credentialType": "API_KEY", "secretReference": blank }),
+    )
+    .await
+    .assert_refused_at("secretReference", "REQUIRED");
+}
+
 #[tokio::test]
 async fn a_credential_response_is_the_reference_and_nothing_else() {
     let app = TestApp::spawn().await;

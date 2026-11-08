@@ -737,6 +737,27 @@ mod tests {
         }
     }
 
+    /// Blank is `is_blank_text` (#797): a business number that shows nothing
+    /// is `REQUIRED`, whether the profile is being created or changed.
+    #[test]
+    fn a_business_number_that_shows_nothing_is_required() {
+        let mut request = supplier_request();
+        if let Some(profile) = request.profile.as_mut() {
+            profile.supplier = Some(SupplierProfileInput {
+                supplier_number: Some("\u{200B}".to_owned()),
+                ..SupplierProfileInput::default()
+            });
+        }
+        for creating in [true, false] {
+            let refused = validate_assign_role(&request, "SUPPLIER", "PARTY-0001", creating)
+                .expect_err("refused");
+            assert_eq!(
+                refused.code_at("profile.supplier.supplierNumber"),
+                Some("REQUIRED")
+            );
+        }
+    }
+
     /// The role-profile half of #109's sweep.
     ///
     /// **Its boundary.** Every `String` field of the four profile inputs that is

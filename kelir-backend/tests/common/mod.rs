@@ -805,6 +805,26 @@ impl TestResponse {
     pub fn data(&self) -> &Value {
         &self.body["data"]
     }
+
+    /// Asserts a 422 `VALIDATION_ERROR` whose one detail at `path` carries
+    /// `code`. Details at other paths are allowed.
+    pub fn assert_refused_at(&self, path: &str, code: &str) {
+        assert_eq!(
+            self.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expected a 422 at `{path}`: {}",
+            self.body
+        );
+        assert_eq!(self.error_code(), Some("VALIDATION_ERROR"), "{}", self.body);
+        let at_path: Vec<&Value> = self.body["error"]["details"]
+            .as_array()
+            .expect("details")
+            .iter()
+            .filter(|detail| detail["path"] == path)
+            .collect();
+        assert_eq!(at_path.len(), 1, "one detail at `{path}`: {}", self.body);
+        assert_eq!(at_path[0]["code"], code, "{}", self.body);
+    }
 }
 
 /// A response this harness did not parse — the file routes answer with bytes.

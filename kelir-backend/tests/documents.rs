@@ -546,6 +546,55 @@ async fn metadata_is_stored_apart_from_form_data() {
     assert_eq!(rows, 2);
 }
 
+/// **[#797]: blank is `is_blank_text`.** A title or a metadata key of U+200B
+/// alone shows nothing and is refused at its path, on create and on edit; a
+/// title with a visible character keeps an invisible edge, as `str::trim`
+/// leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_title_or_metadata_key_that_shows_nothing_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_INVISIBLE", None).await;
+
+    let refused = create(
+        &app,
+        &token,
+        json!({ "documentTypeId": type_id, "title": "\u{200B}" }),
+    )
+    .await;
+    refused.assert_refused_at("title", "REQUIRED");
+    let refused = create(
+        &app,
+        &token,
+        json!({
+            "documentTypeId": type_id,
+            "title": "Desks",
+            "metadata": { "\u{200B}": { "value": "1" } },
+        }),
+    )
+    .await;
+    refused.assert_refused_at("metadata", "EMPTY_KEY");
+
+    let created = create(
+        &app,
+        &token,
+        json!({ "documentTypeId": type_id, "title": " \u{200B}Desks " }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+    let uri = format!("/api/v1/documents/{id}");
+    let edited = app
+        .put(&uri, Some(&token), json!({ "title": "\u{FEFF}" }))
+        .await;
+    edited.assert_refused_at("title", "REQUIRED");
+
+    let read = app.get(&uri, Some(&token)).await;
+    assert_eq!(read.body["data"]["title"], "\u{200B}Desks");
+}
+
 /// A metadata object that is **sent** replaces the stored set; absent leaves it
 /// alone.
 ///

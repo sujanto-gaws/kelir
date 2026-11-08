@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// How far an attachment has got through the scanner (Database Schema §8.2).
 ///
@@ -357,7 +358,7 @@ pub const MAX_URL: usize = 2048;
 pub fn normalize_label(label: String) -> Result<String, AppError> {
     let trimmed = label.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         return Err(AppError::validation(vec![ValidationDetail::new(
             "label",
             "required",
@@ -402,7 +403,7 @@ pub fn normalize_label(label: String) -> Result<String, AppError> {
 pub fn normalize_url(url: String) -> Result<String, AppError> {
     let trimmed = url.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         return Err(url_refusal("URL_REQUIRED", "a reference needs a URL"));
     }
 
@@ -485,6 +486,21 @@ mod tests {
         assert_eq!(
             normalize_label("  Vendor portal  ".to_owned()).expect("a label"),
             "Vendor portal"
+        );
+    }
+
+    /// Blank is `is_blank_text` (#797), for the label and the URL alike, and a
+    /// visible label keeps an invisible edge as `str::trim` does.
+    #[test]
+    fn a_label_or_url_that_shows_nothing_is_refused_and_an_invisible_edge_is_kept() {
+        let label = normalize_label("\u{200B}".to_owned()).expect_err("blank");
+        assert_eq!(label.code_at("label"), Some("LABEL_REQUIRED"));
+        let url = normalize_url("\u{200B}\u{FEFF}".to_owned()).expect_err("blank");
+        assert_eq!(url.code_at("url"), Some("URL_REQUIRED"));
+
+        assert_eq!(
+            normalize_label(" Portal\u{200B} ".to_owned()).expect("a label"),
+            "Portal\u{200B}"
         );
     }
 

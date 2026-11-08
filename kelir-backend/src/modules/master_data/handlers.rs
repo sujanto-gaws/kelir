@@ -118,7 +118,7 @@ async fn get_party(
     responses(
         (status = 201, description = "Created", body = PartyAggregate),
         (status = 409, description = "That partyId is already in use — including by a deleted party, whose partyId is never released (#107)"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A required code or name sent blank is REQUIRED at its path; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -141,7 +141,7 @@ async fn create_party(
     responses(
         (status = 200, description = "Updated", body = PartyAggregate),
         (status = 404, description = "No such party"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A required code or name sent blank is REQUIRED at its path; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -227,7 +227,7 @@ So a restatement carrying only `fromDate` clears the end date and keeps the comm
         (status = 403, description = "Missing master-data:party-role:assign"),
         (status = 404, description = "No such party"),
         (status = 409, description = "That profile number is already in use"),
-        (status = 422, description = "Validation failed, no such role type, or `roleTypeId` holds a NUL")
+        (status = 422, description = "Validation failed, no such role type, or `roleTypeId` holds a NUL. A business number sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -390,7 +390,7 @@ async fn get_facility(
         (status = 201, description = "Created", body = Facility),
         (status = 403, description = "Missing master-data:facility:create"),
         (status = 409, description = "That facilityId is already in use"),
-        (status = 422, description = "Validation failed, or a reference does not resolve")
+        (status = 422, description = "Validation failed, or a reference does not resolve. A facilityId or name, or a parentFacilityId or ownerPartyId sent, that is blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -416,7 +416,7 @@ async fn create_facility(
         (status = 200, description = "Updated", body = Facility),
         (status = 403, description = "Missing master-data:facility:update"),
         (status = 404, description = "No such facility"),
-        (status = 422, description = "Validation failed, a reference does not resolve, or the move would close a loop")
+        (status = 422, description = "Validation failed, a reference does not resolve, or the move would close a loop. A name, parentFacilityId or ownerPartyId sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
