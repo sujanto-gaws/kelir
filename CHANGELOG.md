@@ -943,6 +943,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A required text field of only invisible characters is blank in every
+  module** ([#797](https://github.com/sujanto-gaws/kelir/issues/797),
+  construction plan 21 row 37). #616 made `is_blank_text` the one definition
+  of blank and moved identity to it; every other module still asked Rust's
+  `trim()`, which knows whitespace and not the format characters that draw
+  nothing. So a comment, a reference label, a document title, a metadata key,
+  a document type's code or name, a numbering template, a tenant's or a
+  department's name or code, a party's or a facility's code, name or child
+  code, a role profile's business number, an integration system's,
+  endpoint's or credential's required text, a RAD menu's, list's or form's
+  key, title or label, or a workflow's key or name, sent as one U+200B ZERO
+  WIDTH SPACE or U+FEFF, was stored and listed with nothing visible, and a
+  password-reset request for such a username answered 202. Each is now 422
+  at its own path with the code its module already gave whitespace:
+  `REQUIRED`, or `COMMENT_EMPTY`, `LABEL_REQUIRED`, `URL_REQUIRED` or
+  `EMPTY_KEY`. Where a format check used to answer first, the code moves to
+  `REQUIRED`: an integration `systemCode`, `endpointCode`, endpoint `path`
+  and `secretReference` were `INVALID_FORMAT` or `NOT_A_SECRET_REFERENCE`, a
+  numbering template was `MISSING_SEQUENCE`, and a reference URL was refused
+  for its scheme. What is stored is unchanged: the value `trim()` leaves, so
+  a visible value with an invisible character at its edge is kept as sent and
+  counted. A value stored invisible before the upgrade is not repaired, and an
+  edit that sends it back is refused until it is given a visible one.
+  Optional fields where blank means absent are unchanged and follow
+  separately; the JFSS `required` rule is unchanged. No migration, and no
+  schema change.
 - **A document type bound to another tenant's workflow, or to none, refuses
   its submissions with 422** ([#774](https://github.com/sujanto-gaws/kelir/issues/774),
   construction plan 21 row 30). No route writes such a binding, since a
