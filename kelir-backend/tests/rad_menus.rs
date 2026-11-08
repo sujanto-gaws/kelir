@@ -155,6 +155,68 @@ async fn an_optional_text_that_shows_nothing_is_stored_as_none() {
     }
 }
 
+/// **[#797]: a blank optional text is absent at any length.** An `icon` or
+/// `requiredPermission` longer than its `VARCHAR(64)` but made only of
+/// invisible code points is absent, as 65 spaces are: it is not checked (the
+/// handler's 422 text says "not checked") and is stored NULL, on a create and
+/// on an edit.
+///
+/// **Red on 75b733c (defect):** `domain::menu::bounded(required = false)`
+/// counts `str::trim`'s value, which keeps U+200B, so the validator answers
+/// `TOO_LONG` for a value the normaliser (`trimmed` → `non_blank`) would
+/// store as NULL. The validator and the normaliser disagree.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_long_optional_text_that_shows_nothing_is_absent_not_too_long() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let spaces = " ".repeat(65);
+    let invisible = "\u{200B}".repeat(65);
+    let mixed = "\u{FEFF} \u{2060}".repeat(22);
+
+    for (index, blank) in [&spaces, &invisible, &mixed].into_iter().enumerate() {
+        let created = create(
+            &app,
+            &token,
+            json!({
+                "menuKey": format!("long-blank-{index}"),
+                "label": "L",
+                "icon": blank,
+                "requiredPermission": blank,
+            }),
+        )
+        .await;
+        assert_eq!(
+            created.status,
+            StatusCode::CREATED,
+            "{} chars of {:?}: {}",
+            blank.chars().count(),
+            blank.chars().next(),
+            created.body
+        );
+        let id = id_of(&created.body["data"]);
+
+        let edited = update(
+            &app,
+            &token,
+            id,
+            json!({ "icon": blank, "requiredPermission": blank }),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "on an edit: {}", edited.body);
+
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT icon, required_permission FROM rad_menus WHERE id = $1")
+                .bind(id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("the entry");
+        assert_eq!(stored, (None, None), "index {index}");
+    }
+}
+
 /// **[#797]: blank is `is_blank_text`.** A menu key or label, and a list's
 /// key, title or column key, sent as U+200B alone, is `REQUIRED` at its path;
 /// a label with a visible character keeps an invisible edge, as `str::trim`
