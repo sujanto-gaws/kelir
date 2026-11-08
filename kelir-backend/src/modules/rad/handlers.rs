@@ -140,7 +140,7 @@ async fn get_form(
     responses(
         (status = 201, description = "Created as revision 1, in DRAFT", body = Form),
         (status = 409, description = "That formKey already has revisions"),
-        (status = 422, description = "The definition is not JFSS, or uses an operator no registry approves")
+        (status = 422, description = "The definition is not JFSS, or uses an operator no registry approves. A blank formKey or title is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -160,7 +160,7 @@ async fn create_form(
     responses(
         (status = 200, description = "Updated", body = Form),
         (status = 404, description = "No such form definition"),
-        (status = 422, description = "The revision is published, or the definition is invalid")
+        (status = 422, description = "The revision is published, or the definition is invalid. A title sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -301,7 +301,7 @@ async fn get_list(
     responses(
         (status = 201, description = "Created", body = ListDefinition),
         (status = 409, description = "That listKey is already in use"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A blank listKey or title, or a blank columnKey, filterKey or label of a column or filter, is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -321,7 +321,7 @@ async fn create_list(
     responses(
         (status = 200, description = "Updated; a collection that is sent replaces the stored set", body = ListDefinition),
         (status = 404, description = "No such list definition"),
-        (status = 422, description = "Validation failed")
+        (status = 422, description = "Validation failed. A title, columnKey, filterKey or label sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -532,7 +532,7 @@ async fn get_menu(
     responses(
         (status = 201, description = "Created, as a CONFIG entry", body = MenuEntry),
         (status = 403, description = "Missing rad:menu:create"),
-        (status = 422, description = "The key is taken, the route is not relative, or the parent is not this tenant's")
+        (status = 422, description = "The key is taken, the route is not relative, or the parent is not this tenant's. A blank menuKey or label is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -553,7 +553,7 @@ async fn create_menu(
         (status = 200, description = "The entry as it now stands", body = MenuEntry),
         (status = 403, description = "Missing rad:menu:update"),
         (status = 404, description = "No such entry"),
-        (status = 422, description = "The move would make a loop, or the parent is not this tenant's")
+        (status = 422, description = "The move would make a loop, or the parent is not this tenant's. A label sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

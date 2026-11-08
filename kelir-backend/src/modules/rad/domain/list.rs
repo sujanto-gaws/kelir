@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// Longest `listKey` §5.6 holds — `list_key VARCHAR(64)`.
 pub const MAX_LIST_KEY_LENGTH: usize = 64;
@@ -239,7 +240,7 @@ fn bounded(
 ) {
     let trimmed = value.trim();
 
-    if required && trimmed.is_empty() {
+    if required && is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -451,6 +452,37 @@ mod tests {
     #[test]
     fn accepts_a_complete_request() {
         assert!(validate_create_list(&create()).is_ok());
+    }
+
+    /// Blank is `is_blank_text` (#797): each of the six required keys and
+    /// labels answers `REQUIRED` for a value that shows nothing.
+    #[test]
+    fn a_key_title_or_label_that_shows_nothing_is_required() {
+        let blank = "\u{200B}";
+        let mut request = create();
+        request.list_key = blank.to_owned();
+        request.title = "\u{FEFF}".to_owned();
+        request.columns = vec![column(blank)];
+        request.columns[0].label = blank.to_owned();
+        request.filters = vec![filter(blank)];
+        request.filters[0].label = blank.to_owned();
+
+        let refused = validate_create_list(&request).expect_err("refused");
+        for path in [
+            "listKey",
+            "title",
+            "columns.0.columnKey",
+            "columns.0.label",
+            "filters.0.filterKey",
+            "filters.0.label",
+        ] {
+            assert_eq!(refused.code_at(path), Some("REQUIRED"), "{path}");
+        }
+
+        let update: UpdateListRequest =
+            serde_json::from_value(json!({ "title": blank })).expect("a request");
+        let refused = validate_update_list(&update).expect_err("refused");
+        assert_eq!(refused.code_at("title"), Some("REQUIRED"));
     }
 
     #[test]

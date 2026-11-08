@@ -96,6 +96,60 @@ async fn list(app: &TestApp, token: &str) -> common::TestResponse {
         .await
 }
 
+/// **[#797]: blank is `is_blank_text`.** A menu key or label, and a list's
+/// key, title or column key, sent as U+200B alone, is `REQUIRED` at its path;
+/// a label with a visible character keeps an invisible edge, as `str::trim`
+/// leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_rad_key_or_label_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let blank = "\u{200B}";
+
+    create(&app, &token, json!({ "menuKey": blank, "label": "L" }))
+        .await
+        .assert_refused_at("menuKey", "REQUIRED");
+    create(&app, &token, json!({ "menuKey": "zw", "label": blank }))
+        .await
+        .assert_refused_at("label", "REQUIRED");
+    let created = create(
+        &app,
+        &token,
+        json!({ "menuKey": "zw", "label": " Buy\u{200B} " }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+    update(&app, &token, id, json!({ "label": "\u{FEFF}" }))
+        .await
+        .assert_refused_at("label", "REQUIRED");
+    let read = app
+        .get(&format!("/api/v1/rad/menus/{id}"), Some(&token))
+        .await;
+    assert_eq!(read.data()["label"], "Buy\u{200B}");
+
+    for (body, path) in [
+        (
+            json!({ "listKey": blank, "title": "T", "columns": [] }),
+            "listKey",
+        ),
+        (
+            json!({ "listKey": "zw", "title": blank, "columns": [] }),
+            "title",
+        ),
+        (
+            json!({ "listKey": "zw", "title": "T", "columns": [{ "columnKey": blank, "label": "C" }] }),
+            "columns.0.columnKey",
+        ),
+    ] {
+        app.post("/api/v1/rad/lists", Some(&token), body)
+            .await
+            .assert_refused_at(path, "REQUIRED");
+    }
+}
+
 fn keys(body: &Value) -> Vec<String> {
     body["data"]
         .as_array()

@@ -255,6 +255,68 @@ async fn a_comment_of_whitespace_is_refused_and_names_the_field() {
     assert_eq!(rows, 0);
 }
 
+/// **[#797]: blank is `is_blank_text`.** A body of U+200B alone shows
+/// nothing and is `COMMENT_EMPTY`; a body with a visible character keeps an
+/// invisible edge, as `str::trim` leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_comment_that_shows_nothing_is_refused_and_an_invisible_edge_is_kept() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_CMT_INVISIBLE").await;
+    let document = draft(&app, &token, type_id).await;
+    let uri = format!("/api/v1/documents/{document}/comments");
+
+    let refused = app
+        .post(&uri, Some(&token), json!({ "body": "\u{200B}\u{200B}" }))
+        .await;
+    refused.assert_refused_at("body", "COMMENT_EMPTY");
+
+    let added = app
+        .post(&uri, Some(&token), json!({ "body": " \u{200B}noted " }))
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+
+    let listed = app.get(&uri, Some(&token)).await;
+    assert_eq!(listed.body["data"][0]["body"], "\u{200B}noted");
+    assert_eq!(listed.body["meta"]["total"], 1);
+}
+
+/// **[#797] AC4: the bound counts what is stored.** An invisible edge is kept,
+/// so it is counted: U+200B and 3,999 visible characters is 4,000 and is
+/// stored whole; U+200B and 4,000 is one over and `TOO_LONG`. The whitespace
+/// `str::trim` removes is not counted.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_invisible_edge_counts_towards_the_comment_bound() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_CMT_BOUND").await;
+    let document = draft(&app, &token, type_id).await;
+    let uri = format!("/api/v1/documents/{document}/comments");
+
+    let at_bound = format!("\u{200B}{}", "x".repeat(3999));
+    let added = app
+        .post(
+            &uri,
+            Some(&token),
+            json!({ "body": format!("  {at_bound}  ") }),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+
+    let over = format!("\u{200B}{}", "x".repeat(4000));
+    app.post(&uri, Some(&token), json!({ "body": over }))
+        .await
+        .assert_refused_at("body", "TOO_LONG");
+
+    let listed = app.get(&uri, Some(&token)).await;
+    assert_eq!(listed.body["meta"]["total"], 1);
+    assert_eq!(listed.body["data"][0]["body"], at_bound.as_str());
+}
+
 #[tokio::test]
 async fn a_comment_over_the_bound_is_refused_before_the_document_is_read() {
     let app = TestApp::spawn().await;

@@ -577,6 +577,96 @@ async fn a_caller_who_can_read_a_system_cannot_read_where_its_secrets_live() {
 // AC-5 — references, never secrets
 // ---------------------------------------------------------------------------
 
+/// **[#797]: blank is `is_blank_text`.** Every required text of a system, an
+/// endpoint and a credential, sent as U+200B alone, is `REQUIRED` at its path
+/// and nothing else. A system code and an endpoint code, a path and a secret
+/// reference were each refused before for their format; the code is now the
+/// one a blank value gets. A name with a visible character keeps an
+/// invisible edge, as `str::trim` leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_required_text_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let blank = "\u{200B}";
+
+    register(
+        &app,
+        &token,
+        json!({ "systemCode": blank, "systemName": "S" }),
+    )
+    .await
+    .assert_refused_at("systemCode", "REQUIRED");
+    register(
+        &app,
+        &token,
+        json!({ "systemCode": "ZW", "systemName": blank }),
+    )
+    .await
+    .assert_refused_at("systemName", "REQUIRED");
+
+    let created = register(
+        &app,
+        &token,
+        json!({ "systemCode": "ZW", "systemName": " \u{200B}Ledger " }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let system = id_of(&created);
+    let read = app.get(&format!("{BASE}/{system}"), Some(&token)).await;
+    assert_eq!(read.data()["systemName"], "\u{200B}Ledger");
+
+    let endpoints = format!("{BASE}/{system}/endpoints");
+    for (field, path) in [
+        ("endpointCode", "endpointCode"),
+        ("name", "name"),
+        ("path", "path"),
+    ] {
+        let mut body = json!({ "endpointCode": "EP", "name": "E", "method": "POST", "path": "/e" });
+        body[field] = json!(blank);
+        app.post(&endpoints, Some(&token), body)
+            .await
+            .assert_refused_at(path, "REQUIRED");
+    }
+
+    app.post(
+        &format!("{BASE}/{system}/credentials"),
+        Some(&token),
+        json!({ "credentialType": "API_KEY", "secretReference": blank }),
+    )
+    .await
+    .assert_refused_at("secretReference", "REQUIRED");
+}
+
+/// **[#797] AC5: the other blank forms keep their code.** A system code of
+/// spaces and a tab, of U+00A0, of U+FEFF, or of whitespace and an invisible
+/// code point together, is `REQUIRED` and nothing else: never the format
+/// refusal a code check would give it if it ran first.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_code_of_whitespace_or_a_no_break_space_is_still_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for blank in [" \t ", "\u{00A0}", "\u{FEFF}", "\u{00A0}\u{200B} "] {
+        register(
+            &app,
+            &token,
+            json!({ "systemCode": blank, "systemName": "S" }),
+        )
+        .await
+        .assert_refused_at("systemCode", "REQUIRED");
+    }
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM external_systems")
+        .fetch_one(&app.pool)
+        .await
+        .expect("a count");
+    assert_eq!(rows, 0, "a blank system code was stored");
+}
+
 /// The key set of a credential, on every route that returns one.
 ///
 /// **Exactly these nine**: the reference, its type, its window and its flag,

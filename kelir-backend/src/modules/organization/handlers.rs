@@ -94,7 +94,7 @@ async fn get_tenant(
     responses(
         (status = 201, description = "Created, with its first administrator", body = TenantView),
         (status = 409, description = "The tenant code, or the administrator's username or email, is already in use"),
-        (status = 422, description = "Validation failed. A tenantCode detail coded SECRET_NAMESPACE_IN_USE refuses a code whose integration secret prefix (KELIR_INTEGRATION_SECRET_<CODE>__, the code upper case with - as _) equals a live tenant's or starts or is started by it, such as A_B beside A-B or ACME__X beside ACME (#655); it names no other tenant's code. The administrator's fields are checked as a created user's are, under administrator.username, administrator.email and administrator.displayName: username or displayName blank (REQUIRED); username, email or displayName over 64, 320 or 200 characters once trimmed (TOO_LONG); a username with a character other than a letter, digit, dot, dash or underscore, or an email not shaped like an address (INVALID_FORMAT) (#610, #616)")
+        (status = 422, description = "Validation failed. A tenantCode detail coded SECRET_NAMESPACE_IN_USE refuses a code whose integration secret prefix (KELIR_INTEGRATION_SECRET_<CODE>__, the code upper case with - as _) equals a live tenant's or starts or is started by it, such as A_B beside A-B or ACME__X beside ACME (#655); it names no other tenant's code. The administrator's fields are checked as a created user's are, under administrator.username, administrator.email and administrator.displayName: username or displayName blank (REQUIRED); username, email or displayName over 64, 320 or 200 characters once trimmed (TOO_LONG); a username with a character other than a letter, digit, dot, dash or underscore, or an email not shaped like an address (INVALID_FORMAT) (#610, #616). A blank tenant name is REQUIRED at name. Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616, #797)")
     ),
     security(("bearer" = []))
 )]
@@ -119,7 +119,8 @@ async fn create_tenant(
     responses(
         (status = 200, description = "Updated; suspending a tenant also revokes its refresh tokens. An access token already issued to a user of a suspended or inactive tenant remains valid until it expires.", body = TenantView),
         (status = 400, description = "Refusing to suspend the tenant the request came from"),
-        (status = 404, description = "No such tenant")
+        (status = 404, description = "No such tenant"),
+        (status = 422, description = "VALIDATION_ERROR: a name sent blank (REQUIRED) or over 200 characters once trimmed (TOO_LONG). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -196,7 +197,7 @@ async fn get_department(
     responses(
         (status = 201, description = "Created", body = Department),
         (status = 409, description = "That departmentId is already in use"),
-        (status = 422, description = "Validation failed, or a reference names something that does not exist. A departmentId of OWNER_DEPARTMENT or REQUESTED_DEPARTMENT, JWSS §5.1's departmentScope words, is refused with a RESERVED_DEPARTMENT_CODE detail on departmentId (#767)")
+        (status = 422, description = "Validation failed, or a reference names something that does not exist. A departmentId of OWNER_DEPARTMENT or REQUESTED_DEPARTMENT, JWSS §5.1's departmentScope words, is refused with a RESERVED_DEPARTMENT_CODE detail on departmentId (#767). A blank departmentId or name is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -216,7 +217,7 @@ async fn create_department(
     responses(
         (status = 200, description = "Updated", body = Department),
         (status = 404, description = "No such department"),
-        (status = 422, description = "Validation failed, or the move would close a loop in the hierarchy. A department's code is fixed, so a departmentId in the body is refused as an UNKNOWN_FIELD")
+        (status = 422, description = "Validation failed, or the move would close a loop in the hierarchy. A department's code is fixed, so a departmentId in the body is refused as an UNKNOWN_FIELD. A name sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

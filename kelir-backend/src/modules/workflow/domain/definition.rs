@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::jwss;
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
+use crate::utils::text::is_blank_text;
 
 /// Longest `workflowKey` §7.1 holds — `workflow_key VARCHAR(64)`.
 pub const MAX_WORKFLOW_KEY_LENGTH: usize = 64;
@@ -246,7 +247,7 @@ fn check_definition(definition: &Value, details: &mut Vec<ValidationDetail>) {
 fn bounded(value: &str, path: &str, max: usize, details: &mut Vec<ValidationDetail>) {
     let trimmed = value.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -352,6 +353,24 @@ mod tests {
         assert!(details(validate_create(&request).expect_err("refused"))
             .iter()
             .any(|detail| detail.path == "workflowKey" && detail.code == "REQUIRED"));
+    }
+
+    /// Blank is `is_blank_text` (#797), on create and on update.
+    #[test]
+    fn a_key_or_name_that_shows_nothing_is_required() {
+        let mut request = create();
+        request.workflow_key = "\u{200B}".to_owned();
+        request.name = "\u{FEFF}".to_owned();
+        let refused = validate_create(&request).expect_err("refused");
+        assert_eq!(refused.code_at("workflowKey"), Some("REQUIRED"));
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
+
+        let update = UpdateWorkflowRequest {
+            name: Some("\u{200B}".to_owned()),
+            ..UpdateWorkflowRequest::default()
+        };
+        let refused = validate_update(&update).expect_err("refused");
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
     }
 
     #[test]

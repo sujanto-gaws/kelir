@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ValidationDetail};
 use crate::modules::integration::domain::secret::namespaces_overlap;
 use crate::response::Pagination;
+use crate::utils::text::is_blank_text;
 
 /// Lifecycle state of a tenant (`tenants.status`, database schema §1.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -314,7 +315,7 @@ pub fn refuse_shared_secret_namespace<'a>(
 fn validate_tenant_name(raw: &str, path: &str, details: &mut Vec<ValidationDetail>) {
     let trimmed = raw.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -438,6 +439,32 @@ mod tests {
     #[test]
     fn accepts_a_well_formed_tenant() {
         assert!(validate_create_tenant(&create_request()).is_ok());
+    }
+
+    /// Blank is `is_blank_text` (#797): a tenant name that shows nothing is
+    /// `REQUIRED`, on create and on update; a visible one with an invisible
+    /// edge passes.
+    #[test]
+    fn a_tenant_name_that_shows_nothing_is_required() {
+        let request = CreateTenantRequest {
+            name: "\u{200B}".to_owned(),
+            ..create_request()
+        };
+        let refused = validate_create_tenant(&request).expect_err("refused");
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
+
+        let update = UpdateTenantRequest {
+            name: Some("\u{FEFF}\u{200B}".to_owned()),
+            status: None,
+        };
+        let refused = validate_update_tenant(&update).expect_err("refused");
+        assert_eq!(refused.code_at("name"), Some("REQUIRED"));
+
+        let request = CreateTenantRequest {
+            name: "Acme\u{200B}".to_owned(),
+            ..create_request()
+        };
+        assert!(validate_create_tenant(&request).is_ok());
     }
 
     #[test]

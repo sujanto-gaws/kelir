@@ -406,6 +406,59 @@ async fn a_duplicate_type_code_is_a_conflict() {
     assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
 }
 
+/// **[#797]: blank is `is_blank_text`.** A type code, a name or a numbering
+/// template of U+200B alone shows nothing and is `REQUIRED` at its path; a
+/// name with a visible character keeps an invisible edge, as `str::trim`
+/// leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_code_name_or_template_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let uri = "/api/v1/document-types";
+
+    let refused = app
+        .post(
+            uri,
+            Some(&token),
+            json!({ "typeCode": "\u{200B}", "name": "N" }),
+        )
+        .await;
+    refused.assert_refused_at("typeCode", "REQUIRED");
+    let refused = app
+        .post(
+            uri,
+            Some(&token),
+            json!({ "typeCode": "PR_ZW", "name": "\u{200B}" }),
+        )
+        .await;
+    refused.assert_refused_at("name", "REQUIRED");
+
+    let created = app
+        .post(
+            uri,
+            Some(&token),
+            json!({ "typeCode": "PR_ZW", "name": " Desks\u{200B} " }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+    put_type(&app, &token, id, json!({ "name": "\u{FEFF}" }))
+        .await
+        .assert_refused_at("name", "REQUIRED");
+    assert_eq!(read_type(&app, &token, id).await["name"], "Desks\u{200B}");
+
+    let rule = app
+        .put(
+            &format!("{uri}/{id}/numbering-rule"),
+            Some(&token),
+            json!({ "ruleTemplate": "\u{200B}", "sequenceScope": "YEAR" }),
+        )
+        .await;
+    rule.assert_refused_at("ruleTemplate", "REQUIRED");
+}
+
 #[tokio::test]
 async fn an_update_records_what_changed_and_replaces_the_bindings_it_is_sent() {
     let app = TestApp::spawn().await;

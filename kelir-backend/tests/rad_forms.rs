@@ -129,6 +129,40 @@ async fn a_form_is_created_read_back_and_listed() {
     );
 }
 
+/// **[#797] through the route: a form key or title.** A key or a title of
+/// U+200B alone is `REQUIRED` at its path, on create and on update; a title
+/// with a visible character keeps an invisible
+/// edge, as `str::trim` leaves it, and reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_form_key_or_title_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let forms = "/api/v1/rad/forms";
+    let body = |key: &str, title: &str| json!({ "formKey": key, "title": title, "definition": definition("pr-zw") });
+
+    app.post(forms, Some(&token), body("\u{200B}", "Requisition"))
+        .await
+        .assert_refused_at("formKey", "REQUIRED");
+    app.post(forms, Some(&token), body("pr-zw", "\u{FEFF}"))
+        .await
+        .assert_refused_at("title", "REQUIRED");
+
+    let created = app
+        .post(forms, Some(&token), body("pr-zw", " \u{200B}Requisition "))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let uri = format!("{forms}/{}", id_of(&created.body["data"]));
+
+    app.put(&uri, Some(&token), json!({ "title": "\u{200B}" }))
+        .await
+        .assert_refused_at("title", "REQUIRED");
+
+    let read = app.get(&uri, Some(&token)).await;
+    assert_eq!(read.body["data"]["title"], "\u{200B}Requisition");
+}
+
 #[tokio::test]
 async fn a_definition_that_is_not_jfss_is_refused_rather_than_stored() {
     let app = TestApp::spawn().await;

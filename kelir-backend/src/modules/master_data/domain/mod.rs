@@ -49,6 +49,7 @@ pub use role::*;
 pub use role_view::*;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// Longest `partyId` the aggregate allows, and the bound
 /// `ck_mdm_parties_party_code_len` holds in the database.
@@ -138,7 +139,7 @@ pub(super) fn require_code(
 ) {
     let trimmed = value.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -155,15 +156,17 @@ pub(super) fn require_code(
     }
 }
 
+/// Required and bounded. Blank is [`is_blank_text`] (#797); the bound is
+/// counted on `str::trim`'s value, which is what is stored.
 pub(super) fn require_name(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
-    match non_empty(value) {
-        None => details.push(ValidationDetail::new(
+    match value {
+        Some(name) if !is_blank_text(name) => bound_name(Some(name), path, details),
+        _ => details.push(ValidationDetail::new(
             path,
             "required",
             "REQUIRED",
             "This field is required",
         )),
-        Some(name) => bound_name(Some(name), path, details),
     }
 }
 

@@ -526,6 +526,23 @@ mod tests {
         assert!(validate_register(&register()).is_ok());
     }
 
+    /// Blank is `is_blank_text` (#797): a system code or name that shows
+    /// nothing is `REQUIRED` and nothing else.
+    #[test]
+    fn a_code_or_name_that_shows_nothing_is_required() {
+        let mut request = register();
+        request.system_code = "\u{200B}".to_owned();
+        request.system_name = "\u{FEFF}".to_owned();
+
+        assert_eq!(
+            codes(&request),
+            [
+                ("systemCode".to_owned(), "REQUIRED".to_owned()),
+                ("systemName".to_owned(), "REQUIRED".to_owned())
+            ]
+        );
+    }
+
     #[test]
     fn a_base_url_must_be_http_or_https_with_a_host() {
         for bad in [

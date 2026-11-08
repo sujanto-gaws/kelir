@@ -122,7 +122,7 @@ async fn get_definition(
         (status = 201, description = "Created as revision 1, in DRAFT", body = WorkflowDefinition),
         (status = 403, description = "Missing workflow:definition:create"),
         (status = 409, description = "That workflow key already has revisions"),
-        (status = 422, description = "The definition is not a valid JWSS document, or its graph does not terminate")
+        (status = 422, description = "The definition is not a valid JWSS document, or its graph does not terminate. A blank workflowKey or name is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -142,7 +142,7 @@ async fn create_definition(
     responses(
         (status = 200, description = "Updated", body = WorkflowDefinition),
         (status = 404, description = "No such definition"),
-        (status = 422, description = "The revision is published, or the definition is invalid")
+        (status = 422, description = "The revision is published, or the definition is invalid. A name sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

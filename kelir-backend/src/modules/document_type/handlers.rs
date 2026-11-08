@@ -67,7 +67,7 @@ async fn get_numbering_rule(
     responses(
         (status = 200, description = "The rule now in force; the previous one is kept, deactivated", body = NumberingRule),
         (status = 404, description = "No such document type"),
-        (status = 422, description = "The template is malformed, or the counter would be rewound past a number already issued")
+        (status = 422, description = "The template is malformed, or the counter would be rewound past a number already issued. A blank ruleTemplate is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -144,7 +144,7 @@ async fn get_type(
     responses(
         (status = 201, description = "Created", body = DocumentType),
         (status = 409, description = "That typeCode is already in use"),
-        (status = 422, description = "Validation failed, or a binding names something that does not exist")
+        (status = 422, description = "Validation failed, or a binding names something that does not exist. A blank typeCode or name is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -171,7 +171,8 @@ async fn create_type(
             request without `expectedWorkflows` is never refused this way"),
         (status = 422, description = "Validation failed, or a binding names something that does not \
             exist, or `expectedWorkflows` was sent without `workflows` (at `expectedWorkflows`, \
-            code `REQUIRES_WORKFLOWS`)")
+            code `REQUIRES_WORKFLOWS`). A blank name is REQUIRED; blank is whitespace or a code \
+            point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

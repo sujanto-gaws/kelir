@@ -14,6 +14,7 @@ use super::{
     MAX_CODE_LENGTH, MAX_EXTERNAL_ID_LENGTH, MAX_PARTY_CODE_LENGTH, MAX_VOCABULARY_LENGTH,
 };
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// Validates a create payload, collecting every problem rather than stopping at
 /// the first — a form should be able to mark all its bad fields at once
@@ -408,7 +409,7 @@ fn validate_party_group(
 fn validate_party_code(party_code: &str, details: &mut Vec<ValidationDetail>) {
     let trimmed = party_code.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             "partyId",
             "required",
@@ -476,6 +477,72 @@ mod tests {
                 details.into_iter().map(|detail| detail.path).collect()
             }
             other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    /// Blank is `is_blank_text` (#797): each required code and name of a
+    /// party answers `REQUIRED` for a value that shows nothing.
+    #[test]
+    fn a_party_code_name_or_child_code_that_shows_nothing_is_required() {
+        let blank = "\u{200B}".to_owned();
+        let person = CreatePartyRequest {
+            party_id: blank.clone(),
+            person: Some(PersonInput {
+                first_name: Some(blank.clone()),
+                last_name: Some("\u{FEFF}".to_owned()),
+                ..PersonInput::default()
+            }),
+            ..person_request()
+        };
+        let refused = validate_create_party(&person).expect_err("refused");
+        for path in ["partyId", "person.firstName", "person.lastName"] {
+            assert_eq!(refused.code_at(path), Some("REQUIRED"), "{path}");
+        }
+
+        let group = CreatePartyRequest {
+            party_group: Some(PartyGroupInput {
+                group_name: Some(blank.clone()),
+                ..PartyGroupInput::default()
+            }),
+            identifications: vec![PartyIdentificationInput {
+                party_identification_type_id: blank.clone(),
+                id_value: blank.clone(),
+                issued_by: None,
+                issue_date: None,
+                expire_date: None,
+                additional_attributes: None,
+            }],
+            relationships_from: vec![PartyRelationshipInput {
+                party_id_from: "PARTY-0001".to_owned(),
+                role_type_id_from: None,
+                party_id_to: "PARTY-0002".to_owned(),
+                role_type_id_to: None,
+                party_relationship_type_id: blank.clone(),
+                from_date: epoch(),
+                thru_date: None,
+                status_id: None,
+                priority: None,
+                comments: None,
+                additional_attributes: None,
+            }],
+            classifications: vec![PartyClassificationInput {
+                party_class_type_id: blank.clone(),
+                party_classification_id: None,
+                from_date: epoch(),
+                thru_date: None,
+                comments: None,
+            }],
+            ..group_request()
+        };
+        let refused = validate_create_party(&group).expect_err("refused");
+        for path in [
+            "partyGroup.groupName",
+            "identifications[0].partyIdentificationTypeId",
+            "identifications[0].idValue",
+            "relationshipsFrom[0].partyRelationshipTypeId",
+            "classifications[0].partyClassTypeId",
+        ] {
+            assert_eq!(refused.code_at(path), Some("REQUIRED"), "{path}");
         }
     }
 

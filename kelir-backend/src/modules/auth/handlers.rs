@@ -275,7 +275,7 @@ async fn change_password(
     request_body = RequestResetRequest,
     responses(
         (status = 202, description = "If that identifier belongs to an account that can sign in, a reset link has been sent. The answer is the same either way, deliberately: a different one would say whether the account exists"),
-        (status = 422, description = "The identifier was missing")
+        (status = 422, description = "The identifier was missing or blank (REQUIRED at username). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     )
 )]
 async fn forgot_password(

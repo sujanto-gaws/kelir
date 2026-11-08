@@ -49,7 +49,7 @@ pub fn routes() -> Router<AppState> {
         (status = 200, description = "The stored comment, or reply", body = Comment),
         (status = 403, description = "Missing comment:create or document:read"),
         (status = 404, description = "No such document, or it is not one this caller may see"),
-        (status = 422, description = "An empty body, one over the length bound, or a parentCommentId this document does not hold or that names a reply")
+        (status = 422, description = "An empty body, one over the length bound, or a parentCommentId this document does not hold or that names a reply. A blank body is COMMENT_EMPTY; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]
@@ -71,7 +71,7 @@ pub async fn add_comment(
         (status = 200, description = "The comment as it now reads, with editedAt stamped", body = Comment),
         (status = 403, description = "Missing comment:update or document:read, or the comment is somebody else's"),
         (status = 404, description = "No such document or comment, or one this caller may not see; a deleted comment is not editable"),
-        (status = 422, description = "An empty body, or one over the length bound")
+        (status = 422, description = "An empty body, or one over the length bound. A blank body is COMMENT_EMPTY; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// How many keys one document may carry.
 ///
@@ -127,7 +128,7 @@ pub fn validate(metadata: &MetadataSet) -> Result<(), AppError> {
     }
 
     for key in metadata.keys() {
-        if key.trim().is_empty() {
+        if is_blank_text(key) {
             details.push(ValidationDetail::new(
                 "metadata",
                 "required",
@@ -192,6 +193,20 @@ mod tests {
         metadata.insert("   ".to_owned(), entry("something"));
 
         assert!(validate(&metadata).is_err());
+    }
+
+    /// Blank is `is_blank_text` (#797): a key that shows nothing is
+    /// `EMPTY_KEY`, and one with a visible character passes.
+    #[test]
+    fn a_key_that_shows_nothing_is_refused() {
+        let mut metadata = MetadataSet::new();
+        metadata.insert("\u{200B}".to_owned(), entry("something"));
+        let refused = validate(&metadata).expect_err("blank");
+        assert_eq!(refused.code_at("metadata"), Some("EMPTY_KEY"));
+
+        let mut metadata = MetadataSet::new();
+        metadata.insert("\u{200B}k".to_owned(), entry("something"));
+        assert!(validate(&metadata).is_ok());
     }
 
     #[test]

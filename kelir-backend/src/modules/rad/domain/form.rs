@@ -24,6 +24,7 @@ use super::jfss;
 use crate::error::{AppError, ValidationDetail};
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// Longest `formKey` §5.3 holds — `form_key VARCHAR(64)`.
 pub const MAX_FORM_KEY_LENGTH: usize = 64;
@@ -181,7 +182,7 @@ pub struct UpdateFormRequest {
 fn require_key(value: &str, path: &str, details: &mut Vec<ValidationDetail>) {
     let trimmed = value.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             path,
             "required",
@@ -201,7 +202,7 @@ fn require_key(value: &str, path: &str, details: &mut Vec<ValidationDetail>) {
 fn require_title(value: &str, details: &mut Vec<ValidationDetail>) {
     let trimmed = value.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             "title",
             "required",
@@ -315,6 +316,22 @@ mod tests {
     #[test]
     fn accepts_a_complete_request() {
         assert!(validate_create_form(&create()).is_ok());
+    }
+
+    /// Blank is `is_blank_text` (#797), on create and on update.
+    #[test]
+    fn a_key_or_title_that_shows_nothing_is_required() {
+        let mut request = create();
+        request.form_key = "\u{200B}".to_owned();
+        request.title = "\u{FEFF}".to_owned();
+        let refused = validate_create_form(&request).expect_err("refused");
+        assert_eq!(refused.code_at("formKey"), Some("REQUIRED"));
+        assert_eq!(refused.code_at("title"), Some("REQUIRED"));
+
+        let update: UpdateFormRequest =
+            serde_json::from_value(json!({ "title": "\u{200B}" })).expect("a request");
+        let refused = validate_update_form(&update).expect_err("refused");
+        assert_eq!(refused.code_at("title"), Some("REQUIRED"));
     }
 
     #[test]

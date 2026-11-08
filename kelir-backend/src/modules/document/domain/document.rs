@@ -12,6 +12,7 @@ use super::metadata::{self, MetadataSet};
 use super::status::DocumentStatus;
 use crate::error::{AppError, ValidationDetail};
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// `documents.title` is `VARCHAR(200)`.
 pub const MAX_TITLE_LENGTH: usize = 200;
@@ -302,7 +303,7 @@ fn check_title(title: Option<&str>, details: &mut Vec<ValidationDetail>) {
 
     let trimmed = title.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         details.push(ValidationDetail::new(
             "title",
             "required",
@@ -385,6 +386,15 @@ mod tests {
     #[test]
     fn a_blank_title_is_refused() {
         assert!(validate_create(&create("   ")).is_err());
+    }
+
+    /// Blank is `is_blank_text` (#797): a title that shows nothing is
+    /// `REQUIRED`, and one with a visible character passes.
+    #[test]
+    fn a_title_that_shows_nothing_is_refused() {
+        let refused = validate_create(&create("\u{200B}\u{2060}")).expect_err("blank");
+        assert_eq!(refused.code_at("title"), Some("REQUIRED"));
+        assert!(validate_create(&create("\u{200B}A")).is_ok());
     }
 
     #[test]

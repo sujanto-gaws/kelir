@@ -40,6 +40,7 @@ use super::{
 };
 use crate::error::{AppError, ValidationDetail};
 use crate::utils::serde::present_or_absent;
+use crate::utils::text::is_blank_text;
 
 /// Longest `facilityId` §4.16 holds — `facility_code VARCHAR(64)`.
 pub const MAX_FACILITY_CODE_LENGTH: usize = 64;
@@ -232,10 +233,10 @@ pub fn validate_update_facility(
 
 /// A reference travels as a business code, so it is bounded like one. Whether
 /// it resolves is the service's question — this only refuses what could not
-/// name anything.
+/// name anything. Blank is [`is_blank_text`] (#797).
 fn bounded_reference(value: Option<&str>, path: &str, details: &mut Vec<ValidationDetail>) {
-    match non_empty(value) {
-        None if value.is_some() => details.push(ValidationDetail::new(
+    match value {
+        Some(reference) if is_blank_text(reference) => details.push(ValidationDetail::new(
             path,
             "required",
             "REQUIRED",
@@ -314,6 +315,38 @@ mod tests {
         let paths: Vec<&str> = details.iter().map(|detail| detail.path.as_str()).collect();
         assert!(paths.contains(&"facilityId"), "{paths:?}");
         assert!(paths.contains(&"name"), "{paths:?}");
+    }
+
+    /// Blank is `is_blank_text` (#797): `require_code`, `require_name` and a
+    /// reference sent blank each answer `REQUIRED` for a value that shows
+    /// nothing, on create and on update.
+    #[test]
+    fn a_code_name_or_reference_that_shows_nothing_is_required() {
+        let mut request = create("\u{200B}");
+        request.name = Some("\u{FEFF}".to_owned());
+        request.parent_facility_id = Some("\u{200B}".to_owned());
+        request.owner_party_id = Some("\u{200B}".to_owned());
+        let refused = validate_create_facility(&request).expect_err("refused");
+        for path in ["facilityId", "name", "parentFacilityId", "ownerPartyId"] {
+            assert_eq!(refused.code_at(path), Some("REQUIRED"), "{path}");
+        }
+
+        let update = UpdateFacilityRequest {
+            name: Some("\u{200B}".to_owned()),
+            facility_type_id: None,
+            parent_facility_id: Some(Some("\u{200B}".to_owned())),
+            owner_party_id: Some(Some("\u{200B}".to_owned())),
+            address: None,
+            additional_attributes: None,
+        };
+        let refused = validate_update_facility(&update, "FAC-0001").expect_err("refused");
+        for path in ["name", "parentFacilityId", "ownerPartyId"] {
+            assert_eq!(refused.code_at(path), Some("REQUIRED"), "{path}");
+        }
+
+        let mut request = create("\u{200B}FAC");
+        request.name = Some("Office\u{200B}".to_owned());
+        assert!(validate_create_facility(&request).is_ok());
     }
 
     #[test]

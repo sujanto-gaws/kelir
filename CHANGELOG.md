@@ -117,6 +117,25 @@ While the major version is `0`, the public API may change in any release.
   it is. A display name or role name stored blank or invisible before the
   upgrade is not repaired, and an edit that sends it back unchanged is
   refused until it is given a visible one.
+- **A blank required text field answers `REQUIRED` where it answered
+  another code, and a password-reset request for an invisible username is
+  refused** ([#797](https://github.com/sujanto-gaws/kelir/issues/797)).
+  A value of only whitespace or of code points that show nothing, such as
+  U+200B, now answers 422 at its path with the module's blank code. These
+  answers change for a client, and no others: an
+  integration `systemCode`, `endpointCode` or endpoint `path` was
+  `INVALID_FORMAT` and is now `REQUIRED`; an integration `secretReference`
+  was `NOT_A_SECRET_REFERENCE` and is now `REQUIRED`; a numbering
+  `ruleTemplate` was `MISSING_SEQUENCE` and is now `REQUIRED`; an attachment
+  reference's `url` was `URL_SCHEME_NOT_ALLOWED` and is now `URL_REQUIRED`;
+  a facility's `parentFacilityId` or `ownerPartyId`, on a create or an
+  update, was `NOT_FOUND` and is now `REQUIRED`; and
+  `POST /api/v1/auth/forgot-password` with a wholly invisible `username`
+  answered 202 and is now 422 `REQUIRED`, as a whitespace-only one already
+  was. A client that matched the old code, or that sent such a username and
+  expected 202, must match the new one. A value stored invisible before the
+  upgrade is not repaired, and an edit that sends it back is refused until
+  it is given a visible one.
 - **Attachments and backups are encrypted at rest, and the upgrade needs two
   keys and a re-run of the provisioner**
   ([#778](https://github.com/sujanto-gaws/kelir/issues/778), NFR-SEC-009,
@@ -943,6 +962,37 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A required text field of only invisible characters is blank in every
+  module** ([#797](https://github.com/sujanto-gaws/kelir/issues/797),
+  construction plan 21 row 37). #616 made `is_blank_text` the one definition
+  of blank and moved identity to it; every other module still asked Rust's
+  `trim()`, which knows whitespace and not the format characters that draw
+  nothing. So a comment, a reference label, a document title, a metadata key,
+  a document type's code or name, a numbering template, a tenant's or a
+  department's name or code, a party's or a facility's code, name or child
+  code, a role profile's business number, an integration system's,
+  endpoint's or credential's required text, a RAD menu's, list's or form's
+  key, title or label, or a workflow's key or name, sent as one U+200B ZERO
+  WIDTH SPACE or U+FEFF, was stored and listed with nothing visible, and a
+  password-reset request for such a username answered 202. Each is now 422
+  at its own path with the code its module already gave whitespace:
+  `REQUIRED`, or `COMMENT_EMPTY`, `LABEL_REQUIRED`, `URL_REQUIRED` or
+  `EMPTY_KEY`. Where another answer used to come first, it moves (*Upgrade
+  notes*, above): an integration `systemCode`, `endpointCode` and endpoint
+  `path` from `INVALID_FORMAT` to `REQUIRED`; an integration
+  `secretReference` from `NOT_A_SECRET_REFERENCE` to `REQUIRED`; a numbering
+  `ruleTemplate` from `MISSING_SEQUENCE` to `REQUIRED`; an attachment
+  reference's `url` from `URL_SCHEME_NOT_ALLOWED` to `URL_REQUIRED`; a
+  facility's `parentFacilityId` or `ownerPartyId`, on a create or an update,
+  from `NOT_FOUND` to `REQUIRED`; and `POST /api/v1/auth/forgot-password`
+  with a wholly invisible `username` from 202 to 422 `REQUIRED`, as a
+  whitespace-only one already was. No other answer moves. What is stored is unchanged: the value `trim()` leaves, so
+  a visible value with an invisible character at its edge is kept as sent and
+  counted. A value stored invisible before the upgrade is not repaired, and an
+  edit that sends it back is refused until it is given a visible one.
+  Optional fields where blank means absent are unchanged and follow
+  separately; the JFSS `required` rule is unchanged. No migration, and no
+  schema change.
 - **A document type bound to another tenant's workflow, or to none, refuses
   its submissions with 422** ([#774](https://github.com/sujanto-gaws/kelir/issues/774),
   construction plan 21 row 30). No route writes such a binding, since a

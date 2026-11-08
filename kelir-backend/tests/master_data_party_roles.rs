@@ -144,6 +144,74 @@ fn role_path(party: Uuid, role_type: &str) -> String {
     format!("{PARTIES}/{party}/roles/{role_type}")
 }
 
+/// **[#797] through the route: a business number.** A supplier number of
+/// U+200B alone is `REQUIRED` at its path, on the first assignment and on a
+/// change to it, and the stored number is left as it was.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_business_number_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ZW", "Acme Supplies")).await;
+    let uri = role_path(party, "SUPPLIER");
+
+    app.put(&uri, Some(&token), supplier_profile("\u{200B}"))
+        .await
+        .assert_refused_at("profile.supplier.supplierNumber", "REQUIRED");
+
+    let assigned = app
+        .put(&uri, Some(&token), supplier_profile("SUP-0001"))
+        .await;
+    assert_eq!(assigned.status, StatusCode::CREATED, "{}", assigned.body);
+
+    app.put(&uri, Some(&token), supplier_profile("\u{FEFF}"))
+        .await
+        .assert_refused_at("profile.supplier.supplierNumber", "REQUIRED");
+
+    let roles = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    assert!(
+        roles.body.to_string().contains("SUP-0001"),
+        "the stored number changed: {}",
+        roles.body
+    );
+}
+
+/// **[#797]: a role type path segment that shows nothing.** `assign_role`
+/// looks the role type up before `validate_assign_role` runs, so a segment
+/// of U+200B alone, like one of spaces, is answered by the lookup: 422
+/// `NOT_FOUND` at `roleTypeId`, and no role is assigned. `require_code` on
+/// the role type is not reached from this route, so this code does not move.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_role_type_segment_that_shows_nothing_is_refused_at_role_type_id() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let party = create_party(&app, &token, party_group("PARTY-ZW", "Acme Supplies")).await;
+
+    for segment in ["%E2%80%8B", "%20%20"] {
+        app.put(
+            &format!("{PARTIES}/{party}/roles/{segment}"),
+            Some(&token),
+            supplier_profile("SUP-0001"),
+        )
+        .await
+        .assert_refused_at("roleTypeId", "NOT_FOUND");
+    }
+
+    let roles = app
+        .get(&format!("{PARTIES}/{party}/roles"), Some(&token))
+        .await;
+    assert!(
+        !roles.body.to_string().contains("SUP-0001"),
+        "a role was assigned: {}",
+        roles.body
+    );
+}
+
 // ---------------------------------------------------------------------------
 // One party, many roles
 // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ pub use external_system::{
 };
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// `VARCHAR(64)` — `system_code`, `endpoint_code` (Database Schema §1.3.1).
 pub const MAX_CODE_LENGTH: usize = 64;
@@ -74,11 +75,13 @@ impl Problems {
     }
 }
 
-/// A required, bounded, trimmed text value.
+/// A required, bounded, trimmed text value. Blank is [`is_blank_text`]
+/// (#797), so a code or path that shows nothing is `REQUIRED` and is not
+/// checked for its form.
 pub fn required_text(value: &str, path: &str, max: usize, problems: &mut Problems) {
     let trimmed = value.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         problems.push(path, "required", "REQUIRED", format!("{path} is required"));
     } else if trimmed.chars().count() > max {
         problems.push(
@@ -153,6 +156,22 @@ mod tests {
 
         assert_eq!(details.len(), 1, "one failure, not two: {details:?}");
         assert_eq!(details[0].code, "REQUIRED");
+    }
+
+    /// Blank is `is_blank_text` (#797). A code that shows nothing was
+    /// `INVALID_FORMAT` before; it is now `REQUIRED`, alone, like whitespace.
+    #[test]
+    fn a_code_or_text_that_shows_nothing_is_required_not_malformed() {
+        for blank in ["\u{200B}", " \u{FEFF} "] {
+            let details = details(check_code(blank).expect_err("refused"));
+            assert_eq!(details.len(), 1, "{blank:?}: {details:?}");
+            assert_eq!(details[0].code, "REQUIRED", "{blank:?}");
+        }
+
+        let mut problems = Problems::new();
+        required_text("\u{200B}", "systemName", MAX_CODE_LENGTH, &mut problems);
+        let refused = problems.finish().expect_err("refused");
+        assert_eq!(refused.code_at("systemName"), Some("REQUIRED"));
     }
 
     #[test]

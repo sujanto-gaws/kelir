@@ -138,6 +138,91 @@ async fn create_ok(app: &TestApp, token: &str, body: Value) -> Uuid {
 // Create and read
 // ---------------------------------------------------------------------------
 
+/// **[#797]: blank is `is_blank_text`.** A party code or group name of U+200B
+/// alone shows nothing and is `REQUIRED` at its path; a group name with a
+/// visible character keeps an invisible edge, as `str::trim` leaves it, and
+/// reads back so.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_party_code_or_name_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    app.post(PARTIES, Some(&token), party_group("\u{200B}", "Acme"))
+        .await
+        .assert_refused_at("partyId", "REQUIRED");
+    app.post(
+        PARTIES,
+        Some(&token),
+        party_group("ORG-ZW", "\u{200B}\u{FEFF}"),
+    )
+    .await
+    .assert_refused_at("partyGroup.groupName", "REQUIRED");
+
+    let id = create_ok(&app, &token, party_group("ORG-ZW", " Acme\u{200B} ")).await;
+    let read = app.get(&format!("{PARTIES}/{id}"), Some(&token)).await;
+    assert_eq!(read.data()["partyGroup"]["groupName"], "Acme\u{200B}");
+}
+
+/// **[#797] through the route: a child's required code.** An identification
+/// type or value, a classification type, or a relationship type (on either
+/// side) of U+200B alone is `REQUIRED` at its own path, through
+/// `require_code`; before, the party was stored with it (201). Nothing is
+/// stored.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_child_code_that_shows_nothing_is_required_at_its_own_path() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    create_ok(&app, &token, party_group("PARTY-ACME", "Acme Supplies")).await;
+    let blank = json!("\u{200B}");
+
+    let mut identification_type = full_person("PARTY-ZW");
+    identification_type["identifications"][0]["partyIdentificationTypeId"] = blank.clone();
+    let mut identification_value = full_person("PARTY-ZW");
+    identification_value["identifications"][0]["idValue"] = blank.clone();
+    let mut class_type = full_person("PARTY-ZW");
+    class_type["classifications"][0]["partyClassTypeId"] = blank.clone();
+    let mut from_type = full_person("PARTY-ZW");
+    from_type["relationshipsFrom"] = json!([{
+        "partyIdFrom": "PARTY-ZW",
+        "partyIdTo": "PARTY-ACME",
+        "partyRelationshipTypeId": blank,
+        "fromDate": "2026-01-01T00:00:00Z",
+    }]);
+    let mut to_type = full_person("PARTY-ZW");
+    to_type["relationshipsTo"] = json!([{
+        "partyIdFrom": "PARTY-ACME",
+        "partyIdTo": "PARTY-ZW",
+        "partyRelationshipTypeId": blank,
+        "fromDate": "2026-01-01T00:00:00Z",
+    }]);
+
+    for (body, path) in [
+        (
+            identification_type,
+            "identifications[0].partyIdentificationTypeId",
+        ),
+        (identification_value, "identifications[0].idValue"),
+        (class_type, "classifications[0].partyClassTypeId"),
+        (from_type, "relationshipsFrom[0].partyRelationshipTypeId"),
+        (to_type, "relationshipsTo[0].partyRelationshipTypeId"),
+    ] {
+        app.post(PARTIES, Some(&token), body)
+            .await
+            .assert_refused_at(path, "REQUIRED");
+    }
+
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mdm_parties WHERE party_code = 'PARTY-ZW'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("a count");
+    assert_eq!(stored, 0, "a party with a blank child code was stored");
+}
+
 #[tokio::test]
 async fn creates_a_person_party_and_reads_the_whole_aggregate_back() {
     let app = TestApp::spawn().await;

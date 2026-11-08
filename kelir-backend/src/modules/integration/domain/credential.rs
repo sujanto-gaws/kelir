@@ -43,6 +43,7 @@ use uuid::Uuid;
 use super::external_system::AuthType;
 use super::Problems;
 use crate::error::AppError;
+use crate::utils::text::is_blank_text;
 
 /// The schemes a reference may use: the two secret stores architectures/03
 /// names (environment and vault).
@@ -158,7 +159,7 @@ pub fn validate_secret_reference(value: &str, problems: &mut Problems) {
     const PATH: &str = "secretReference";
     let trimmed = value.trim();
 
-    if trimmed.is_empty() {
+    if is_blank_text(trimmed) {
         problems.push(PATH, "required", "REQUIRED", "secretReference is required");
         return;
     }
@@ -284,6 +285,19 @@ mod tests {
 
         assert_eq!(details[0].path, "secretReference");
         assert_eq!(details[0].code, "NOT_A_SECRET_REFERENCE");
+    }
+
+    /// Blank is `is_blank_text` (#797): a reference that shows nothing is
+    /// `REQUIRED`, not `NOT_A_SECRET_REFERENCE`.
+    #[test]
+    fn a_reference_that_shows_nothing_is_required() {
+        let mut problems = Problems::new();
+        validate_secret_reference("\u{200B}", &mut problems);
+
+        let details = details(problems.finish().expect_err("refused"));
+
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert_eq!(details[0].code, "REQUIRED");
     }
 
     #[test]

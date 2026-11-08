@@ -452,6 +452,55 @@ async fn a_reference_records_a_link_and_carries_none_of_a_files_fields() {
     }
 }
 
+/// **[#797]: blank is `is_blank_text`.** A label or URL of U+200B alone shows
+/// nothing and is refused with its own code, and nothing is stored; a label
+/// with a visible character keeps an invisible edge, as `str::trim` leaves it.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_reference_label_or_url_that_shows_nothing_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_ATT_INVISIBLE").await;
+    let document = draft(&app, &token, type_id).await;
+    let uri = format!("/api/v1/documents/{document}/references");
+    let url = "https://vendor.example.test/q";
+
+    let refused = app
+        .post(
+            &uri,
+            Some(&token),
+            json!({ "label": "\u{200B}", "url": url }),
+        )
+        .await;
+    refused.assert_refused_at("label", "LABEL_REQUIRED");
+    let refused = app
+        .post(
+            &uri,
+            Some(&token),
+            json!({ "label": "Portal", "url": "\u{200B}" }),
+        )
+        .await;
+    refused.assert_refused_at("url", "URL_REQUIRED");
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM document_external_references")
+        .fetch_one(&app.pool)
+        .await
+        .expect("a count");
+    assert_eq!(rows, 0);
+
+    let added = app
+        .post(
+            &uri,
+            Some(&token),
+            json!({ "label": " Portal\u{200B} ", "url": url }),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+    let listed = app.get(&uri, Some(&token)).await;
+    assert_eq!(listed.body["data"][0]["label"], "Portal\u{200B}");
+}
+
 /// **A reference is not in the attachments list**, and the scanner cannot see
 /// it: `pending_scans` reads `attachments`, and a reference is not one.
 #[tokio::test]

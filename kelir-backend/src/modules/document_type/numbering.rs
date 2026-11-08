@@ -56,6 +56,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::is_blank_text;
 
 /// Longest `ruleTemplate` §6.3 holds — `rule_template VARCHAR(200)`.
 pub const MAX_TEMPLATE_LENGTH: usize = 200;
@@ -278,7 +279,7 @@ pub fn validate_set(
     let mut details = Vec::new();
     let template = request.rule_template.trim();
 
-    if template.is_empty() {
+    if is_blank_text(template) {
         details.push(ValidationDetail::new(
             "ruleTemplate",
             "required",
@@ -430,6 +431,16 @@ mod tests {
             AppError::Validation { details } => details,
             other => panic!("expected a validation error, got {other:?}"),
         }
+    }
+
+    /// Blank is `is_blank_text` (#797): a template that shows nothing is
+    /// `REQUIRED`, not a template missing `{sequence}`.
+    #[test]
+    fn a_template_that_shows_nothing_is_required() {
+        let refused =
+            validate_set(&request("\u{200B}", SequenceScope::Year), None).expect_err("refused");
+        assert_eq!(refused.code_at("ruleTemplate"), Some("REQUIRED"));
+        assert_eq!(details(refused).len(), 1);
     }
 
     #[test]
