@@ -36,10 +36,12 @@
 # no backup identity but the throwaway ones the job makes. What the rule above
 # guards against, the probe's root, its trace and its scratch databases and
 # stores touching a host with something to lose, cannot happen there. The
-# backup runs as root, its settings named through `sudo env`, against a
-# database and a keyed MinIO of the job's own, seeded first by
-# `encryption-at-rest.seed.sh`, because over an empty database and bucket
-# every comparison here passes with encryption off.
+# backup runs as root in the container above, `postgres:16` with the tools
+# installed, so its client matches the job's PostgreSQL 16 service (the
+# runner's own `pg_dump` is newer, and its `pg_restore` sends a setting 16
+# refuses). It runs against a database and a keyed MinIO of the job's own,
+# seeded first by `encryption-at-rest.seed.sh`, because over an empty
+# database and bucket every comparison here passes with encryption off.
 # `objects` is not run in CI: it reads MinIO's data volume from outside MinIO.
 #
 # Settings:

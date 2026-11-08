@@ -204,7 +204,7 @@ jobs:
 
       # **Encryption at rest is probed here, not only by hand** (#807, plan 21
       # row 41). `deploy/staging/encryption-at-rest.probe.sh` was written for a
-      # Linux container and run by hand before a release; these five steps run
+      # Linux container and run by hand before a release; these six steps run
       # its `deploy` and `backup` modes on every push. Its `objects` mode reads
       # MinIO's data volume from outside MinIO and is not run here. The
       # product owner allowed a disposable runner as the probe's host
@@ -217,33 +217,66 @@ jobs:
       # on a runner image nobody has tried says which fact was wrong.
       - name: Install the encryption probe's tools
         working-directory: .
-        # `age` and `strace` from Ubuntu's archive, after the narrowing the
-        # browser job uses (#408): a third-party source refusing an update
-        # must not hold this job shut either. `jq`, `psql`, `pg_dump`,
-        # `pg_restore`, `runuser` and `ps` come with the runner image, and the
-        # step says where each was found rather than assuming it.
+        # The runner's tools are for the `deploy` mode and the seed: `age`
+        # from Ubuntu's archive, after the narrowing the browser job uses
+        # (#408), so a third-party source refusing an update cannot hold this
+        # job shut; `jq` and `psql` from the image. The step says where each
+        # was found rather than assuming it. The `backup` mode's tools are in
+        # the next step's container, which says why.
         run: |
           set -euo pipefail
           sudo "${GITHUB_WORKSPACE}/scripts/narrow-apt-to-ubuntu.sh"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends age strace
-          for tool in age age-keygen jq strace psql pg_dump pg_restore runuser ps docker; do
+          sudo apt-get install -y --no-install-recommends age
+          for tool in age age-keygen jq psql docker; do
             path="$(command -v "${tool}")" || { echo "::error::${tool} is not on this runner"; exit 1; }
             echo "${tool}: ${path} ($(dpkg -S "$(readlink -f "${path}")" 2>/dev/null | cut -d: -f1 || echo 'no package'))"
           done
           age --version
           jq --version
-          strace -V | head -1
-          pg_dump --version
-          psql "${DATABASE_URL}" -tA -c 'SHOW server_version'
-          # The staging host's PostgreSQL package makes this user, and the
-          # backup runs `pg_dump` as it. Made here only if the image lacks it,
-          # and said so.
-          id postgres || { echo "::notice::no postgres OS user on this image; adding one"; sudo useradd --system --no-create-home postgres; id postgres; }
-          # The probe's trace needs ptrace as root, across `runuser`. Asked
-          # here once, so a refusal names itself before the probe starts.
-          sudo strace -f -qq -o /dev/null runuser -u postgres -- true
-          echo "strace traces through runuser as root"
+
+      - name: Build the backup probe's container
+        working-directory: .
+        # **The backup runs in `postgres:16`, the service's own image, and not
+        # on the runner** (#807). The runner's `pg_dump` is whatever the
+        # image ships: 18.6 from PGDG on ubuntu-26.04, whose `pg_restore`
+        # sends `SET transaction_timeout`, which a 16 server refuses, and
+        # Ubuntu 26.04's archive has no 16 client to install instead. This
+        # image's client is the server's by construction, it has the
+        # `postgres` OS user and `runuser`, and it is the container the
+        # probe's header has always named. Its tools come from Debian's
+        # archive alone: PGDG's source, which the image carries and nothing
+        # here needs, is removed before the update, for #408's reason.
+        #
+        # The image is built once here, so apt's time is its own line in the
+        # log, and the facts the probe rests on are printed: each tool's
+        # version, the server's, the `postgres` user and ptrace as root
+        # across `runuser`.
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: kelir
+          PGPASSWORD: kelir
+        run: |
+          set -euo pipefail
+          docker run --name kelir-probe-tools-build --cap-add SYS_PTRACE --network host \
+            -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD postgres:16 bash -c '
+              set -euo pipefail
+              rm /etc/apt/sources.list.d/pgdg.list
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends age jq docker-cli procps strace > /dev/null
+              for tool in age age-keygen jq strace psql pg_dump pg_restore runuser ps docker; do
+                echo "${tool}: $(command -v "${tool}")"
+              done
+              age --version
+              strace -V | head -1
+              pg_dump --version
+              echo "server $(psql -X -tA -d postgres -c "SHOW server_version")"
+              id postgres
+              strace -f -qq -o /dev/null runuser -u postgres -- true
+              echo "strace traces through runuser as root"'
+          docker commit kelir-probe-tools-build kelir-probe-tools:local > /dev/null
+          docker rm kelir-probe-tools-build > /dev/null
 
       - name: Probe deploy.sh's refusals (encryption at rest, deploy mode)
         working-directory: .
@@ -328,12 +361,12 @@ jobs:
       - name: Probe the backup (encryption at rest, backup mode)
         working-directory: .
         # **As root, because the unit runs it as root** and the probe checks
-        # root's 700 and 600. The settings are passed by name through `env`:
-        # ubuntu-26.04's sudo (sudo-rs) ignores `-E`, which preserved nothing
-        # on the first run. `pg_dump` runs as the runner image's `postgres` OS
-        # user, through `runuser`, as on the staging host. `strace` traces as
-        # root, so it can name the file each write lands in once `pg_dump` is
-        # `postgres`.
+        # root's 700 and 600: root in the container built above, with
+        # `SYS_PTRACE` so `strace` can name the file each write lands in once
+        # `pg_dump` is `postgres`. On the host network, for the service's
+        # published port; through the Docker socket, for the `mc` containers
+        # and the scratch store on `kelir-probe`. Each setting is passed by
+        # name, so no value is on a command line.
         env:
           PGHOST: localhost
           PGPORT: "5432"
@@ -342,14 +375,15 @@ jobs:
           KELIR_DB_NAME: kelir_probe
           KELIR_PROBE_MARKER: KELIR-PROBE-MARKER-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          sudo env \
-            "PGHOST=${PGHOST}" "PGPORT=${PGPORT}" "PGUSER=${PGUSER}" \
-            "PGPASSWORD=${PGPASSWORD}" "KELIR_DB_NAME=${KELIR_DB_NAME}" \
-            "KELIR_BACKUP_NETWORK=${KELIR_BACKUP_NETWORK}" \
-            "KELIR_BACKUP_MC_IMAGE=${KELIR_BACKUP_MC_IMAGE}" \
-            "KELIR_PROBE_MINIO_IMAGE=${KELIR_PROBE_MINIO_IMAGE}" \
-            "KELIR_PROBE_ENV_FILE=${KELIR_PROBE_ENV_FILE}" \
-            ./deploy/staging/encryption-at-rest.probe.sh backup "${KELIR_PROBE_MARKER}"
+          docker run --rm --cap-add SYS_PTRACE --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${GITHUB_WORKSPACE}:/work:ro" \
+            -v "${KELIR_PROBE_ENV_FILE}:/run/kelir-probe.env:ro" \
+            -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e KELIR_DB_NAME \
+            -e KELIR_BACKUP_NETWORK -e KELIR_BACKUP_MC_IMAGE -e KELIR_PROBE_MINIO_IMAGE \
+            -e KELIR_PROBE_ENV_FILE=/run/kelir-probe.env \
+            kelir-probe-tools:local \
+            /work/deploy/staging/encryption-at-rest.probe.sh backup "${KELIR_PROBE_MARKER}"
 
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
