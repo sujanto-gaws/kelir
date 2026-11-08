@@ -252,6 +252,45 @@ async fn a_facility_code_name_or_parent_that_shows_nothing_is_required() {
     assert_eq!(read.data()["name"], "\u{200B}Office");
 }
 
+/// **[#797] through the route: a reference sent blank, on create and on
+/// update.** An owner sent as U+200B alone on create, and a parent, an owner
+/// or a name sent so on update, is `REQUIRED` at its own path. Before, a
+/// reference that showed nothing was looked up as a code and answered
+/// `NOT_FOUND`; that is a code that moves. The update changes nothing.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_facility_reference_that_shows_nothing_is_required_on_create_and_update() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let mut blank_owner = building("FAC-ZW1", "Office");
+    blank_owner["ownerPartyId"] = json!("\u{200B}");
+    app.post(FACILITIES, Some(&token), blank_owner)
+        .await
+        .assert_refused_at("ownerPartyId", "REQUIRED");
+
+    create_ok(&app, &token, building("FAC-ZW0", "Campus")).await;
+    let mut child = building("FAC-ZW2", "Office");
+    child["parentFacilityId"] = json!("FAC-ZW0");
+    let id = create_ok(&app, &token, child).await;
+    let uri = format!("{FACILITIES}/{id}");
+
+    for (field, blank) in [
+        ("parentFacilityId", "\u{200B}"),
+        ("ownerPartyId", "\u{FEFF}"),
+        ("name", "\u{200B}\u{2060}"),
+    ] {
+        app.put(&uri, Some(&token), json!({ field: blank }))
+            .await
+            .assert_refused_at(field, "REQUIRED");
+    }
+
+    let read = app.get(&uri, Some(&token)).await;
+    assert_eq!(read.data()["name"], "Office", "{}", read.body);
+    assert_eq!(read.data()["parentFacilityId"], "FAC-ZW0", "{}", read.body);
+}
+
 #[tokio::test]
 async fn a_facility_code_is_unique_among_live_rows_and_released_by_a_delete() {
     // The partial unique index is on `deleted_at IS NULL`, so retiring a

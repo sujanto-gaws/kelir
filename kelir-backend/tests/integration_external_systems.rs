@@ -577,12 +577,6 @@ async fn a_caller_who_can_read_a_system_cannot_read_where_its_secrets_live() {
 // AC-5 — references, never secrets
 // ---------------------------------------------------------------------------
 
-/// The key set of a credential, on every route that returns one.
-///
-/// **Exactly these nine**: the reference, its type, its window and its flag,
-/// plus the ids and timestamps. A field added to `IntegrationCredential` turns
-/// this red, which is the point — whoever adds one has to decide here that it
-/// is not a secret.
 /// **[#797]: blank is `is_blank_text`.** Every required text of a system, an
 /// endpoint and a credential, sent as U+200B alone, is `REQUIRED` at its path
 /// and nothing else. A system code and an endpoint code, a path and a secret
@@ -645,6 +639,40 @@ async fn a_required_text_that_shows_nothing_is_required() {
     .assert_refused_at("secretReference", "REQUIRED");
 }
 
+/// **[#797] AC5: the other blank forms keep their code.** A system code of
+/// spaces and a tab, of U+00A0, of U+FEFF, or of whitespace and an invisible
+/// code point together, is `REQUIRED` and nothing else: never the format
+/// refusal a code check would give it if it ran first.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_code_of_whitespace_or_a_no_break_space_is_still_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for blank in [" \t ", "\u{00A0}", "\u{FEFF}", "\u{00A0}\u{200B} "] {
+        register(
+            &app,
+            &token,
+            json!({ "systemCode": blank, "systemName": "S" }),
+        )
+        .await
+        .assert_refused_at("systemCode", "REQUIRED");
+    }
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM external_systems")
+        .fetch_one(&app.pool)
+        .await
+        .expect("a count");
+    assert_eq!(rows, 0, "a blank system code was stored");
+}
+
+/// The key set of a credential, on every route that returns one.
+///
+/// **Exactly these nine**: the reference, its type, its window and its flag,
+/// plus the ids and timestamps. A field added to `IntegrationCredential` turns
+/// this red, which is the point — whoever adds one has to decide here that it
+/// is not a secret.
 #[tokio::test]
 async fn a_credential_response_is_the_reference_and_nothing_else() {
     let app = TestApp::spawn().await;

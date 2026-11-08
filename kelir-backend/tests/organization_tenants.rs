@@ -402,6 +402,46 @@ async fn a_tenant_name_that_shows_nothing_is_required() {
 }
 
 #[tokio::test]
+async fn a_tenant_rename_that_shows_nothing_is_required_and_an_invisible_edge_is_kept() {
+    // #797 on `PUT /organization/tenants/{id}`, the route that gained its 422
+    // entry: a name of U+FEFF and U+200B alone is `REQUIRED` and changes
+    // nothing; a name with a visible character keeps an invisible edge, as
+    // `str::trim` leaves it.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            TENANTS,
+            Some(&token),
+            create_body("ACME-ZW", "acme-zw-admin"),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let uri = format!(
+        "{TENANTS}/{}",
+        created.body["data"]["id"].as_str().expect("an id")
+    );
+
+    app.put(&uri, Some(&token), json!({ "name": "\u{FEFF}\u{200B}" }))
+        .await
+        .assert_refused_at("name", "REQUIRED");
+    assert_eq!(
+        app.get(&uri, Some(&token)).await.body["data"]["name"],
+        "ACME-ZW Limited"
+    );
+
+    let renamed = app
+        .put(&uri, Some(&token), json!({ "name": " Acme\u{200B} " }))
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(
+        app.get(&uri, Some(&token)).await.body["data"]["name"],
+        "Acme\u{200B}"
+    );
+}
+
+#[tokio::test]
 async fn the_administrators_fields_are_reported_under_the_paths_the_form_has() {
     // #67 one layer up: a per-field message against a field the form does not
     // have is a message nobody sees. The request nests the administrator, so
