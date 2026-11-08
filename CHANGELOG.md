@@ -136,6 +136,30 @@ While the major version is `0`, the public API may change in any release.
   expected 202, must match the new one. A value stored invisible before the
   upgrade is not repaired, and an edit that sends it back is refused until
   it is given a visible one.
+- **A blank optional text field is absent, and a required decision comment
+  of only invisible characters is refused**
+  ([#797](https://github.com/sujanto-gaws/kelir/issues/797)). An optional
+  field whose value is only whitespace or code points that show nothing,
+  such as U+200B or U+FEFF, is now treated as a whitespace-only one already
+  was: omitted, stored NULL, or clearing the stored value on an edit. A
+  visible value is still stored as `str::trim` leaves it, invisible edges
+  kept. These answers change for a client: a decision on a transition with
+  `requiresComment` and a comment of only invisible characters was recorded
+  and is now 422 `COMMENT_REQUIRED`; a party's new contact mechanism whose
+  `detail` shows nothing was stored and is now 422 `REQUIRED` at its
+  `detail`; and a value that was refused and is now absent and stored NULL
+  — an integration `baseUrl` (was `INVALID_FORMAT`), a menu `routePath`
+  (was `ROUTE_NOT_RELATIVE`), a role profile's `creditLimit` (was
+  `INVALID_FORMAT`), a department's `parentDepartmentId` or
+  `managerPartyId` and a role profile's party reference (were `NOT_FOUND`).
+  Elsewhere the stored value changes and the status does not: attachment and
+  reference descriptions, a delegation reason, an optional decision comment,
+  a reassign `roleCode`, integration and document type descriptions, a
+  document type `category`, a menu `icon` and `requiredPermission`, and the
+  optional party and role profile texts are stored NULL. A workflow
+  definition `description` sent to an edit or a new revision is stored as
+  the empty string a whitespace-only one already was. A value stored
+  invisible before the upgrade is not repaired.
 - **Attachments and backups are encrypted at rest, and the upgrade needs two
   keys and a re-run of the provisioner**
   ([#778](https://github.com/sujanto-gaws/kelir/issues/778), NFR-SEC-009,
