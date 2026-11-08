@@ -1010,6 +1010,102 @@ mod tests {
         assert_eq!(blank.display_value(), None);
     }
 
+    /// [#797]: a detail whose every part shows nothing has no display value,
+    /// as an all-whitespace one has none, whichever part carries it. A
+    /// visible value keeps an invisible edge, as `str::trim` leaves it.
+    ///
+    /// Seen red against e695d3b: each of the first four had a display value.
+    ///
+    /// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+    #[test]
+    fn a_detail_that_shows_nothing_has_no_display_value() {
+        let invisible = || Some("\u{200B}".to_owned());
+
+        for detail in [
+            ContactMechDetail {
+                email_address: invisible(),
+                ..ContactMechDetail::default()
+            },
+            ContactMechDetail {
+                url: Some(" \u{FEFF} ".to_owned()),
+                other: invisible(),
+                ..ContactMechDetail::default()
+            },
+            ContactMechDetail {
+                telecom_number: Some(TelecomNumber {
+                    country_code: invisible(),
+                    contact_number: Some("\u{FEFF}".to_owned()),
+                    extension: Some("12".to_owned()),
+                    ..TelecomNumber::default()
+                }),
+                ..ContactMechDetail::default()
+            },
+            ContactMechDetail {
+                postal_address: Some(PostalAddress {
+                    address1: invisible(),
+                    city: Some("\u{2060} ".to_owned()),
+                    ..PostalAddress::default()
+                }),
+                ..ContactMechDetail::default()
+            },
+            ContactMechDetail {
+                other: Some("   ".to_owned()),
+                ..ContactMechDetail::default()
+            },
+        ] {
+            assert_eq!(detail.display_value(), None, "{detail:?}");
+        }
+
+        let telecom = ContactMechDetail {
+            telecom_number: Some(TelecomNumber {
+                country_code: invisible(),
+                contact_number: Some("555 0100".to_owned()),
+                extension: Some("\u{200B}".to_owned()),
+                ..TelecomNumber::default()
+            }),
+            ..ContactMechDetail::default()
+        };
+        assert_eq!(telecom.display_value().as_deref(), Some("555 0100"));
+
+        let edged = ContactMechDetail {
+            email_address: Some(" \u{200B}jane@acme.example ".to_owned()),
+            ..ContactMechDetail::default()
+        };
+        assert_eq!(
+            edged.display_value().as_deref(),
+            Some("\u{200B}jane@acme.example")
+        );
+    }
+
+    /// The refusal the display value drives: a new mechanism whose detail
+    /// shows nothing is `REQUIRED` at `detail`.
+    #[test]
+    fn a_contact_mechanism_whose_detail_shows_nothing_is_refused() {
+        let mechanism = PartyContactMechInput {
+            contact_mech_id: None,
+            contact_mech_type_id: Some(ContactMechType::EmailAddress),
+            purpose_type_id: None,
+            from_date: Utc::now(),
+            thru_date: None,
+            is_primary: false,
+            allow_solicitation: true,
+            detail: Some(ContactMechDetail {
+                email_address: Some("\u{200B}".to_owned()),
+                ..ContactMechDetail::default()
+            }),
+            additional_attributes: None,
+        };
+        let mut details = Vec::new();
+
+        validate_contact_mech(&mechanism, "contactMechanisms[0]", &mut details);
+
+        let codes: Vec<_> = details
+            .iter()
+            .map(|detail| (detail.path.as_str(), detail.code.as_str()))
+            .collect();
+        assert_eq!(codes, [("contactMechanisms[0].detail", "REQUIRED")]);
+    }
+
     #[test]
     fn vocabularies_round_trip_through_the_database() {
         for party_type in [PartyType::Person, PartyType::PartyGroup] {

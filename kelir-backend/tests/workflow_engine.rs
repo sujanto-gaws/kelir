@@ -2733,6 +2733,108 @@ async fn a_transition_that_requires_a_reason_refuses_a_decision_without_one() {
     assert_eq!(stored_status(&app, id).await, "REJECTED");
 }
 
+/// **A reason that shows nothing is no reason** ([#797]).
+///
+/// Blank is `is_blank_text`, so a comment of U+200B or U+FEFF alone is absent,
+/// as a whitespace-only one is. Before #797 such a comment satisfied the
+/// `requiresComment` edge and was stored as the reason: a rejection whose
+/// reason nobody can read.
+///
+/// **Seen red** against e695d3b: the U+200B comment answered 200 and the
+/// document moved to `REJECTED`.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_required_reason_that_shows_nothing_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.invisible").await;
+
+    let workflow = publish_workflow(&app, &token, comment_workflow("wf_comment_invisible")).await;
+    let type_id = document_type(&app, &token, "PR_COMMENT_INVISIBLE", Some(workflow)).await;
+    let id = draft(&app, &token, type_id).await;
+    assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+
+    let task = open_task_of(&app, id).await;
+
+    for comment in ["\u{200B}", " \u{FEFF}\u{200B}\n"] {
+        let refused = app
+            .post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&approver_token),
+                json!({ "action": "REJECT", "comment": comment }),
+            )
+            .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{comment:?} satisfied a required reason: {}",
+            refused.body
+        );
+        assert!(
+            refused.body.to_string().contains("COMMENT_REQUIRED"),
+            "{comment:?}: {}",
+            refused.body
+        );
+        assert_eq!(stored_status(&app, id).await, "PENDING_APPROVAL");
+        assert_eq!(open_task_of(&app, id).await, task);
+    }
+}
+
+/// **An optional reason that shows nothing is stored as no reason** ([#797]).
+///
+/// The unmarked `APPROVE` edge takes the decision, and the task and the
+/// decision record hold NULL, not the invisible character, exactly as they do
+/// for a whitespace-only comment.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_reason_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let approver_token = approver(&app, "wf.invisible.optional").await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        comment_workflow("wf_comment_invisible_optional"),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_COMMENT_INVISIBLE_OPT", Some(workflow)).await;
+
+    for comment in ["\u{FEFF}", "  \t "] {
+        let id = draft(&app, &token, type_id).await;
+        assert_eq!(submit(&app, &token, id).await.status, StatusCode::OK);
+        let task = open_task_of(&app, id).await;
+
+        let decided = app
+            .post(
+                &format!("/api/v1/workflow/tasks/{task}/decision"),
+                Some(&approver_token),
+                json!({ "action": "APPROVE", "comment": comment }),
+            )
+            .await;
+        assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+
+        let on_task: Option<String> =
+            sqlx::query_scalar("SELECT comment FROM workflow_tasks WHERE id = $1")
+                .bind(task)
+                .fetch_one(&app.pool)
+                .await
+                .expect("read the task");
+        assert_eq!(on_task, None, "{comment:?} was stored on the task");
+
+        let on_record: Option<String> =
+            sqlx::query_scalar("SELECT comment FROM approval_decisions WHERE task_id = $1")
+                .bind(task)
+                .fetch_one(&app.pool)
+                .await
+                .expect("read the decision record");
+        assert_eq!(on_record, None, "{comment:?} was stored on the record");
+    }
+}
+
 /// **An edge the definition did not mark takes a decision with no reason** (AC4).
 ///
 /// The other half of the asymmetry, and the reason it is a separate test: an

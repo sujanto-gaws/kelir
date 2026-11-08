@@ -223,6 +223,87 @@ async fn a_child_code_that_shows_nothing_is_required_at_its_own_path() {
     assert_eq!(stored, 0, "a party with a blank child code was stored");
 }
 
+/// **[#797]: a contact mechanism whose detail shows nothing is refused.** An
+/// email address of U+200B alone, or a telecom number of U+FEFF alone, has no
+/// display value, as a whitespace-only one has none, so the mechanism is
+/// `REQUIRED` at `detail` and the party is not stored.
+///
+/// Seen red against e695d3b: both answered 201.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_contact_detail_that_shows_nothing_is_required() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (mech_type, detail) in [
+        ("EMAIL_ADDRESS", json!({ "emailAddress": "\u{200B}" })),
+        (
+            "PHONE_NUMBER",
+            json!({ "telecomNumber": { "contactNumber": "\u{FEFF}" } }),
+        ),
+        ("EMAIL_ADDRESS", json!({ "emailAddress": "  \t" })),
+    ] {
+        let mut body = party_group("ORG-ZW", "Acme");
+        body["contactMechanisms"] = json!([{
+            "contactMechTypeId": mech_type,
+            "fromDate": "2026-01-01T00:00:00Z",
+            "detail": detail,
+        }]);
+
+        app.post(PARTIES, Some(&token), body)
+            .await
+            .assert_refused_at("contactMechanisms[0].detail", "REQUIRED");
+    }
+
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mdm_parties WHERE party_code = 'ORG-ZW'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("a count");
+    assert_eq!(stored, 0, "a party with a blank contact detail was stored");
+}
+
+/// **[#797]: an optional party text that shows nothing is stored as absent.**
+/// An `externalId`, a person's `middleName` and a contact mechanism's
+/// `purposeTypeId` of U+200B or U+FEFF alone read back as null, as a
+/// whitespace-only one does.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_party_text_that_shows_nothing_is_stored_as_absent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (code, blank) in [
+        ("PARTY-ZW", "\u{200B}"),
+        ("PARTY-BOM", "\u{FEFF} "),
+        ("PARTY-WS", "   "),
+    ] {
+        let mut body = full_person(code);
+        body["externalId"] = json!(blank);
+        body["person"]["middleName"] = json!(blank);
+        body["contactMechanisms"][0]["purposeTypeId"] = json!(blank);
+        let id = create_ok(&app, &token, body).await;
+
+        let read = app.get(&format!("{PARTIES}/{id}"), Some(&token)).await;
+        let party = read.data();
+        assert_eq!(party["externalId"], Value::Null, "{blank:?}: {party}");
+        assert_eq!(party["person"]["middleName"], Value::Null, "{blank:?}");
+
+        let purposes: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT m.purpose_type FROM mdm_party_contact_mechs m \
+             JOIN mdm_parties p ON p.id = m.party_id WHERE p.party_code = $1",
+        )
+        .bind(code)
+        .fetch_all(&app.pool)
+        .await
+        .expect("the purposes");
+        // The second mechanism of `full_person` sends no purpose at all.
+        assert_eq!(purposes, [None, None], "{blank:?}");
+    }
+}
+
 #[tokio::test]
 async fn creates_a_person_party_and_reads_the_whole_aggregate_back() {
     let app = TestApp::spawn().await;
