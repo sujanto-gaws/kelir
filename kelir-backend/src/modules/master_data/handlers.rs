@@ -118,7 +118,7 @@ async fn get_party(
     responses(
         (status = 201, description = "Created", body = PartyAggregate),
         (status = 409, description = "That partyId is already in use — including by a deleted party, whose partyId is never released (#107)"),
-        (status = 422, description = "Validation failed. A required code or name sent blank is REQUIRED at its path; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "Validation failed. A required code or name sent blank is REQUIRED at its path; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). A new contact mechanism whose detail shows nothing is REQUIRED at its detail. An optional text sent blank is absent and stored NULL")
     ),
     security(("bearer" = []))
 )]
@@ -141,7 +141,7 @@ async fn create_party(
     responses(
         (status = 200, description = "Updated", body = PartyAggregate),
         (status = 404, description = "No such party"),
-        (status = 422, description = "Validation failed. A required code or name sent blank is REQUIRED at its path; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "Validation failed. A required code or name sent blank is REQUIRED at its path; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). A new contact mechanism whose detail shows nothing is REQUIRED at its detail. An optional text sent blank is absent and stored NULL")
     ),
     security(("bearer" = []))
 )]
@@ -227,7 +227,7 @@ So a restatement carrying only `fromDate` clears the end date and keeps the comm
         (status = 403, description = "Missing master-data:party-role:assign"),
         (status = 404, description = "No such party"),
         (status = 409, description = "That profile number is already in use"),
-        (status = 422, description = "Validation failed, no such role type, or `roleTypeId` holds a NUL. A business number sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "Validation failed, no such role type, or `roleTypeId` holds a NUL. A business number sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). An optional profile text sent blank is absent: a creditLimit is not checked as a decimal, a party reference is not looked up, and each is stored NULL")
     ),
     security(("bearer" = []))
 )]

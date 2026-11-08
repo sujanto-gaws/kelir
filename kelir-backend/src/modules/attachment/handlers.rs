@@ -22,6 +22,7 @@ use crate::extract::{JsonBody, MultipartBody, PathParam, QueryParams};
 use crate::middleware::auth::Authenticated;
 use crate::response::{ItemEnvelope, ListEnvelope, Pagination};
 use crate::state::AppState;
+use crate::utils::text::non_blank;
 
 /// The routes, and the one layer that is a security control rather than a
 /// convenience.
@@ -186,12 +187,12 @@ async fn read_file_part(
             }
             Some("description") => {
                 let text = field.text().await.unwrap_or_default();
-                let trimmed = text.trim();
 
                 // Absent rather than empty, so a form that always sends the
                 // field does not store a row of blanks — `normalize_comment`'s
-                // rule one module over.
-                if !trimmed.is_empty() {
+                // rule one module over. Blank is `is_blank_text` (#797), so a
+                // description of U+200B alone is absent too.
+                if let Some(trimmed) = non_blank(&text) {
                     description = Some(trimmed.to_owned());
                 }
             }

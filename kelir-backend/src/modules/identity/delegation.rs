@@ -51,6 +51,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{AppError, ValidationDetail};
+use crate::utils::text::non_blank;
 
 /// How wide a window is (§3.8's `scope`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -298,17 +299,15 @@ pub fn validate_create(
     })
 }
 
-/// Trimmed, with whitespace treated as absent, and bounded.
+/// Trimmed, with a blank reason (whitespace or invisible, #797) treated as
+/// absent, and bounded.
 ///
 /// `workflow::domain::task::normalize_comment`'s two normalizations, for the
 /// same two reasons: a box full of spaces is not a reason, and a `TEXT` column
 /// with no bound is a column somebody can fill.
 fn normalize_reason(reason: Option<&str>, details: &mut Vec<ValidationDetail>) -> Option<String> {
-    let trimmed = reason?.trim();
-
-    if trimmed.is_empty() {
-        return None;
-    }
+    // Blank is `is_blank_text` (#797): a reason of U+200B alone is absent.
+    let trimmed = non_blank(reason?)?;
 
     if trimmed.chars().count() > MAX_REASON_LENGTH {
         details.push(ValidationDetail::new(

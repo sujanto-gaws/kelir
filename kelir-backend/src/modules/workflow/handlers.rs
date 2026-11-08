@@ -310,8 +310,10 @@ async fn claim_task(
                                       the decision, or this document carries a master-data change \
                                       whose record is no longer at PENDING_APPROVAL (#322)"),
         (status = 422, description = "The definition has no such transition from where the process is, \
-                                      or the transition requires a comment and none was given, \
-                                      or the comment is too long")
+                                      or the transition requires a comment and none was given \
+                                      (COMMENT_REQUIRED; a blank comment is none, and blank is \
+                                      whitespace or a code point that shows nothing, such as \
+                                      U+200B or U+FEFF, #797), or the comment is too long")
     ),
     security(("bearer" = []))
 )]

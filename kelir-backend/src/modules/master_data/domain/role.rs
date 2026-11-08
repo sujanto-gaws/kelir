@@ -1085,6 +1085,39 @@ mod tests {
         .contains(&"profile.customer.creditLimit".to_owned()));
     }
 
+    /// [#797]: through `non_empty`, a credit limit that shows nothing is
+    /// absent and not malformed, and a business number that shows nothing is
+    /// still `REQUIRED`, as whitespace-only ones are.
+    #[test]
+    fn a_profile_value_that_shows_nothing_is_absent_and_a_number_still_required() {
+        for blank in ["\u{200B}", " \u{FEFF} ", "   "] {
+            let customer = |number: &str, limit: &str| AssignRoleRequest {
+                profile: Some(RoleProfileInput {
+                    customer: Some(CustomerProfileInput {
+                        customer_number: Some(number.to_owned()),
+                        credit_limit: Some(limit.to_owned()),
+                        ..CustomerProfileInput::default()
+                    }),
+                    ..RoleProfileInput::default()
+                }),
+                ..supplier_request()
+            };
+
+            assert!(
+                validate_assign_role(&customer("CUS-0001", blank), "CUSTOMER", "P", true).is_ok(),
+                "{blank:?}"
+            );
+
+            let error = validate_assign_role(&customer(blank, "1.00"), "CUSTOMER", "P", true)
+                .expect_err("a blank number");
+            assert_eq!(
+                error.code_at("profile.customer.customerNumber"),
+                Some("REQUIRED"),
+                "{blank:?}"
+            );
+        }
+    }
+
     #[test]
     fn vocabularies_round_trip_through_the_database() {
         for status in [PartyRoleStatus::Active, PartyRoleStatus::Inactive] {

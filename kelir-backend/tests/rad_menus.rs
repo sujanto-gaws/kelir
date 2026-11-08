@@ -96,6 +96,65 @@ async fn list(app: &TestApp, token: &str) -> common::TestResponse {
         .await
 }
 
+/// **[#797]: an optional text that shows nothing is absent.** An `icon`,
+/// `routePath` or `requiredPermission` of U+200B or U+FEFF alone is stored
+/// NULL on a create and clears the stored value on an edit, as a
+/// whitespace-only one does: the route is not checked for its form, and the
+/// entry is a heading rather than a link nobody can see.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_text_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, blank) in ["\u{200B}", " \u{FEFF}", "   "].into_iter().enumerate() {
+        let created = create(
+            &app,
+            &token,
+            json!({
+                "menuKey": format!("opt-{index}"),
+                "label": "L",
+                "icon": blank,
+                "routePath": blank,
+                "requiredPermission": blank,
+            }),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let id = id_of(&created.body["data"]);
+
+        let stored = || async {
+            sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+                "SELECT icon, route_path, required_permission FROM rad_menus WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the entry")
+        };
+        assert_eq!(stored().await, (None, None, None), "{blank:?}");
+
+        let edited = update(
+            &app,
+            &token,
+            id,
+            json!({ "icon": "cart", "routePath": "/buy", "requiredPermission": "document:read" }),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let edited = update(
+            &app,
+            &token,
+            id,
+            json!({ "icon": blank, "routePath": blank, "requiredPermission": blank }),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        assert_eq!(stored().await, (None, None, None), "{blank:?} on an edit");
+    }
+}
+
 /// **[#797]: blank is `is_blank_text`.** A menu key or label, and a list's
 /// key, title or column key, sent as U+200B alone, is `REQUIRED` at its path;
 /// a label with a visible character keeps an invisible edge, as `str::trim`

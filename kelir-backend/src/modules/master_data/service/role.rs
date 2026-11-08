@@ -22,6 +22,7 @@ use crate::error::{AppError, ValidationDetail};
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::state::AppState;
+use crate::utils::text::non_blank;
 
 pub async fn get_party_roles(
     state: &AppState,
@@ -443,7 +444,7 @@ async fn resolve_party_reference(
     path: &str,
     details: &mut Vec<ValidationDetail>,
 ) -> Result<Option<Uuid>, AppError> {
-    let Some(code) = party_code.map(str::trim).filter(|code| !code.is_empty()) else {
+    let Some(code) = party_code.and_then(non_blank) else {
         return Ok(None);
     };
 

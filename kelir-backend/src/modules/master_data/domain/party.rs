@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{non_empty, PartyProfiles, PartyRole, RecordStatus};
+use crate::utils::text::non_blank;
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -195,8 +196,7 @@ impl ContactMechDetail {
             ]
             .into_iter()
             .flatten()
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
+            .filter_map(non_blank)
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -217,8 +217,7 @@ impl ContactMechDetail {
             ]
             .into_iter()
             .flatten()
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
+            .filter_map(non_blank)
             .collect::<Vec<_>>()
             .join(", ");
 

@@ -123,7 +123,7 @@ pub async fn get_external_system(
         (status = 201, description = "Registered", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:create"),
         (status = 409, description = "That systemCode is already in use in this tenant"),
-        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL). A blank systemCode or systemName is REQUIRED, and a code is checked for its characters only once it is not blank; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL). A blank systemCode or systemName is REQUIRED, and a code is checked for its characters only once it is not blank; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). A blank baseUrl or description is absent: it is not checked and is stored NULL")
     ),
     security(("bearer" = []))
 )]
@@ -150,7 +150,7 @@ pub async fn register_external_system(
         (status = 200, description = "Updated", body = ExternalSystem),
         (status = 403, description = "Missing integration:external-system:update"),
         (status = 404, description = "No such external system in this tenant"),
-        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL), and NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE. A systemName sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "Validation failed — including a baseUrl carrying a user name or password (CREDENTIALS_IN_URL) or a query string (QUERY_IN_BASE_URL), and NOT_ALLOWED on status when the edit would move the system into or out of INACTIVE. A systemName sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). A baseUrl or description sent blank is cleared, and is not checked")
     ),
     security(("bearer" = []))
 )]

@@ -62,6 +62,22 @@ fn is_invisible(c: char) -> bool {
     INVISIBLE_CODE_POINTS.iter().any(|range| range.contains(&c))
 }
 
+/// The value an optional field holds: what `str::trim` leaves, or `None` when
+/// the value [is blank](is_blank_text) ([#797]). This is the "blank means
+/// absent" reading, so a value of U+200B or U+FEFF alone is omitted or stored
+/// NULL exactly as a whitespace-only one is. Only a wholly blank value is
+/// affected: a visible value keeps an invisible character at its edge.
+///
+/// A validator and the normaliser behind it ask this same function, so a value
+/// the validator skipped as absent is never stored as present.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+pub fn non_blank(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+
+    (!is_blank_text(trimmed)).then_some(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +150,18 @@ mod tests {
         ] {
             assert!(is_blank_text(value), "{value:?}");
         }
+    }
+
+    /// [`non_blank`]: a blank value, whitespace or invisible, is `None`; a
+    /// visible one is what `str::trim` leaves, invisible edges kept.
+    #[test]
+    fn non_blank_is_none_for_blank_and_trims_the_rest() {
+        for value in ["", "   ", "\u{200B}", "\u{FEFF}", " \u{FEFF}\u{2060}\t"] {
+            assert_eq!(non_blank(value), None, "{value:?}");
+        }
+
+        assert_eq!(non_blank("  a  "), Some("a"));
+        assert_eq!(non_blank(" \u{200B}a\u{FEFF} "), Some("\u{200B}a\u{FEFF}"));
     }
 
     /// A value with one visible character is not blank, wherever the

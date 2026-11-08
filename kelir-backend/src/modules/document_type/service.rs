@@ -36,6 +36,7 @@ use crate::modules::workflow::repository::definition as workflow_repository;
 use crate::response::PageMeta;
 use crate::state::AppState;
 use crate::utils::search::search_term;
+use crate::utils::text::non_blank;
 
 pub async fn list_types(
     state: &AppState,
@@ -601,7 +602,7 @@ fn binding_error(path: &str, code: &str, message: String) -> AppError {
 }
 
 fn trimmed(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|text| !text.is_empty())
+    value.and_then(non_blank)
 }
 
 fn insert_error(error: sqlx::Error) -> AppError {

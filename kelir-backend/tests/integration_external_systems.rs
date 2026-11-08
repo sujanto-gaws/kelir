@@ -667,6 +667,86 @@ async fn a_code_of_whitespace_or_a_no_break_space_is_still_required() {
     assert_eq!(rows, 0, "a blank system code was stored");
 }
 
+/// **[#797]: an optional text that shows nothing is absent.** A `baseUrl` or
+/// `description` of U+200B or U+FEFF alone is not checked for its form and is
+/// stored NULL, on a register and on an edit, as a whitespace-only one is; an
+/// endpoint's `description` the same.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_text_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, blank) in ["\u{200B}", " \u{FEFF} ", "   "].into_iter().enumerate() {
+        let created = register(
+            &app,
+            &token,
+            json!({
+                "systemCode": format!("ZW_{index}"),
+                "systemName": "S",
+                "baseUrl": blank,
+                "description": blank,
+            }),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let system = id_of(&created);
+
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT base_url, description FROM external_systems WHERE id = $1")
+                .bind(system)
+                .fetch_one(&app.pool)
+                .await
+                .expect("the system");
+        assert_eq!(stored, (None, None), "{blank:?}");
+
+        // An edit that sends a blank clears what was there.
+        let edited = app
+            .put(
+                &format!("{BASE}/{system}"),
+                Some(&token),
+                json!({ "baseUrl": "https://erp.example.test", "description": "ERP" }),
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let edited = app
+            .put(
+                &format!("{BASE}/{system}"),
+                Some(&token),
+                json!({ "baseUrl": blank, "description": blank }),
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT base_url, description FROM external_systems WHERE id = $1")
+                .bind(system)
+                .fetch_one(&app.pool)
+                .await
+                .expect("the system");
+        assert_eq!(stored, (None, None), "{blank:?} on an edit");
+
+        let endpoint = app
+            .post(
+                &format!("{BASE}/{system}/endpoints"),
+                Some(&token),
+                json!({
+                    "endpointCode": "EP", "name": "E", "method": "POST", "path": "/e",
+                    "description": blank,
+                }),
+            )
+            .await;
+        assert_eq!(endpoint.status, StatusCode::CREATED, "{}", endpoint.body);
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT description FROM integration_endpoints WHERE id = $1")
+                .bind(id_of(&endpoint))
+                .fetch_one(&app.pool)
+                .await
+                .expect("the endpoint");
+        assert_eq!(stored, None, "{blank:?} on an endpoint");
+    }
+}
+
 /// The key set of a credential, on every route that returns one.
 ///
 /// **Exactly these nine**: the reference, its type, its window and its flag,

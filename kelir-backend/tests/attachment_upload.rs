@@ -213,6 +213,46 @@ async fn the_checksum_is_over_the_bytes_that_were_stored() {
     assert_eq!(uploaded.body["data"]["description"], Value::Null);
 }
 
+/// **[#797]: a description that shows nothing is absent.** U+200B or U+FEFF
+/// alone is stored NULL, as whitespace alone is; a visible description keeps
+/// an invisible edge, as `str::trim` leaves it.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_description_that_shows_nothing_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_ATT_INVISIBLE_DESC").await;
+    let document = draft(&app, &token, type_id).await;
+
+    for (description, expected) in [
+        ("\u{200B}", None),
+        (" \u{FEFF} ", None),
+        ("   ", None),
+        (" \u{200B}quote ", Some("\u{200B}quote")),
+    ] {
+        let uploaded = app
+            .post_multipart(
+                &format!("/api/v1/documents/{document}/attachments"),
+                Some(&token),
+                "q.pdf",
+                "application/pdf",
+                FILE,
+                Some(description),
+            )
+            .await;
+        assert_eq!(uploaded.status, StatusCode::OK, "{}", uploaded.body);
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT description FROM attachments WHERE id = $1")
+                .bind(id_of(&uploaded.body["data"]))
+                .fetch_one(&app.pool)
+                .await
+                .expect("the attachment row");
+        assert_eq!(stored.as_deref(), expected, "{description:?}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AC5 — a document the caller cannot see
 // ---------------------------------------------------------------------------

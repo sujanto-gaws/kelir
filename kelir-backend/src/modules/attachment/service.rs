@@ -25,6 +25,7 @@ use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::modules::document::service::document as document_service;
 use crate::response::{PageMeta, Pagination};
 use crate::state::AppState;
+use crate::utils::text::non_blank;
 
 /// One file, as it arrives out of the multipart body ([#834]).
 ///
@@ -700,10 +701,12 @@ pub async fn add_reference(
     // `javascript:` URL is refused whatever the document turns out to be.
     let label = domain::normalize_label(request.label)?;
     let url = domain::normalize_url(request.url)?;
+    // Blank, whitespace or invisible (#797), is absent.
     let description = request
         .description
-        .map(|text| text.trim().to_owned())
-        .filter(|text| !text.is_empty());
+        .as_deref()
+        .and_then(non_blank)
+        .map(str::to_owned);
 
     let document = document_service::get_document(state, caller, document_id).await?;
 

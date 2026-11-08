@@ -31,7 +31,7 @@ pub use external_system::{
 };
 
 use crate::error::{AppError, ValidationDetail};
-use crate::utils::text::is_blank_text;
+use crate::utils::text::{is_blank_text, non_blank};
 
 /// `VARCHAR(64)` — `system_code`, `endpoint_code` (Database Schema §1.3.1).
 pub const MAX_CODE_LENGTH: usize = 64;
@@ -120,10 +120,10 @@ pub fn code(value: &str, path: &str, problems: &mut Problems) {
     }
 }
 
-/// An optional value that, when present and not blank, is trimmed; blank reads
+/// An optional value that, when present and not blank (#797), is trimmed; blank reads
 /// as absent.
 pub fn trimmed(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
+    value.and_then(non_blank)
 }
 
 #[cfg(test)]
@@ -142,6 +142,16 @@ mod tests {
         let mut problems = Problems::new();
         code(value, "systemCode", &mut problems);
         problems.finish()
+    }
+
+    /// [#797]: blank reads as absent, whitespace or invisible.
+    #[test]
+    fn a_blank_optional_value_is_absent() {
+        for blank in ["", "  ", "\u{200B}", " \u{FEFF} "] {
+            assert_eq!(trimmed(Some(blank)), None, "{blank:?}");
+        }
+        assert_eq!(trimmed(Some(" \u{200B}x ")), Some("\u{200B}x"));
+        assert_eq!(trimmed(None), None);
     }
 
     #[test]

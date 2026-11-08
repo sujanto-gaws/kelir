@@ -127,6 +127,7 @@ use crate::modules::audit::{self, domain::ObjectType, AuditEntry, ChangeSet};
 use crate::response::PageMeta;
 use crate::state::AppState;
 use crate::utils::search::search_term;
+use crate::utils::text::non_blank;
 
 pub async fn list_definitions(
     state: &AppState,
@@ -281,7 +282,7 @@ pub async fn update_definition(
         id,
         &repo::DefinitionFields {
             name: request.name.as_deref().map(str::trim),
-            description: request.description.as_deref().map(str::trim),
+            description: request.description.as_deref().map(blank_as_empty),
             definition_json: request.definition.as_ref(),
             initial_state: next_initial.as_deref(),
             jwss_version: next_jwss.as_deref(),
@@ -652,10 +653,12 @@ pub async fn create_revision(
             tenant_id,
             workflow_key: &source.workflow_key,
             name,
+            // A blank description (#797) is the empty one whitespace already
+            // gave, not the invisible characters it was made of.
             description: request
                 .description
                 .as_deref()
-                .map(str::trim)
+                .map(blank_as_empty)
                 .or(source.description.as_deref()),
             version: next,
             jwss_version: &jwss_version(&definition),
@@ -842,8 +845,16 @@ fn duplicate_to_conflict(error: sqlx::Error) -> AppError {
     }
 }
 
+/// An optional create field: trimmed, and absent when blank (#797).
 fn trimmed(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|text| !text.is_empty())
+    value.and_then(non_blank)
+}
+
+/// A description sent to an edit or a revision: trimmed, and a blank one
+/// (#797) is `""`, which is what a whitespace-only one already stored. The
+/// value cannot read as absent here, because absent keeps the stored one.
+fn blank_as_empty(value: &str) -> &str {
+    non_blank(value).unwrap_or_default()
 }
 
 /// Reads a definition back, treating its absence as an error rather than a
@@ -863,4 +874,19 @@ async fn load<'e, E: PgExecutor<'e>>(
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("workflow definition {id} vanished after it was written"),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_description_is_empty_and_a_blank_create_field_is_absent() {
+        for blank in ["   ", "\u{200B}", " \u{FEFF} "] {
+            assert_eq!(blank_as_empty(blank), "", "{blank:?}");
+            assert_eq!(trimmed(Some(blank)), None, "{blank:?}");
+        }
+        assert_eq!(blank_as_empty(" \u{200B}Raise "), "\u{200B}Raise");
+        assert_eq!(trimmed(Some(" Raise ")), Some("Raise"));
+    }
 }
