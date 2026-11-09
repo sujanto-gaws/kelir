@@ -563,9 +563,10 @@ pub const MAX_ROLE_NAME_LENGTH: usize = 200;
 ///
 /// Lengths are counted in characters of the **trimmed** value, because the
 /// trimmed value is what `create_role` stores and `VARCHAR(n)` counts
-/// characters, not bytes. No format is imposed on the code: none is specified,
-/// and the seeded and documented codes already differ in shape
-/// (`ROLE-ADMIN`, `FINANCE_APPROVER`).
+/// characters, not bytes. No character set or shape is imposed on the code
+/// beyond the edge rule below: none is specified, and the seeded and
+/// documented codes already differ in shape (`ROLE-ADMIN`,
+/// `FINANCE_APPROVER`).
 ///
 /// **D-120 ([#805]): the code's edges must show.** Once it is neither blank
 /// nor too long, a trimmed code that begins or ends with a member of
