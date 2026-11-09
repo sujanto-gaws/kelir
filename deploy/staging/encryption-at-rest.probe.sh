@@ -13,8 +13,8 @@
 #       Runs kelir-backup as the unit runs it, reads both archives raw, checks
 #       modes and command lines, restores both halves into scratch targets
 #       (the store half into a bucket with no default encryption, then asks
-#       each restored object for its own, #921),
-#       and checks retention, the upgrade's conversion and the refusals.
+#       each restored object for its own, #921), and checks retention, the
+#       upgrade's conversion and the refusals.
 #   encryption-at-rest.probe.sh deploy
 #       Runs deploy.sh against stubs and checks what it refuses, and that it
 #       refuses before any pull, build or deploy.
