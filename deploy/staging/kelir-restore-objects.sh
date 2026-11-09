@@ -114,7 +114,7 @@ mkfifo "${counted}"
 for (( index = 0; index < count; index++ )); do
     wc -c < "${counted}" > "${counted}.n" &
     head -c "${sizes[index]}" | tee "${counted}" \
-        | mc pipe --quiet --enc-s3 "kelir/${KELIR_BACKUP_BUCKET}" \
+        | mc pipe --quiet \
             "kelir/${KELIR_BACKUP_BUCKET}/${keys[index]}" > /dev/null
     wait $!
     # `mc pipe` stores whatever reached it, and the download does not check an
