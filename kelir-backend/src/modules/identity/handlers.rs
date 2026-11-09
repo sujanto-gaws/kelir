@@ -207,7 +207,7 @@ async fn get_role(
     request_body = CreateRoleRequest,
     responses(
         (status = 201, description = "Created", body = Role),
-        (status = 422, description = "VALIDATION_ERROR, a detail per field: roleCode or name blank (REQUIRED) or longer than its column, 64 and 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616)")
+        (status = 422, description = "VALIDATION_ERROR, a detail per field: roleCode or name blank (REQUIRED) or longer than its column, 64 and 200 characters once trimmed (TOO_LONG) (#575); a permission id listed twice in permissionIds (DUPLICATE_IN_ARRAY). Blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#616). A roleCode that begins or ends with such a code point, such as U+200B or U+3164, is INVALID_FORMAT, checked after REQUIRED and TOO_LONG (D-120, #805)")
     ),
     security(("bearer" = []))
 )]

@@ -3,16 +3,18 @@
 //!
 //! Rust's `str::trim().is_empty()` asks [`char::is_whitespace`], which knows
 //! the Unicode `White_Space` property: the no-break and ideographic spaces,
-//! U+0085 and the line and paragraph separators. It does not know the
-//! *format* characters that render as nothing at all. A role name of one
-//! U+200B ZERO WIDTH SPACE was therefore not blank: it was stored, and listed
-//! as a row with no visible name.
+//! U+0085 and the line and paragraph separators. It does not know the format
+//! characters (`Cf`) and the Hangul filler letters (`Lo`) that render as
+//! nothing at all. A role name of one U+200B ZERO WIDTH SPACE was therefore
+//! not blank: it was stored, and listed as a row with no visible name.
 //!
 //! [`is_blank_text`] is the one definition: a value is blank when every
 //! character is whitespace or one of [`INVISIBLE_CODE_POINTS`]. It decides
 //! *presence* only. What is stored is still the value `str::trim` leaves, so a
 //! value with an invisible character at its edge is kept as it came, and a
-//! length is counted on that same trimmed value.
+//! length is counted on that same trimmed value. A field that refuses such an
+//! edge (a role code, D-120) asks [`has_invisible_edge`], which reads the same
+//! set.
 //!
 //! The browser's `String.prototype.trim()` is a convenience pre-check on a
 //! hand-built form (coding standard §3.4); this function is the definition
@@ -21,14 +23,19 @@
 use std::ops::RangeInclusive;
 
 /// The code points that are not [`char::is_whitespace`] yet show nothing, so
-/// a value made only of them reads as empty. Every one is a format character
-/// (`Cf`) with no glyph of its own. Code points may be added here; none may be
-/// removed without a decision, because a value refused today would then be
-/// stored.
+/// a value made only of them reads as empty. Most are format characters
+/// (`Cf`); the four Hangul fillers are letters (`Lo`) that draw nothing. Code
+/// points may be added here; none may be removed without a decision, because a
+/// value refused today would then be stored.
 pub const INVISIBLE_CODE_POINTS: &[RangeInclusive<char>] = &[
     // SOFT HYPHEN: drawn only where a line breaks at it, so a value of soft
     // hyphens alone shows nothing.
     '\u{00AD}'..='\u{00AD}',
+    // ARABIC LETTER MARK (`Cf`): a bidirectional mark, as U+200F is (D-121).
+    '\u{061C}'..='\u{061C}',
+    // HANGUL CHOSEONG FILLER and HANGUL JUNGSEONG FILLER (`Lo`): stand-ins
+    // for a missing jamo, with no glyph when alone (D-121).
+    '\u{115F}'..='\u{1160}',
     // MONGOLIAN VOWEL SEPARATOR: whitespace until Unicode 6.3 moved it to
     // `Cf`, so an older reader trimmed it and Rust no longer does.
     '\u{180E}'..='\u{180E}',
@@ -46,9 +53,14 @@ pub const INVISIBLE_CODE_POINTS: &[RangeInclusive<char>] = &[
     // The bidirectional isolates (LRI, RLI, FSI, PDI), the newer form of the
     // embeddings above.
     '\u{2066}'..='\u{2069}',
+    // HANGUL FILLER (`Lo`): a blank-looking letter often used as a "blank"
+    // name (D-121).
+    '\u{3164}'..='\u{3164}',
     // ZERO WIDTH NO-BREAK SPACE, also the byte order mark: a file or a
     // clipboard can carry one at the start of a value unseen.
     '\u{FEFF}'..='\u{FEFF}',
+    // HALFWIDTH HANGUL FILLER (`Lo`): U+3164's halfwidth form (D-121).
+    '\u{FFA0}'..='\u{FFA0}',
 ];
 
 /// Whether `value` has nothing a reader can see: it is empty, or every
@@ -60,6 +72,20 @@ pub fn is_blank_text(value: &str) -> bool {
 
 fn is_invisible(c: char) -> bool {
     INVISIBLE_CODE_POINTS.iter().any(|range| range.contains(&c))
+}
+
+/// Whether the value `str::trim` leaves begins or ends with a member of
+/// [`INVISIBLE_CODE_POINTS`] (D-120, [#805]). One inside the value is not
+/// asked about. The empty value has no edge.
+///
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+pub fn has_invisible_edge(value: &str) -> bool {
+    let trimmed = value.trim();
+
+    [trimmed.chars().next(), trimmed.chars().next_back()]
+        .into_iter()
+        .flatten()
+        .any(is_invisible)
 }
 
 /// The value an optional field holds: what `str::trim` leaves, or `None` when
@@ -109,13 +135,38 @@ mod tests {
         }
     }
 
+    /// **D-121 ([#805]) adds five.** U+061C ARABIC LETTER MARK is a format
+    /// character (`Cf`); U+115F HANGUL CHOSEONG FILLER, U+1160 HANGUL
+    /// JUNGSEONG FILLER, U+3164 HANGUL FILLER and U+FFA0 HALFWIDTH HANGUL
+    /// FILLER are letters (`Lo`) that draw nothing. Each is held by name:
+    /// alone, run together and mixed with whitespace.
+    ///
+    /// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+    #[test]
+    fn the_five_code_points_d_121_adds_are_blank() {
+        let five = ['\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'];
+
+        for c in five {
+            for value in [c.to_string(), format!(" {c}\t{c}\u{00A0}")] {
+                assert!(is_blank_text(&value), "U+{:04X}", c as u32);
+                assert_eq!(non_blank(&value), None, "U+{:04X}", c as u32);
+            }
+        }
+
+        let all: String = five.iter().collect();
+        assert!(is_blank_text(&all));
+        assert_eq!(non_blank(&format!(" {all} ")), None);
+        assert_eq!(non_blank(" \u{3164}a\u{FFA0} "), Some("\u{3164}a\u{FFA0}"));
+    }
+
     /// Each group the set lists, by its two ends, so narrowing a range from
     /// either side is seen.
     #[test]
     fn each_end_of_each_group_is_blank() {
         for c in [
-            '\u{00AD}', '\u{180E}', '\u{200B}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2060}',
-            '\u{2064}', '\u{2066}', '\u{2069}', '\u{FEFF}',
+            '\u{00AD}', '\u{061C}', '\u{115F}', '\u{1160}', '\u{180E}', '\u{200B}', '\u{200F}',
+            '\u{202A}', '\u{202E}', '\u{2060}', '\u{2064}', '\u{2066}', '\u{2069}', '\u{3164}',
+            '\u{FEFF}', '\u{FFA0}',
         ] {
             assert!(is_blank_text(&c.to_string()), "U+{:04X}", c as u32);
         }
@@ -129,8 +180,9 @@ mod tests {
     #[test]
     fn the_neighbours_of_each_group_are_not_blank() {
         for c in [
-            '\u{00AC}', '\u{00AE}', '\u{180D}', '\u{180F}', '\u{2010}', '\u{2065}', '\u{206A}',
-            '\u{FEFE}', '\u{FF00}',
+            '\u{00AC}', '\u{00AE}', '\u{061B}', '\u{061D}', '\u{115E}', '\u{1161}', '\u{180D}',
+            '\u{180F}', '\u{2010}', '\u{2065}', '\u{206A}', '\u{3163}', '\u{3165}', '\u{FEFE}',
+            '\u{FF00}', '\u{FF9F}', '\u{FFA1}',
         ] {
             assert!(!is_blank_text(&c.to_string()), "U+{:04X}", c as u32);
         }
@@ -162,6 +214,23 @@ mod tests {
 
         assert_eq!(non_blank("  a  "), Some("a"));
         assert_eq!(non_blank(" \u{200B}a\u{FEFF} "), Some("\u{200B}a\u{FEFF}"));
+    }
+
+    /// [`has_invisible_edge`] asks only the trimmed value's two ends.
+    #[test]
+    fn an_invisible_edge_is_the_trimmed_values_first_or_last_character() {
+        for value in ["\u{200B}a", "a\u{3164}", " \u{061C}a\u{FFA0}\t", "\u{FEFF}"] {
+            assert!(has_invisible_edge(value), "{value:?}");
+        }
+        for value in ["", "   ", "a", " a ", "a\u{200B}b", "a\u{3164}\u{115F}b"] {
+            assert!(!has_invisible_edge(value), "{value:?}");
+        }
+        // Every member of the set, at either end: the edge reads the set
+        // itself, not a shorter list of its own.
+        for c in INVISIBLE_CODE_POINTS.iter().flat_map(|range| range.clone()) {
+            assert!(has_invisible_edge(&format!("{c}a")), "U+{:04X}", c as u32);
+            assert!(has_invisible_edge(&format!("a{c}")), "U+{:04X}", c as u32);
+        }
     }
 
     /// A value with one visible character is not blank, wherever the

@@ -402,6 +402,45 @@ async fn a_tenant_name_that_shows_nothing_is_required() {
 }
 
 #[tokio::test]
+async fn a_tenant_name_of_the_d_121_code_points_is_required_on_create_and_update() {
+    // D-121 (#805): U+061C and the four Hangul fillers show nothing, so a
+    // name of them is blank on both routes and the stored name is unchanged.
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            TENANTS,
+            Some(&token),
+            create_body("ACME-D121", "acme-d121-admin"),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let uri = format!(
+        "{TENANTS}/{}",
+        created.body["data"]["id"].as_str().expect("an id")
+    );
+
+    for c in ['\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'] {
+        let name = format!(" {c}{c} ");
+        let mut body = create_body("ACME-D121-NEW", "acme-d121-new-admin");
+        body["name"] = json!(name);
+        app.post(TENANTS, Some(&token), body)
+            .await
+            .assert_refused_at("name", "REQUIRED");
+
+        app.put(&uri, Some(&token), json!({ "name": name }))
+            .await
+            .assert_refused_at("name", "REQUIRED");
+        assert_eq!(
+            app.get(&uri, Some(&token)).await.body["data"]["name"],
+            "ACME-D121 Limited"
+        );
+    }
+    assert_eq!(tenant_rows(&app, "ACME-D121-NEW").await, 0);
+}
+
+#[tokio::test]
 async fn a_tenant_rename_that_shows_nothing_is_required_and_an_invisible_edge_is_kept() {
     // #797 on `PUT /organization/tenants/{id}`, the route that gained its 422
     // entry: a name of U+FEFF and U+200B alone is `REQUIRED` and changes

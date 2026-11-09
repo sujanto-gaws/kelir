@@ -832,41 +832,204 @@ async fn zero_width_characters_alone_are_blank_in_a_role_code_and_name() {
     }
 }
 
-/// **What is stored is unchanged ([#616]).** Only a value that is wholly
-/// blank is refused. A code with a zero-width character at its edge is
-/// accepted and stored as it came, because the store trims with `str::trim`,
-/// which keeps the character; and since the length counts that same value, a
-/// zero-width character at the edge of 64 characters makes 65 and is refused,
-/// rather than reaching `VARCHAR(64)`.
+/// D-121's five ([#805]): U+061C, then the four Hangul fillers.
+const D_121: [char; 5] = ['\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'];
+
+const EDGE_MESSAGE: &str = "Role code may not begin or end with a character that shows nothing";
+
+/// **D-120 ([#805]): a role code with an invisible edge is refused.** It was
+/// stored as sent (#616), so `\u{200B}ROLE-LOOKALIKE` stood beside
+/// `ROLE-LOOKALIKE` reading the same. Now each of D-121's five at either end,
+/// and U+200B at the start, is one `INVALID_FORMAT` at `roleCode`, and no row
+/// is written. The edge is the trimmed value's. The order is blank, then
+/// length, then edge: a code of the five alone is `REQUIRED`, and one at the
+/// edge of 64 characters is still counted and `TOO_LONG`.
 ///
-/// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
 #[tokio::test]
-async fn a_zero_width_character_at_the_edge_is_stored_as_sent_and_counted() {
+async fn an_invisible_character_at_the_edge_of_a_role_code_is_refused_and_counted() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
 
-    let lookalike = "\u{200B}ROLE-LOOKALIKE";
+    let mut edged: Vec<String> = D_121
+        .iter()
+        .flat_map(|c| [format!(" {c}ROLE-EDGED "), format!("ROLE-EDGED{c} ")])
+        .collect();
+    edged.push("\u{200B}ROLE-LOOKALIKE".to_owned());
+    assert_eq!(edged.len(), 11);
+
+    for code in &edged {
+        let response = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": code, "name": "Edged" }),
+            )
+            .await;
+        assert_refused_at(&response, "roleCode", "INVALID_FORMAT");
+        let detail = &response.body["error"]["details"][0];
+        assert_eq!(detail["rule"], "pattern", "{}", response.body);
+        assert_eq!(detail["message"], EDGE_MESSAGE, "{}", response.body);
+        assert_eq!(roles_with_code(&app, code.trim()).await, 0, "{code:?}");
+    }
+    assert_eq!(roles_with_code(&app, "ROLE-EDGED").await, 0);
+
+    // A name's invisible edge is still accepted and stored as sent.
+    let named = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-NAMED", "name": "Admin\u{FEFF}" }),
+        )
+        .await;
+    assert_eq!(named.status, StatusCode::CREATED, "{}", named.body);
+    let id = role_id(&app, "ROLE-NAMED").await;
+    assert_eq!(stored_name(&app, id).await, "Admin\u{FEFF}");
+
+    for c in D_121 {
+        let blank = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": format!(" {c} {c}"), "name": "Blank" }),
+            )
+            .await;
+        assert_refused_at(&blank, "roleCode", "REQUIRED");
+
+        let long = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": format!("{}{c}", "C".repeat(64)), "name": "Long" }),
+            )
+            .await;
+        assert_refused_at(&long, "roleCode", "TOO_LONG");
+
+        let at_bound = format!("{}{c}", "C".repeat(63));
+        let edge = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": at_bound, "name": "Edge" }),
+            )
+            .await;
+        assert_refused_at(&edge, "roleCode", "INVALID_FORMAT");
+        assert_eq!(roles_with_code(&app, &at_bound).await, 0);
+
+        let both = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": format!("{c}ROLE-BOTH"), "name": " " }),
+            )
+            .await;
+        assert_eq!(
+            placed_details(&both),
+            [
+                detail("roleCode", "pattern", "INVALID_FORMAT"),
+                detail("name", "required", "REQUIRED"),
+            ]
+        );
+    }
+}
+
+/// **What D-120 leaves alone ([#805]).** An invisible character inside a
+/// code is stored as sent and counted: 64 characters with one inside are
+/// accepted, 65 are `TOO_LONG`. A name with an invisible edge is stored as
+/// sent on create and on update.
+///
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+#[tokio::test]
+async fn an_invisible_character_inside_a_role_code_or_at_a_names_edge_is_kept() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, c) in ['\u{200B}', '\u{200D}', '\u{3164}'].into_iter().enumerate() {
+        let code = format!("AD{c}MIN");
+        let created = app
+            .post(
+                "/api/v1/identity/roles",
+                Some(&token),
+                json!({ "roleCode": code, "name": format!("Admin {index}\u{FEFF}") }),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let id = role_id(&app, &code).await;
+        assert_eq!(
+            stored_name(&app, id).await,
+            format!("Admin {index}\u{FEFF}")
+        );
+    }
+
+    let inner = format!("C\u{3164}{}", "C".repeat(62));
     let created = app
         .post(
             "/api/v1/identity/roles",
             Some(&token),
-            json!({ "roleCode": format!(" {lookalike} "), "name": "Lookalike" }),
+            json!({ "roleCode": inner, "name": "Inner" }),
         )
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
-    assert_eq!(roles_with_code(&app, lookalike).await, 1);
-    assert_eq!(roles_with_code(&app, "ROLE-LOOKALIKE").await, 0);
+    let id = role_id(&app, &inner).await;
 
-    let edged = format!("{}\u{200B}", "C".repeat(64));
-    let refused = app
+    let over = app
         .post(
             "/api/v1/identity/roles",
             Some(&token),
-            json!({ "roleCode": edged, "name": "Edged" }),
+            json!({ "roleCode": format!("{inner}C"), "name": "Over" }),
         )
         .await;
-    assert_refused_at(&refused, "roleCode", "TOO_LONG");
-    assert_eq!(roles_with_code(&app, &"C".repeat(64)).await, 0);
+    assert_refused_at(&over, "roleCode", "TOO_LONG");
+
+    let renamed = app
+        .put(
+            &format!("/api/v1/identity/roles/{id}"),
+            Some(&token),
+            json!({ "name": "Inner\u{FEFF}" }),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(stored_name(&app, id).await, "Inner\u{FEFF}");
+}
+
+/// **An update takes no code ([#575], [#805]).** A `roleCode` on an update,
+/// even one with an invisible edge, is still an unknown field. A role whose
+/// code was stored with an invisible edge before D-120 is not repaired and can
+/// still be renamed, its code untouched; a blank name is still `REQUIRED`.
+///
+/// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+#[tokio::test]
+async fn a_role_stored_with_an_invisible_edge_can_still_be_renamed() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let legacy = "\u{200B}LEGACY";
+    let id =
+        fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, legacy, &[])
+            .await;
+    let uri = format!("/api/v1/identity/roles/{id}");
+    let before = stored_name(&app, id).await;
+
+    let carried = app
+        .put(
+            &uri,
+            Some(&token),
+            json!({ "roleCode": "\u{3164}ADMIN", "name": "Renamed" }),
+        )
+        .await;
+    assert_refused_at(&carried, "roleCode", "UNKNOWN_FIELD");
+    assert_eq!(stored_name(&app, id).await, before);
+
+    let blank = app.put(&uri, Some(&token), json!({ "name": " " })).await;
+    assert_refused_at(&blank, "name", "REQUIRED");
+
+    let renamed = app
+        .put(&uri, Some(&token), json!({ "name": "Legacy" }))
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(stored_name(&app, id).await, "Legacy");
+    assert_eq!(roles_with_code(&app, legacy).await, 1);
 }
 
 /// **[#575]: a role's code is fixed once created.** An update that carries a
