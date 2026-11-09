@@ -319,6 +319,25 @@ describe(
         expect(page.get('[data-testid="state-refusals-77"]').text()).toBe('1 refusal')
       })
 
+      // DEFECT found by the campaign, red on #933's head: the auto-open
+      // watches `fieldErrors`, which `clearField` also replaces, so the first
+      // edit of any refused field re-opens every other refused state the
+      // author has closed. AC-38-4 opens a state on a refused save or publish.
+      it('does not reopen a closed refused state when another refused field is edited', async () => {
+        const page = await render(chain(300, 892))
+
+        refuse = validationReply(
+          ['definition.states.250.name', 'A state needs a name.'],
+          ['definition.states.7.name', 'A state needs a name.'],
+        )
+        await click(page, 'save-workflow')
+        await closeState(page, 250)
+        await page.get('[data-testid="state-name-7"]').setValue('Fixed')
+        await settle()
+
+        expect(isExpanded(page, 250)).toBe(false)
+      })
+
       it('opens the state a refused publish names', async () => {
         const page = await render(chain(300, 892))
 
