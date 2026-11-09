@@ -397,6 +397,13 @@ function setInitial(code: string): void {
 function addState(kind: StateKind): void {
   draft.addState(kind)
   reset()
+
+  // A state just added is opened, so the author can fill it in at once (#800).
+  const keys = draft.current.value.stateKeys
+
+  if (collapsible.value && keys.length > 0) {
+    setOpen(keys[keys.length - 1], true)
+  }
 }
 
 async function undo(): Promise<void> {
