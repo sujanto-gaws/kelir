@@ -327,15 +327,20 @@ const placed = computed(() =>
  * A refusal opens the collapsed state it is about, so it is drawn where it is
  * drawn today: a detail at the state, or at a transition out of it. S6's and
  * S7's are at the state already (`placeDetails`). **No focus moves.**
+ *
+ * **Called where a save or publish reports its refusal, and nowhere else.** A
+ * watcher on `fieldErrors` also ran when an edit cleared one message
+ * (`clearField` replaces the object), and re-opened every refused state the
+ * author had closed (#800, the row 38 campaign).
  */
-watch(fieldErrors, (errors) => {
+function openRefused(): void {
   if (!collapsible.value) {
     return
   }
 
   const keys = draft.current.value.stateKeys
 
-  for (const path of Object.keys(errors)) {
+  for (const path of Object.keys(fieldErrors.value)) {
     const address = addressOf(path)
 
     if (address?.kind === 'state' && address.index < keys.length) {
@@ -344,7 +349,7 @@ watch(fieldErrors, (errors) => {
       ownersOf(address.index).forEach((at) => setOpen(keys[at], true))
     }
   }
-})
+}
 
 const initialOptions = computed(() =>
   definition.value.states.map((state) => ({
@@ -443,6 +448,7 @@ async function save(): Promise<boolean> {
     return true
   } catch (failure) {
     report(placeVerdict(failure, sent))
+    openRefused()
     await refreshIfPublished(failure, 'save')
 
     return false
@@ -523,6 +529,7 @@ async function publish(): Promise<void> {
     notice.value = `Published. Revision ${record.value.version} can now be bound to a document type.`
   } catch (failure) {
     report(placeVerdict(failure, draft.definition.value))
+    openRefused()
     await refreshIfPublished(failure, 'publish')
   } finally {
     isSaving.value = false
