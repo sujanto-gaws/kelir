@@ -225,6 +225,12 @@ mod tests {
         for value in ["", "   ", "a", " a ", "a\u{200B}b", "a\u{3164}\u{115F}b"] {
             assert!(!has_invisible_edge(value), "{value:?}");
         }
+        // Every member of the set, at either end: the edge reads the set
+        // itself, not a shorter list of its own.
+        for c in INVISIBLE_CODE_POINTS.iter().flat_map(|range| range.clone()) {
+            assert!(has_invisible_edge(&format!("{c}a")), "U+{:04X}", c as u32);
+            assert!(has_invisible_edge(&format!("a{c}")), "U+{:04X}", c as u32);
+        }
     }
 
     /// A value with one visible character is not blank, wherever the

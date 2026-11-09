@@ -874,6 +874,18 @@ async fn an_invisible_character_at_the_edge_of_a_role_code_is_refused_and_counte
     }
     assert_eq!(roles_with_code(&app, "ROLE-EDGED").await, 0);
 
+    // A name's invisible edge is still accepted and stored as sent.
+    let named = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-NAMED", "name": "Admin\u{FEFF}" }),
+        )
+        .await;
+    assert_eq!(named.status, StatusCode::CREATED, "{}", named.body);
+    let id = role_id(&app, "ROLE-NAMED").await;
+    assert_eq!(stored_name(&app, id).await, "Admin\u{FEFF}");
+
     for c in D_121 {
         let blank = app
             .post(
