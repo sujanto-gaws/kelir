@@ -9,7 +9,7 @@ use crate::error::{AppError, ValidationDetail};
 use crate::modules::workflow::domain::{DefinitionNamingRole, WorkflowDefinitionStatus};
 use crate::response::Pagination;
 use crate::utils::serde::present_or_absent;
-use crate::utils::text::is_blank_text;
+use crate::utils::text::{has_invisible_edge, is_blank_text};
 
 /// Whether a row an access token names is there, and whether it is deleted
 /// (#650, decision D-105; ADR-0045).
@@ -419,7 +419,9 @@ pub struct UpdateUserRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRoleRequest {
     /// Required; at most 64 characters once trimmed. Stored trimmed, and
-    /// unique among the tenant's live roles.
+    /// unique among the tenant's live roles. It may not begin or end with a
+    /// character that shows nothing, such as U+200B or U+3164
+    /// (`INVALID_FORMAT`); one in the middle is kept.
     pub role_code: String,
     /// Required; at most 200 characters once trimmed.
     pub name: String,
@@ -565,17 +567,32 @@ pub const MAX_ROLE_NAME_LENGTH: usize = 200;
 /// and the seeded and documented codes already differ in shape
 /// (`ROLE-ADMIN`, `FINANCE_APPROVER`).
 ///
+/// **D-120 ([#805]): the code's edges must show.** Once it is neither blank
+/// nor too long, a trimmed code that begins or ends with a member of
+/// `INVISIBLE_CODE_POINTS` is `INVALID_FORMAT`, so `\u{200B}ADMIN` cannot sit
+/// beside `ADMIN`. One inside the code is kept. An update takes no code, so
+/// this is create-only.
+///
 /// [#575]: https://github.com/sujanto-gaws/kelir/issues/575
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
 pub fn validate_create_role(request: &CreateRoleRequest) -> Result<(), AppError> {
     let mut details = Vec::new();
 
-    bounded_text(
+    if bounded_text(
         &request.role_code,
         "roleCode",
         "Role code",
         MAX_ROLE_CODE_LENGTH,
         &mut details,
-    );
+    ) && has_invisible_edge(&request.role_code)
+    {
+        details.push(ValidationDetail::new(
+            "roleCode",
+            "pattern",
+            "INVALID_FORMAT",
+            "Role code may not begin or end with a character that shows nothing",
+        ));
+    }
     bounded_text(
         &request.name,
         "name",
