@@ -531,7 +531,8 @@ test('an administrator builds a workflow in the editor, and a document is approv
  * ceiling of 80 states or 240 transitions, whichever is reached first**. Above
  * it the *Graph* tab lays nothing out and says so in a sentence, and the editor
  * does not fetch the graph's chunk at all. This test holds both sides of it in
- * a real browser, and still asserts nothing about time.
+ * a real browser, and ~~still asserts nothing about time~~ asserts no time about
+ * the graph (restated 2026-11-09).
  *
  * - **At 20, 40 and 80 states the layout is timed, as #772 timed it.** All
  *   three are at or under the ceiling on both counts (80 states and 232
@@ -545,6 +546,12 @@ test('an administrator builds a workflow in the editor, and a document is approv
  *   sentence with its seeded counts, no graph and no caption, and **no file
  *   under `/assets/` requested after the click**: the chunk holding dagre and
  *   Vue Flow is not fetched for a draft it would not draw (#721 AC3).
+ * - **At 150 and 300 states the list is timed, and its targets asserted**
+ *   (#800, AC-38-7). Both are above the list's threshold of 40 states or 112
+ *   transitions, so each state's body is drawn only once it is opened.
+ *   `measureList` logs a `#800 editor` line and asserts AC-38-2 on the page
+ *   clock: the load, the DOM nodes, the tab switch each way, and opening one
+ *   state.
  *
  * # What the timed number is, and what it is not
  *
@@ -614,14 +621,18 @@ const DECLINED_SIZES = [150, 300] as const
 const CEILING = { states: 80, transitions: 240 } as const
 
 /**
- * The test's own timeout, above the config's 60 s. **About twice the whole
+ * The test's own timeout, above the config's 60 s. ~~**About twice the whole
  * test as last measured**: 2.3 min on the laptop on 2026-10-27, loaded by a
  * `cargo` build beside it, so a slow figure. Nearly all of it is the six
  * editor loads (`EDITOR_TIMEOUT`) and the waits for quiet around the timed
- * layouts; no layout above 80 states is left in it. #772's ten minutes held
- * a 45 s layout at 300 states, which the ceiling removed (#721 AC9).
+ * layouts~~ **About six times the whole test as last measured** (restated
+ * 2026-11-09, #800): 20.5 s on the i5-12450H laptop, unloaded, now that no
+ * editor load takes more than a second. Most of it is the waits for quiet
+ * around the timed layouts; no layout above 80 states is left in it. #772's
+ * ten minutes held a 45 s layout at 300 states, which the ceiling removed
+ * (#721 AC9). The 300-state round trip uses it too, and took 2.7 s.
  */
-const LAYOUT_TEST_TIMEOUT = 5 * 60_000
+const LAYOUT_TEST_TIMEOUT = 2 * 60_000
 
 /**
  * The wait for the caption, explicit because the config's 15 s `expect`
@@ -633,18 +644,26 @@ const LAYOUT_TEST_TIMEOUT = 5 * 60_000
 const CAPTION_TIMEOUT = 20_000
 
 /**
- * Loading the editor on a draft lists every state, and the 300-state draft is
+ * ~~Loading the editor on a draft lists every state, and the 300-state draft is
  * still loaded to see its decline, so this is the slowest step left. **About
  * 3.4 times the slowest such load measured**: 19.9–26.5 s by Playwright's
  * clock on the laptop on 2026-10-27, loaded by a `cargo` build beside it, and
- * 22.9 s in the whole suite on four pinned threads in Linux. The 57–66 s loads
- * of the 150-state draft seen before `whenPresent` were Playwright's failure
- * snapshot, not the editor (see `whenPresent`). Every load logs a
- * `#721 editor:` line, so the next reading of this figure is in the run's own
- * log. It also bounds the waits for quiet, which follow loads no larger than
- * 80 states.
+ * 22.9 s in the whole suite on four pinned threads in Linux.~~ **The editor's
+ * load is no longer the slowest step** (restated 2026-11-09, #800): above 40
+ * states or 112 transitions the list draws each state's header and draws its
+ * body only when the state is opened, so the 300-state draft loads in 0.47 s
+ * by Playwright's clock (median of five on the i5-12450H laptop, unloaded;
+ * 16.3 s before), and the slowest load left is the 40-state draft, drawn whole,
+ * at 0.71 s at worst. The slowest step left is the 80-state layout
+ * (`CAPTION_TIMEOUT`). **The config's 15 s `expect` timeout, about 20 times
+ * that load**, so no wait here is tighter than an ordinary assertion's. The
+ * 57–66 s loads of the 150-state draft seen before `whenPresent` were
+ * Playwright's failure snapshot, not the editor (see `whenPresent`). Every
+ * load logs a `#721 editor:` line, so the next reading of this figure is in
+ * the run's own log. It also bounds the waits for quiet, which follow loads no
+ * larger than 80 states.
  */
-const EDITOR_TIMEOUT = 90_000
+const EDITOR_TIMEOUT = 15_000
 
 /** How long without a long task counts as quiet: before the click, and after the caption. */
 const QUIET_MS = 1_500
@@ -715,8 +734,8 @@ function approvalChain(size: number, workflowKey: string) {
 }
 
 /** Posts one draft. Saved, never published. */
-async function seedLayoutDraft(size: number): Promise<LayoutDraft> {
-  const workflowKey = `e2e_layout_${size}_${suffix}`.toLowerCase()
+async function seedLayoutDraft(size: number, use = 'layout'): Promise<LayoutDraft> {
+  const workflowKey = `e2e_${use}_${size}_${suffix}`.toLowerCase()
   const definition = approvalChain(size, workflowKey)
 
   const created = await session.context.post(`${API_PREFIX}/workflow/definitions`, {
@@ -799,7 +818,26 @@ async function whenPresent(page: Page, testId: string, timeout: number): Promise
  * state is opened, so the input is not there. The header's heading carries the
  * code at every size.
  */
-async function openEditor(page: Page, draft: LayoutDraft): Promise<number> {
+async function openEditor(page: Page, draft: LayoutDraft): Promise<EditorLoad> {
+  const last = `state-${draft.states - 1}`
+
+  // The page clock (#800): stamped where the last state's header is inserted,
+  // and again two animation frames later, once it has been laid out and painted.
+  await page.addInitScript((testId: string) => {
+    const stamps = ((window as EditorProbedWindow).__editorProbe ??= {})
+    const watcher = new MutationObserver(() => {
+      if (document.querySelector(`[data-testid="${testId}"]`)) {
+        watcher.disconnect()
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            stamps[testId] = performance.now()
+          }),
+        )
+      }
+    })
+    watcher.observe(document, { childList: true, subtree: true })
+  }, last)
+
   const start = Date.now()
 
   await page.goto(`/admin/workflows/${draft.id}`)
@@ -819,7 +857,119 @@ async function openEditor(page: Page, draft: LayoutDraft): Promise<number> {
       `load_ms=${loadMs} (Playwright clock)`,
   )
 
-  return loadMs
+  await page.waitForFunction(
+    (testId) => typeof (window as EditorProbedWindow).__editorProbe?.[testId] === 'number',
+    last,
+    { timeout: EDITOR_TIMEOUT },
+  )
+  const paintedMs = await page.evaluate(
+    (testId) => Math.round((window as EditorProbedWindow).__editorProbe?.[testId] ?? Number.NaN),
+    last,
+  )
+
+  return { loadMs, paintedMs }
+}
+
+/** An editor load, by Playwright's clock and by the page's (#800). */
+interface EditorLoad {
+  readonly loadMs: number
+  /** From the navigation to two frames after the last state's header is inserted. */
+  readonly paintedMs: number
+}
+
+type EditorProbedWindow = Window & { __editorProbe?: Record<string, number> }
+
+/**
+ * AC-38-2's targets for a draft above the list's threshold (#800, amended on
+ * the issue 2026-11-09), read on the page clock and asserted as written. **The
+ * margin is in the targets themselves**, as `EDITOR_TIMEOUT`'s is in its
+ * multiple: each is at least 6.8 times the slowest figure measured after the
+ * change on the i5-12450H laptop, unloaded, five runs each (300 states: load
+ * 191 ms, Graph back to List 49 ms, opening state 250 34 ms; 150 states: load
+ * 159 ms, opening state 125 44 ms). The node counts are exact for the seeded
+ * shape: 21,695 at 150 states and 42,245 at 300.
+ */
+const LIST_TARGETS: Record<number, { loadMs: number; nodes: number }> = {
+  150: { loadMs: 1_500, nodes: 150_000 },
+  300: { loadMs: 3_000, nodes: 300_000 },
+}
+const SWITCH_TARGET_MS = 1_000
+const OPEN_TARGET_MS = 300
+
+/**
+ * Times the list above its threshold on the page clock, and asserts AC-38-2;
+ * returns the `#800 editor` line. Called after `checkDecline`, so the *Graph*
+ * tab is showing.
+ *
+ * - **DOM nodes** by CDP `Memory.getDOMCounters`, the counter #800 used, read
+ *   on the load as drawn, before any state is opened.
+ * - **The tab switch each way**, from a click dispatched in the page to two
+ *   frames after it: *Graph back to List* first, then *List to Graph*, then
+ *   back to the list. The click is the page's own, not Playwright's, whose
+ *   actionability checks walk the page (#800).
+ * - **Opening one state**, five sixths of the way down, from the click on its
+ *   header to two frames after, its transitions drawn.
+ */
+async function measureList(page: Page, draft: LayoutDraft, load: EditorLoad, nodes: number) {
+  const timeClick = (testId: string) =>
+    page.evaluate(async (id) => {
+      const frame = () => new Promise<number>((done) => requestAnimationFrame(() => done(0)))
+      const start = performance.now()
+      ;(document.querySelector(`[data-testid="${id}"]`) as HTMLElement).click()
+      await frame()
+      await frame()
+
+      return Math.round(performance.now() - start)
+    }, testId)
+
+  const toListMs = await timeClick('view-list')
+  await expect(page.locator('#workflow-view-list')).toBeVisible()
+  const toGraphMs = await timeClick('view-graph')
+  await expect(page.getByTestId('workflow-graph-declined')).toBeVisible()
+  await timeClick('view-list')
+
+  const opened = Math.floor((draft.states * 5) / 6)
+  const openMs = await timeClick(`open-state-${opened}`)
+  const card = page.getByTestId(`state-${opened}`)
+  await expect(page.getByTestId(`open-state-${opened}`)).toHaveAttribute('aria-expanded', 'true')
+  await expect(card.locator('[data-testid^="transition-"][data-testid$="-detail"]')).toHaveCount(3)
+
+  const line = [
+    `#800 editor: size=${draft.size}`,
+    `states=${draft.states}`,
+    `transitions=${draft.transitions}`,
+    `load_ms=${load.loadMs}`,
+    `page_ms=${load.paintedMs}`,
+    `dom_nodes=${nodes}`,
+    `to_graph_ms=${toGraphMs}`,
+    `to_list_ms=${toListMs}`,
+    `open_state=${opened}`,
+    `open_ms=${openMs}`,
+    '(page clock but load_ms)',
+  ].join(' ')
+
+  const target = LIST_TARGETS[draft.size]
+  expect(load.paintedMs, `${line}: the load`).toBeLessThanOrEqual(target.loadMs)
+  expect(nodes, `${line}: DOM nodes`).toBeLessThanOrEqual(target.nodes)
+  expect(toGraphMs, `${line}: List to Graph`).toBeLessThanOrEqual(SWITCH_TARGET_MS)
+  expect(toListMs, `${line}: Graph back to List`).toBeLessThanOrEqual(SWITCH_TARGET_MS)
+  expect(openMs, `${line}: opening a state`).toBeLessThanOrEqual(OPEN_TARGET_MS)
+
+  return line
+}
+
+/** The page's DOM node count, by CDP, as #800 counted it. */
+async function domNodes(page: Page): Promise<number> {
+  const cdp = await page.context().newCDPSession(page)
+
+  try {
+    await cdp.send('HeapProfiler.enable')
+    await cdp.send('HeapProfiler.collectGarbage')
+
+    return ((await cdp.send('Memory.getDOMCounters')) as { nodes: number }).nodes
+  } finally {
+    await cdp.detach()
+  }
 }
 
 /**
@@ -1207,10 +1357,58 @@ test('the graph is laid out and timed at or under its ceiling, and declined abov
 
     // --- Above the ceiling: a fresh load, no chunk handed to it, no layout --
     for (const draft of declined) {
-      await openEditor(page, draft)
+      const load = await openEditor(page, draft)
+      const nodes = await domNodes(page)
 
       record('#721 decline', await checkDecline(page, draft))
+      // The list above its threshold (#800): one state's body drawn on opening.
+      record('#800 editor', await measureList(page, draft, load, nodes))
     }
+  } finally {
+    await page.close()
+  }
+})
+
+/**
+ * **A round trip through a collapsed state** (#800, AC-38-7): a 300-state
+ * draft is opened, state 250 is opened from its header and its name edited,
+ * the draft is saved, and a fresh load, with state 250 opened again, shows the
+ * name the server stored. The save keeps the state open, by its position.
+ */
+test('a 300-state draft is edited in an opened state, saved, and read back', async ({
+  browser,
+}) => {
+  test.setTimeout(LAYOUT_TEST_TIMEOUT)
+
+  // Its own key: the layout test has already seeded `e2e_layout_300_<run>`.
+  const draft = await seedLayoutDraft(300, 'round_trip')
+  const renamed = `Step 251, renamed ${suffix}`
+  const page = await browser.newPage()
+
+  try {
+    const { username, password } = credentials()
+    await signIn(page, username, password)
+
+    await openEditor(page, draft)
+    await expect(page.getByTestId('state-code-250')).toHaveCount(0)
+    await page.getByTestId('open-state-250').click()
+    await page.getByTestId('state-name-250').fill(renamed)
+
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes(`/workflow/definitions/${draft.id}`),
+      { timeout: RESPONSE_TIMEOUT },
+    )
+    await page.getByTestId('save-workflow').click()
+    expect((await saved).ok()).toBe(true)
+    await expect(page.getByTestId('notice')).toContainText('Saved.')
+    await expect(page.getByTestId('state-name-250')).toHaveValue(renamed)
+
+    await openEditor(page, draft)
+    await page.getByTestId('open-state-250').click()
+    await expect(page.getByTestId('state-name-250')).toHaveValue(renamed)
+    await expect(page.getByTestId('state-name-249')).toHaveCount(0)
   } finally {
     await page.close()
   }
