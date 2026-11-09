@@ -1046,7 +1046,8 @@ While the major version is `0`, the public API may change in any release.
   with a wholly invisible `username` from 202 to 422 `REQUIRED`, as a
   whitespace-only one already was. No other answer moves. What is stored is unchanged: the value `trim()` leaves, so
   a visible value with an invisible character at its edge is kept as sent and
-  counted. A value stored invisible before the upgrade is not repaired, and an
+  counted (a role code on create is the one exception, refused since
+  **D-120**, *Changed*). A value stored invisible before the upgrade is not repaired, and an
   edit that sends it back is refused until it is given a visible one.
   Optional fields where blank means absent follow in the next entry; the
   JFSS `required` rule is unchanged. No migration, and no schema change.
@@ -1278,7 +1279,8 @@ While the major version is `0`, the public API may change in any release.
   first administrator. Blank is one function, `is_blank_text`, and one set of
   code points (coding standard §2.6). What is stored is unchanged: the value
   `trim()` leaves, so a visible value with an invisible character at its edge
-  is kept as sent, and that character counts towards the length. An email is
+  is kept as sent, and that character counts towards the length (except a
+  role code, whose invisible edge is now refused: **D-120**, *Changed*). An email is
   unchanged, and a blank one is still `INVALID_FORMAT`. The dialogs' own blank
   check is unchanged and stays a pre-check; the server's `REQUIRED` is shown
   under the field. Other modules keep their own blank checks until
