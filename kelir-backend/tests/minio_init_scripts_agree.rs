@@ -31,8 +31,10 @@
 //!    two such steps are found, the backend tests' store and the probe's.
 //!
 //! **Comments are stripped from the workflow first**, so prose naming a
-//! command is not a use of it. The probe's own `mc mb` and `mc encrypt`, in
-//! `encryption-at-rest.probe.sh`, make a scratch store and are not read.
+//! command is not a use of it. The probe's own `mc mb`, in
+//! `encryption-at-rest.probe.sh`, makes a scratch bucket for the restore and
+//! is not read: that bucket has **no** default rule on purpose, so the probe
+//! sees what the restore itself asks for (#921), and the probe checks so.
 //!
 //! # Seen to fail (coding standard §2.9), 2026-11-08
 //!
