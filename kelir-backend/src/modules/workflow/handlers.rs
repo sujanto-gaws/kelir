@@ -142,7 +142,7 @@ async fn create_definition(
     responses(
         (status = 200, description = "Updated", body = WorkflowDefinition),
         (status = 404, description = "No such definition"),
-        (status = 422, description = "The revision is published, or the definition is invalid. A name sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
+        (status = 422, description = "The revision is published, or the definition is invalid. A name sent blank is REQUIRED; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797). A description sent blank is stored as the empty string")
     ),
     security(("bearer" = []))
 )]
@@ -219,7 +219,8 @@ async fn deprecate_definition(
     responses(
         (status = 201, description = "The next revision, as a draft", body = WorkflowDefinition),
         (status = 403, description = "Missing workflow:definition:create"),
-        (status = 404, description = "No such definition")
+        (status = 404, description = "No such definition"),
+        (status = 422, description = "A name sent blank is REQUIRED. A description sent blank is stored as the empty string; blank is whitespace or a code point that shows nothing, such as U+200B or U+FEFF (#797)")
     ),
     security(("bearer" = []))
 )]

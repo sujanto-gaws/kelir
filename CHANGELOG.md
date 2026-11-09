@@ -1014,9 +1014,18 @@ While the major version is `0`, the public API may change in any release.
   a visible value with an invisible character at its edge is kept as sent and
   counted. A value stored invisible before the upgrade is not repaired, and an
   edit that sends it back is refused until it is given a visible one.
-  Optional fields where blank means absent are unchanged and follow
-  separately; the JFSS `required` rule is unchanged. No migration, and no
-  schema change.
+  Optional fields where blank means absent follow in the next entry; the
+  JFSS `required` rule is unchanged. No migration, and no schema change.
+- **An optional text field of only invisible characters is absent in every
+  module** ([#797](https://github.com/sujanto-gaws/kelir/issues/797) part 2,
+  construction plan 21 row 37). Where a blank optional text means "not
+  given", a value of only invisible code points is now omitted or stored NULL
+  exactly as a whitespace-only one is, by one helper, `non_blank`, that the
+  validator and the normaliser both ask. A visible value keeps its invisible
+  edges. A contact mechanism `detail` that shows nothing is `REQUIRED`, and a
+  decision `comment` that shows nothing is `COMMENT_REQUIRED` where the
+  transition requires one. The answers that move are listed under *Upgrade
+  notes*. No migration, and no schema change.
 - **A document type bound to another tenant's workflow, or to none, refuses
   its submissions with 422** ([#774](https://github.com/sujanto-gaws/kelir/issues/774),
   construction plan 21 row 30). No route writes such a binding, since a

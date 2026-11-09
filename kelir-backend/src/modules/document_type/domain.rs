@@ -397,7 +397,7 @@ fn bounded(
             "REQUIRED",
             format!("{path} is required"),
         ));
-    } else if trimmed.chars().count() > max {
+    } else if !is_blank_text(trimmed) && trimmed.chars().count() > max {
         details.push(ValidationDetail::new(
             path,
             "maxLength",

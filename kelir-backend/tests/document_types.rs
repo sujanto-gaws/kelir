@@ -465,6 +465,120 @@ async fn an_optional_text_that_shows_nothing_is_stored_as_none() {
     }
 }
 
+/// **[#797]: a visible optional text keeps its invisible edges.** Only a
+/// wholly blank value is absent; a `description` or `category` with one
+/// visible character is stored as `str::trim` leaves it, U+200B and U+FEFF at
+/// its edges kept, on a create and on an edit.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_visible_optional_text_keeps_its_invisible_edges() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let created = app
+        .post(
+            "/api/v1/document-types",
+            Some(&token),
+            json!({
+                "typeCode": "PR_EDGE",
+                "name": "N",
+                "description": " \u{200B}Desks\u{FEFF} ",
+                "category": "\t\u{2060}PROC ",
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = id_of(&created.body["data"]);
+
+    let stored = || async {
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT description, category FROM document_types WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the type")
+    };
+    assert_eq!(
+        stored().await,
+        (
+            Some("\u{200B}Desks\u{FEFF}".to_owned()),
+            Some("\u{2060}PROC".to_owned())
+        )
+    );
+
+    let edited = put_type(
+        &app,
+        &token,
+        id,
+        json!({ "description": "\u{FEFF}Chairs ", "category": " OPS\u{200B}" }),
+    )
+    .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    assert_eq!(
+        stored().await,
+        (
+            Some("\u{FEFF}Chairs".to_owned()),
+            Some("OPS\u{200B}".to_owned())
+        )
+    );
+}
+
+/// **[#797]: a blank optional text is absent at any length.** A `category`
+/// longer than its `VARCHAR(64)` but made only of invisible code points is
+/// absent, as 65 spaces are: stored NULL on a create and on an edit.
+///
+/// **Red on 75b733c (defect):** `domain::bounded(required = false)` counts
+/// `str::trim`'s value, which keeps U+200B, so the validator answers
+/// `TOO_LONG` for a value the normaliser (`trimmed` → `non_blank`) would
+/// store as NULL. The validator and the normaliser disagree.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn a_long_category_that_shows_nothing_is_absent_not_too_long() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let spaces = " ".repeat(65);
+    let invisible = "\u{200B}".repeat(65);
+    let mixed = "\u{FEFF} \u{00AD}".repeat(22);
+
+    for (index, blank) in [&spaces, &invisible, &mixed].into_iter().enumerate() {
+        let created = app
+            .post(
+                "/api/v1/document-types",
+                Some(&token),
+                json!({
+                    "typeCode": format!("PR_LONG_{index}"),
+                    "name": "N",
+                    "category": blank,
+                }),
+            )
+            .await;
+        assert_eq!(
+            created.status,
+            StatusCode::CREATED,
+            "{} chars of {:?}: {}",
+            blank.chars().count(),
+            blank.chars().next(),
+            created.body
+        );
+        let id = id_of(&created.body["data"]);
+
+        let edited = put_type(&app, &token, id, json!({ "category": blank })).await;
+        assert_eq!(edited.status, StatusCode::OK, "on an edit: {}", edited.body);
+
+        let category: Option<String> =
+            sqlx::query_scalar("SELECT category FROM document_types WHERE id = $1")
+                .bind(id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("the type");
+        assert_eq!(category, None, "index {index}");
+    }
+}
+
 /// **[#797]: blank is `is_blank_text`.** A type code, a name or a numbering
 /// template of U+200B alone shows nothing and is `REQUIRED` at its path; a
 /// name with a visible character keeps an invisible edge, as `str::trim`

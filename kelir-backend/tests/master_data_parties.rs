@@ -304,6 +304,66 @@ async fn an_optional_party_text_that_shows_nothing_is_stored_as_absent() {
     }
 }
 
+/// **[#797]: an optional relationship role type or revenue that shows nothing
+/// is absent.** A relationship's `roleTypeIdFrom` and `roleTypeIdTo` that
+/// show nothing name no role type: `resolve_role_type` does not look them up
+/// (which would refuse `NOT_FOUND`) and stores NULL, as whitespace-only ones
+/// do. A party group's `annualRevenue` that shows nothing is not checked as a
+/// decimal and is stored NULL. Exercised with the rarer invisible code points
+/// too (U+00AD, U+180E, U+202E, U+2066), mixed with whitespace.
+///
+/// [#797]: https://github.com/sujanto-gaws/kelir/issues/797
+#[tokio::test]
+async fn an_optional_role_type_or_revenue_that_shows_nothing_is_stored_as_absent() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, blank) in [
+        "\u{200B}",
+        "\u{00AD} \u{2066}\t\u{180E}\u{202E}\u{FEFF}",
+        "   ",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let employer_code = format!("ORG-RT-{index}");
+        let mut employer = party_group(&employer_code, "Acme");
+        employer["partyGroup"]["annualRevenue"] = json!(blank);
+        let employer = create_ok(&app, &token, employer).await;
+
+        let revenue: Option<String> = sqlx::query_scalar(
+            "SELECT annual_revenue::text FROM mdm_party_groups WHERE party_id = $1",
+        )
+        .bind(employer)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the group");
+        assert_eq!(revenue, None, "{blank:?}");
+
+        let code = format!("PARTY-RT-{index}");
+        let mut person = full_person(&code);
+        person["relationshipsFrom"] = json!([{
+            "partyIdFrom": code,
+            "partyIdTo": employer_code,
+            "partyRelationshipTypeId": "EMPLOYMENT",
+            "roleTypeIdFrom": blank,
+            "roleTypeIdTo": blank,
+            "fromDate": "2026-01-01T00:00:00Z",
+        }]);
+        create_ok(&app, &token, person).await;
+
+        let roles: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT r.from_role_type_id, r.to_role_type_id FROM mdm_party_relationships r \
+             JOIN mdm_parties p ON p.id = r.from_party_id WHERE p.party_code = $1",
+        )
+        .bind(&code)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the relationship");
+        assert_eq!(roles, (None, None), "{blank:?}");
+    }
+}
+
 #[tokio::test]
 async fn creates_a_person_party_and_reads_the_whole_aggregate_back() {
     let app = TestApp::spawn().await;
