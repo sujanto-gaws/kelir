@@ -255,6 +255,32 @@ async fn a_comment_of_whitespace_is_refused_and_names_the_field() {
     assert_eq!(rows, 0);
 }
 
+/// **D-121 ([#805]): U+061C and the four Hangul fillers show nothing.** A
+/// body of any of them, alone or mixed with spaces, is `COMMENT_EMPTY` and
+/// nothing is stored. This test stands for every module's required body
+/// text, which all ask `is_blank_text`.
+///
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+#[tokio::test]
+async fn a_comment_of_the_d_121_code_points_is_empty() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_CMT_D121").await;
+    let document = draft(&app, &token, type_id).await;
+    let uri = format!("/api/v1/documents/{document}/comments");
+
+    for c in ['\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'] {
+        for body in [c.to_string(), format!(" {c} {c}\t")] {
+            app.post(&uri, Some(&token), json!({ "body": body }))
+                .await
+                .assert_refused_at("body", "COMMENT_EMPTY");
+        }
+    }
+
+    let listed = app.get(&uri, Some(&token)).await;
+    assert_eq!(listed.body["meta"]["total"], 0, "{}", listed.body);
+}
+
 /// **[#797]: blank is `is_blank_text`.** A body of U+200B alone shows
 /// nothing and is `COMMENT_EMPTY`; a body with a visible character keeps an
 /// invisible edge, as `str::trim` leaves it, and reads back so.

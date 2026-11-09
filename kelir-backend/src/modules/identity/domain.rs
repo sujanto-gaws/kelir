@@ -1583,23 +1583,93 @@ mod tests {
         );
     }
 
-    /// **What is stored is unchanged ([#616]).** A visible code with a
-    /// zero-width character at its edge is not blank and is accepted, as it
-    /// came. `str::trim` keeps that character, so the length counts it: one at
-    /// the edge of a 64-character code makes 65.
-    ///
-    /// [#616]: https://github.com/sujanto-gaws/kelir/issues/616
-    #[test]
-    fn a_zero_width_character_at_the_edge_is_kept_and_counted() {
-        assert!(
-            validate_create_role(&create_role_request("\u{200B}ADMIN", "Admin\u{FEFF}")).is_ok()
-        );
+    /// D-121's five and U+200B, the control #616 already knew.
+    const EDGE_CASES: [char; 6] = [
+        '\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}', '\u{200B}',
+    ];
 
-        let edged = format!("{}\u{200B}", "C".repeat(MAX_ROLE_CODE_LENGTH));
-        assert_eq!(edged.trim().chars().count(), MAX_ROLE_CODE_LENGTH + 1);
-        assert_eq!(
-            placed(validate_create_role(&create_role_request(&edged, "Name")).expect_err("long")),
-            [("roleCode".to_owned(), "TOO_LONG".to_owned())]
+    /// **D-120 ([#805]): a role code with an invisible edge is refused.** It
+    /// was accepted as sent, so `\u{200B}ADMIN` stood beside `ADMIN` as a
+    /// second code that reads the same. The edge is the trimmed value's, so
+    /// whitespace outside the character does not hide it. One in the middle is
+    /// kept, and a name with an invisible edge is still accepted. The length
+    /// still counts the character: one at the edge of 64 makes 65, `TOO_LONG`
+    /// before `INVALID_FORMAT`.
+    ///
+    /// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+    #[test]
+    fn an_invisible_character_at_the_edge_of_a_role_code_is_refused_and_counted() {
+        let refused = |code: &str| {
+            let details = details_of(
+                validate_create_role(&create_role_request(code, "Admin\u{FEFF}"))
+                    .expect_err("an invisible edge is refused"),
+            );
+            assert_eq!(details.len(), 1, "{code:?}: {details:?}");
+            assert_eq!(
+                (
+                    details[0].path.as_str(),
+                    details[0].rule.as_str(),
+                    details[0].code.as_str(),
+                    details[0].message.as_str(),
+                ),
+                (
+                    "roleCode",
+                    "pattern",
+                    "INVALID_FORMAT",
+                    "Role code may not begin or end with a character that shows nothing",
+                ),
+                "{code:?}"
+            );
+        };
+
+        for c in EDGE_CASES {
+            refused(&format!("{c}ADMIN"));
+            refused(&format!("ADMIN{c}"));
+            refused(&format!(" {c}ADMIN "));
+            refused(&format!("ADMIN{c} "));
+            refused(&format!("{}{c}", "C".repeat(MAX_ROLE_CODE_LENGTH - 1)));
+
+            // Interior: kept, and counted.
+            assert!(validate_create_role(&create_role_request(&format!("AD{c}MIN"), "N")).is_ok());
+            let inner = format!("C{c}{}", "C".repeat(MAX_ROLE_CODE_LENGTH - 2));
+            assert!(validate_create_role(&create_role_request(&inner, "N")).is_ok());
+            assert_eq!(
+                placed(
+                    validate_create_role(&create_role_request(&format!("{inner}C"), "N"))
+                        .expect_err("65 characters")
+                ),
+                [("roleCode".to_owned(), "TOO_LONG".to_owned())]
+            );
+
+            // Order: blank first, then the length, then the edge.
+            assert_eq!(
+                placed(
+                    validate_create_role(&create_role_request(&format!(" {c}{c} "), "N"))
+                        .expect_err("blank")
+                ),
+                [("roleCode".to_owned(), "REQUIRED".to_owned())]
+            );
+            let edged = format!("{}{c}", "C".repeat(MAX_ROLE_CODE_LENGTH));
+            assert_eq!(edged.trim().chars().count(), MAX_ROLE_CODE_LENGTH + 1);
+            assert_eq!(
+                placed(validate_create_role(&create_role_request(&edged, "N")).expect_err("long")),
+                [("roleCode".to_owned(), "TOO_LONG".to_owned())]
+            );
+            assert_eq!(
+                placed(
+                    validate_create_role(&create_role_request(&format!("{c}ADMIN"), " "))
+                        .expect_err("both")
+                ),
+                [
+                    ("roleCode".to_owned(), "INVALID_FORMAT".to_owned()),
+                    ("name".to_owned(), "REQUIRED".to_owned()),
+                ]
+            );
+        }
+
+        assert!(validate_create_role(&create_role_request("ADMIN", "Admin\u{FEFF}")).is_ok());
+        assert!(
+            validate_create_role(&create_role_request("AD\u{200D}MIN", "\u{200B}Admin")).is_ok()
         );
     }
 }

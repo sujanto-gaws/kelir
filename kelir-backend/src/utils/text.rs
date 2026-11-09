@@ -109,13 +109,38 @@ mod tests {
         }
     }
 
+    /// **D-121 ([#805]) adds five.** U+061C ARABIC LETTER MARK is a format
+    /// character (`Cf`); U+115F HANGUL CHOSEONG FILLER, U+1160 HANGUL
+    /// JUNGSEONG FILLER, U+3164 HANGUL FILLER and U+FFA0 HALFWIDTH HANGUL
+    /// FILLER are letters (`Lo`) that draw nothing. Each is held by name:
+    /// alone, run together and mixed with whitespace.
+    ///
+    /// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+    #[test]
+    fn the_five_code_points_d_121_adds_are_blank() {
+        let five = ['\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'];
+
+        for c in five {
+            for value in [c.to_string(), format!(" {c}\t{c}\u{00A0}")] {
+                assert!(is_blank_text(&value), "U+{:04X}", c as u32);
+                assert_eq!(non_blank(&value), None, "U+{:04X}", c as u32);
+            }
+        }
+
+        let all: String = five.iter().collect();
+        assert!(is_blank_text(&all));
+        assert_eq!(non_blank(&format!(" {all} ")), None);
+        assert_eq!(non_blank(" \u{3164}a\u{FFA0} "), Some("\u{3164}a\u{FFA0}"));
+    }
+
     /// Each group the set lists, by its two ends, so narrowing a range from
     /// either side is seen.
     #[test]
     fn each_end_of_each_group_is_blank() {
         for c in [
-            '\u{00AD}', '\u{180E}', '\u{200B}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2060}',
-            '\u{2064}', '\u{2066}', '\u{2069}', '\u{FEFF}',
+            '\u{00AD}', '\u{061C}', '\u{115F}', '\u{1160}', '\u{180E}', '\u{200B}', '\u{200F}',
+            '\u{202A}', '\u{202E}', '\u{2060}', '\u{2064}', '\u{2066}', '\u{2069}', '\u{3164}',
+            '\u{FEFF}', '\u{FFA0}',
         ] {
             assert!(is_blank_text(&c.to_string()), "U+{:04X}", c as u32);
         }
@@ -129,8 +154,9 @@ mod tests {
     #[test]
     fn the_neighbours_of_each_group_are_not_blank() {
         for c in [
-            '\u{00AC}', '\u{00AE}', '\u{180D}', '\u{180F}', '\u{2010}', '\u{2065}', '\u{206A}',
-            '\u{FEFE}', '\u{FF00}',
+            '\u{00AC}', '\u{00AE}', '\u{061B}', '\u{061D}', '\u{115E}', '\u{1161}', '\u{180D}',
+            '\u{180F}', '\u{2010}', '\u{2065}', '\u{206A}', '\u{3163}', '\u{3165}', '\u{FEFE}',
+            '\u{FF00}', '\u{FF9F}', '\u{FFA1}',
         ] {
             assert!(!is_blank_text(&c.to_string()), "U+{:04X}", c as u32);
         }

@@ -465,6 +465,47 @@ async fn an_optional_text_that_shows_nothing_is_stored_as_none() {
     }
 }
 
+/// **D-121 ([#805]): U+061C and the four Hangul fillers show nothing.** A
+/// `description` and `category` of any of them is absent and stored NULL.
+/// This test stands for every module's optional body text, which all ask
+/// `non_blank`.
+///
+/// [#805]: https://github.com/sujanto-gaws/kelir/issues/805
+#[tokio::test]
+async fn an_optional_text_of_the_d_121_code_points_is_stored_as_none() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, c) in ['\u{061C}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}']
+        .into_iter()
+        .enumerate()
+    {
+        let blank = format!("{c} {c}");
+        let created = app
+            .post(
+                "/api/v1/document-types",
+                Some(&token),
+                json!({
+                    "typeCode": format!("PR_D121_{index}"),
+                    "name": "N",
+                    "description": blank,
+                    "category": blank,
+                }),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        let stored = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT description, category FROM document_types WHERE id = $1",
+        )
+        .bind(id_of(&created.body["data"]))
+        .fetch_one(&app.pool)
+        .await
+        .expect("the type");
+        assert_eq!(stored, (None, None), "U+{:04X}", c as u32);
+    }
+}
+
 /// **[#797]: a visible optional text keeps its invisible edges.** Only a
 /// wholly blank value is absent; a `description` or `category` with one
 /// visible character is stored as `str::trim` leaves it, U+200B and U+FEFF at
