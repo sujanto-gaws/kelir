@@ -293,6 +293,17 @@ describe('WorkflowEditorPage, the list above its threshold (#800)', { timeout: 3
       )
     })
 
+    it('opens a state the author has just added, with its body drawn, and no other', async () => {
+      const page = await render(chain(41, 112))
+
+      await page.get('[data-testid="add-state-wait"]').trigger('click')
+      await settle()
+
+      expect(page.get('[data-testid="open-state-41"]').attributes('aria-expanded')).toBe('true')
+      expect(page.find('[data-testid="state-code-41"]').exists()).toBe(true)
+      expect(page.findAll('[data-testid^="state-code-"]')).toHaveLength(1)
+    })
+
     it('mounts no logic builder for a state that was never opened', async () => {
       const page = await render(chain(41, 112))
 
