@@ -1020,6 +1020,17 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The workflow editor opens a large draft in under a second**
+  ([#800](https://github.com/sujanto-gaws/kelir/issues/800), construction
+  plan 21 row 38). Above 40 states or 112 transitions, the list shows each
+  state's header and draws its fields and transitions when the state is
+  opened; a refused save opens the state it is about. On an i5-12450H laptop,
+  unloaded, as the median of five loads on the page's clock: 300 states and
+  892 transitions loaded in 8.2 s before and 0.19 s after, with 2.41 million
+  DOM nodes before and 42,000 after; 150 states and 442 transitions in 1.9 s
+  before and 0.15 s after. Switching back from the *Graph* tab at 300 states
+  took 4.0 s before and 0.04 s after. A draft at or under the threshold is
+  drawn as before.
 - **A required text field of only invisible characters is blank in every
   module** ([#797](https://github.com/sujanto-gaws/kelir/issues/797),
   construction plan 21 row 37). #616 made `is_blank_text` the one definition
