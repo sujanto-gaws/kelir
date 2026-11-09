@@ -793,15 +793,22 @@ async function whenPresent(page: Page, testId: string, timeout: number): Promise
  * The last state's row is waited for first (`whenPresent`): the starter
  * definition the page holds while loading has no row of that index, so it is
  * there only once this draft is drawn.
+ *
+ * **It reads the last state's header, not its code input** (#800): above 40
+ * states or 112 transitions the list draws each state's body only once the
+ * state is opened, so the input is not there. The header's heading carries the
+ * code at every size.
  */
 async function openEditor(page: Page, draft: LayoutDraft): Promise<number> {
   const start = Date.now()
 
   await page.goto(`/admin/workflows/${draft.id}`)
 
-  await whenPresent(page, `state-code-${draft.states - 1}`, EDITOR_TIMEOUT)
+  await whenPresent(page, `state-${draft.states - 1}`, EDITOR_TIMEOUT)
   await expect(page.getByTestId('workflow-key')).toHaveValue(draft.workflowKey)
-  await expect(page.getByTestId(`state-code-${draft.states - 1}`)).toHaveValue('COMPLETED')
+  await expect(
+    page.getByTestId(`state-${draft.states - 1}`).getByRole('heading', { level: 4 }),
+  ).toHaveText('COMPLETED')
 
   const loadMs = Date.now() - start
 

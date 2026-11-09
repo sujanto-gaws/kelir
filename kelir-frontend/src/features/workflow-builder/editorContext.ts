@@ -27,6 +27,18 @@ export interface WorkflowEditorContext {
   resetErrors(): void
   /** A logic builder's validity, by the row's key and the field it edits. */
   setValidity(key: string, valid: boolean): void
+  /**
+   * Whether a state's body is drawn only once it is opened (#800): the
+   * revision was above `WORKFLOW_LIST_THRESHOLD` when it loaded. Fixed until
+   * another revision loads, so no edit unmounts an open body.
+   */
+  collapsible: Ref<boolean>
+  /** Whether a state's body shows, by the state's row key. Always, when not collapsible. */
+  isOpen(key: string): boolean
+  /** Whether its body is drawn. Once opened it stays drawn, and closing only hides it. */
+  isDrawn(key: string): boolean
+  /** Opens or closes a state. Not an edit: no history, no dirty flag. */
+  setOpen(key: string, open: boolean): void
 }
 
 export const WORKFLOW_EDITOR: InjectionKey<WorkflowEditorContext> = Symbol('workflow-editor')

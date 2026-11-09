@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowDown, ArrowUp, Plus, Trash2 } from '@lucide/vue'
+import { ArrowDown, ArrowUp, ChevronRight, Plus, Trash2 } from '@lucide/vue'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 import type { DocumentStatus } from '@/types/document'
 import type { AssignmentRule, JwssState, JwssTask } from '@/types/workflow'
 
@@ -24,7 +25,7 @@ import {
   taskKeyFor,
 } from './jwssRegistry'
 import WorkflowTransitionRow from './WorkflowTransitionRow.vue'
-import { rowErrors } from './workflowVerdict'
+import { addressOf, rowErrors } from './workflowVerdict'
 
 /**
  * One state, with the table of transitions out of it under it (JWSS §3, §4;
@@ -57,6 +58,57 @@ const label = computed(() => `State ${state.value.code || props.index + 1}`)
 const isInitial = computed(() => definition.value.initialState === state.value.code)
 
 const errors = computed(() => rowErrors(editor.fieldErrors.value, 'state', props.index))
+
+/**
+ * Above the list's threshold the body is drawn once the state is opened, and
+ * stays drawn (#800). The region exists either way, so the toggle's
+ * `aria-controls` names something; closed, it is `hidden`, out of the
+ * accessibility tree and the tab order.
+ */
+const bodyId = computed(() => `${id.value}-body`)
+const open = computed(() => editor.isOpen(rowKey.value))
+const bodyDrawn = computed(() => editor.isDrawn(rowKey.value))
+
+/** The refusals about this state and the transitions out of it, said in its header. */
+const refusals = computed(() => {
+  const paths = Object.keys(editor.fieldErrors.value)
+
+  if (!editor.collapsible.value || paths.length === 0) {
+    return 0
+  }
+
+  const own = new Set(outgoing.value.map(({ at }) => at))
+
+  return paths.filter((path) => {
+    const address = addressOf(path)
+
+    return (
+      address !== null &&
+      (address.kind === 'state' ? address.index === props.index : own.has(address.index))
+    )
+  }).length
+})
+
+const refusalText = computed(
+  () => `${refusals.value} ${refusals.value === 1 ? 'refusal' : 'refusals'}`,
+)
+
+/** The toggle's accessible name: the state, its name, its badges and its refusals. */
+const toggleName = computed(() =>
+  [
+    label.value,
+    state.value.name,
+    isInitial.value && 'Initial',
+    state.value.isFinal && 'Final',
+    refusals.value > 0 && refusalText.value,
+  ]
+    .filter(Boolean)
+    .join(', '),
+)
+
+function toggle(): void {
+  editor.setOpen(rowKey.value, !open.value)
+}
 
 const drawn = computed(() => {
   const fields = ['code', 'name', 'mapsToDocumentStatus', 'isFinal', 'task']
@@ -265,16 +317,37 @@ function move(direction: -1 | 1): void {
 </script>
 
 <template>
-  <section
-    class="space-y-4 rounded-lg border p-4"
-    :aria-label="label"
-    :data-testid="`state-${index}`"
-  >
+  <section class="rounded-lg border p-4" :aria-label="label" :data-testid="`state-${index}`">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div class="flex items-center gap-2">
-        <h4 class="font-mono text-sm font-semibold">{{ state.code || '(no code)' }}</h4>
+        <h4 class="font-mono text-sm font-semibold">
+          <button
+            v-if="editor.collapsible.value"
+            type="button"
+            class="inline-flex items-center gap-1 rounded-sm hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            :aria-expanded="open"
+            :aria-controls="bodyId"
+            :aria-label="toggleName"
+            :data-testid="`open-state-${index}`"
+            @click="toggle"
+          >
+            <ChevronRight
+              :class="cn('size-4 transition-transform', open && 'rotate-90')"
+              aria-hidden="true"
+            />
+            {{ state.code || '(no code)' }}
+          </button>
+          <template v-else>{{ state.code || '(no code)' }}</template>
+        </h4>
         <Badge v-if="isInitial" variant="secondary">Initial</Badge>
         <Badge v-if="state.isFinal" variant="outline">Final</Badge>
+        <span
+          v-if="refusals > 0"
+          class="text-xs font-medium text-destructive"
+          :data-testid="`state-refusals-${index}`"
+        >
+          {{ refusalText }}
+        </span>
       </div>
       <div class="flex items-center gap-1">
         <Button
@@ -318,251 +391,259 @@ function move(direction: -1 | 1): void {
       </div>
     </div>
 
-    <Alert
-      v-if="stateMessages.length > 0"
-      variant="destructive"
-      :data-testid="`state-${index}-messages`"
-    >
-      <ul class="list-disc pl-4">
-        <li v-for="item in stateMessages" :key="item.field">{{ item.message }}</li>
-      </ul>
-    </Alert>
-
-    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      <div class="space-y-1">
-        <Label :for="`${id}-code`">Code</Label>
-        <Input
-          :id="`${id}-code`"
-          class="font-mono"
-          :model-value="codeText"
-          :invalid="Boolean(errors.code)"
-          :described-by="errors.code ? `${id}-code-message` : undefined"
-          :disabled="editor.readOnly.value"
-          :data-testid="`state-code-${index}`"
-          @update:model-value="codeText = $event"
-          @change="commitCode"
-        />
-        <p v-if="errors.code" :id="`${id}-code-message`" class="text-xs text-destructive">
-          {{ errors.code }}
-        </p>
-      </div>
-
-      <div class="space-y-1">
-        <Label :for="`${id}-name`">Name</Label>
-        <Input
-          :id="`${id}-name`"
-          :model-value="state.name"
-          :invalid="Boolean(errors.name)"
-          :described-by="errors.name ? `${id}-name-message` : undefined"
-          :disabled="editor.readOnly.value"
-          :data-testid="`state-name-${index}`"
-          @update:model-value="change({ ...state, name: $event }, 'name')"
-        />
-        <p v-if="errors.name" :id="`${id}-name-message`" class="text-xs text-destructive">
-          {{ errors.name }}
-        </p>
-      </div>
-
-      <div class="space-y-1">
-        <Label :for="`${id}-status`">Document status</Label>
-        <Select
-          :id="`${id}-status`"
-          :model-value="state.mapsToDocumentStatus"
-          :options="statusOptions"
-          :invalid="Boolean(errors.mapsToDocumentStatus)"
-          :described-by="errors.mapsToDocumentStatus ? `${id}-status-message` : undefined"
-          :disabled="editor.readOnly.value"
-          @update:model-value="
-            change(
-              { ...state, mapsToDocumentStatus: $event as DocumentStatus },
-              'mapsToDocumentStatus',
-            )
-          "
-        />
-        <p
-          v-if="errors.mapsToDocumentStatus"
-          :id="`${id}-status-message`"
-          class="text-xs text-destructive"
+    <div :id="bodyId" class="mt-4 space-y-4" :hidden="!open">
+      <template v-if="bodyDrawn">
+        <Alert
+          v-if="stateMessages.length > 0"
+          variant="destructive"
+          :data-testid="`state-${index}-messages`"
         >
-          {{ errors.mapsToDocumentStatus }}
-        </p>
-      </div>
+          <ul class="list-disc pl-4">
+            <li v-for="item in stateMessages" :key="item.field">{{ item.message }}</li>
+          </ul>
+        </Alert>
 
-      <div class="space-y-1 self-end pb-2">
-        <label class="flex items-center gap-2 text-sm" :for="`${id}-final`">
-          <Checkbox
-            :id="`${id}-final`"
-            :model-value="state.isFinal === true"
-            :aria-invalid="Boolean(errors.isFinal)"
-            :disabled="editor.readOnly.value"
-            @update:model-value="setFinal"
-          />
-          Final — ends the workflow
-        </label>
-        <p v-if="errors.isFinal" class="text-xs text-destructive">{{ errors.isFinal }}</p>
-      </div>
-    </div>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div class="space-y-1">
+            <Label :for="`${id}-code`">Code</Label>
+            <Input
+              :id="`${id}-code`"
+              class="font-mono"
+              :model-value="codeText"
+              :invalid="Boolean(errors.code)"
+              :described-by="errors.code ? `${id}-code-message` : undefined"
+              :disabled="editor.readOnly.value"
+              :data-testid="`state-code-${index}`"
+              @update:model-value="codeText = $event"
+              @change="commitCode"
+            />
+            <p v-if="errors.code" :id="`${id}-code-message`" class="text-xs text-destructive">
+              {{ errors.code }}
+            </p>
+          </div>
 
-    <div class="space-y-3 rounded-md bg-muted/40 p-3">
-      <label class="flex items-center gap-2 text-sm font-medium" :for="`${id}-has-task`">
-        <Checkbox
-          :id="`${id}-has-task`"
-          :model-value="state.task !== undefined"
-          :aria-invalid="Boolean(errors.task)"
-          :disabled="editor.readOnly.value"
-          :data-testid="`state-has-task-${index}`"
-          @update:model-value="setHasTask"
-        />
-        Entering this state creates a task
-      </label>
-      <p v-if="errors.task" class="text-xs text-destructive">{{ errors.task }}</p>
-      <p
-        v-if="carriesUnshown"
-        class="text-xs text-muted-foreground"
-        :data-testid="`state-task-unshown-${index}`"
-      >
-        Unticking this also removes the stored escalation, due hours and priority.
-        <em>Undo</em> restores them.
-      </p>
+          <div class="space-y-1">
+            <Label :for="`${id}-name`">Name</Label>
+            <Input
+              :id="`${id}-name`"
+              :model-value="state.name"
+              :invalid="Boolean(errors.name)"
+              :described-by="errors.name ? `${id}-name-message` : undefined"
+              :disabled="editor.readOnly.value"
+              :data-testid="`state-name-${index}`"
+              @update:model-value="change({ ...state, name: $event }, 'name')"
+            />
+            <p v-if="errors.name" :id="`${id}-name-message`" class="text-xs text-destructive">
+              {{ errors.name }}
+            </p>
+          </div>
 
-      <div v-if="state.task" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <div class="space-y-1">
-          <Label :for="`${id}-task-name`">Task name</Label>
-          <Input
-            :id="`${id}-task-name`"
-            :model-value="state.task.taskName"
-            :invalid="Boolean(errors['task.taskName'])"
-            :disabled="editor.readOnly.value"
-            @update:model-value="setTaskText('taskName', $event)"
-          />
-          <p v-if="errors['task.taskName']" class="text-xs text-destructive">
-            {{ errors['task.taskName'] }}
+          <div class="space-y-1">
+            <Label :for="`${id}-status`">Document status</Label>
+            <Select
+              :id="`${id}-status`"
+              :model-value="state.mapsToDocumentStatus"
+              :options="statusOptions"
+              :invalid="Boolean(errors.mapsToDocumentStatus)"
+              :described-by="errors.mapsToDocumentStatus ? `${id}-status-message` : undefined"
+              :disabled="editor.readOnly.value"
+              @update:model-value="
+                change(
+                  { ...state, mapsToDocumentStatus: $event as DocumentStatus },
+                  'mapsToDocumentStatus',
+                )
+              "
+            />
+            <p
+              v-if="errors.mapsToDocumentStatus"
+              :id="`${id}-status-message`"
+              class="text-xs text-destructive"
+            >
+              {{ errors.mapsToDocumentStatus }}
+            </p>
+          </div>
+
+          <div class="space-y-1 self-end pb-2">
+            <label class="flex items-center gap-2 text-sm" :for="`${id}-final`">
+              <Checkbox
+                :id="`${id}-final`"
+                :model-value="state.isFinal === true"
+                :aria-invalid="Boolean(errors.isFinal)"
+                :disabled="editor.readOnly.value"
+                @update:model-value="setFinal"
+              />
+              Final — ends the workflow
+            </label>
+            <p v-if="errors.isFinal" class="text-xs text-destructive">{{ errors.isFinal }}</p>
+          </div>
+        </div>
+
+        <div class="space-y-3 rounded-md bg-muted/40 p-3">
+          <label class="flex items-center gap-2 text-sm font-medium" :for="`${id}-has-task`">
+            <Checkbox
+              :id="`${id}-has-task`"
+              :model-value="state.task !== undefined"
+              :aria-invalid="Boolean(errors.task)"
+              :disabled="editor.readOnly.value"
+              :data-testid="`state-has-task-${index}`"
+              @update:model-value="setHasTask"
+            />
+            Entering this state creates a task
+          </label>
+          <p v-if="errors.task" class="text-xs text-destructive">{{ errors.task }}</p>
+          <p
+            v-if="carriesUnshown"
+            class="text-xs text-muted-foreground"
+            :data-testid="`state-task-unshown-${index}`"
+          >
+            Unticking this also removes the stored escalation, due hours and priority.
+            <em>Undo</em> restores them.
           </p>
-        </div>
 
-        <div class="space-y-1">
-          <Label :for="`${id}-task-key`">Task key</Label>
-          <Input
-            :id="`${id}-task-key`"
-            class="font-mono"
-            :model-value="state.task.taskDefinitionKey"
-            :invalid="Boolean(errors['task.taskDefinitionKey'])"
-            :disabled="editor.readOnly.value"
-            @update:model-value="setTaskText('taskDefinitionKey', $event)"
-          />
-          <p v-if="errors['task.taskDefinitionKey']" class="text-xs text-destructive">
-            {{ errors['task.taskDefinitionKey'] }}
-          </p>
-        </div>
+          <div v-if="state.task" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div class="space-y-1">
+              <Label :for="`${id}-task-name`">Task name</Label>
+              <Input
+                :id="`${id}-task-name`"
+                :model-value="state.task.taskName"
+                :invalid="Boolean(errors['task.taskName'])"
+                :disabled="editor.readOnly.value"
+                @update:model-value="setTaskText('taskName', $event)"
+              />
+              <p v-if="errors['task.taskName']" class="text-xs text-destructive">
+                {{ errors['task.taskName'] }}
+              </p>
+            </div>
 
-        <div class="space-y-1">
-          <Label :for="`${id}-task-type`">Task type</Label>
-          <Select
-            :id="`${id}-task-type`"
-            :model-value="state.task.taskType ?? ''"
-            :options="taskTypeOptions"
-            placeholder="Approval (the default)"
-            :invalid="Boolean(errors['task.taskType'])"
-            :disabled="editor.readOnly.value"
-            @update:model-value="setTaskChoice('taskType', $event)"
-          />
-          <p v-if="errors['task.taskType']" class="text-xs text-destructive">
-            {{ errors['task.taskType'] }}
-          </p>
-        </div>
+            <div class="space-y-1">
+              <Label :for="`${id}-task-key`">Task key</Label>
+              <Input
+                :id="`${id}-task-key`"
+                class="font-mono"
+                :model-value="state.task.taskDefinitionKey"
+                :invalid="Boolean(errors['task.taskDefinitionKey'])"
+                :disabled="editor.readOnly.value"
+                @update:model-value="setTaskText('taskDefinitionKey', $event)"
+              />
+              <p v-if="errors['task.taskDefinitionKey']" class="text-xs text-destructive">
+                {{ errors['task.taskDefinitionKey'] }}
+              </p>
+            </div>
 
-        <div class="space-y-1">
-          <Label :for="`${id}-assignment-type`">Assigned to</Label>
-          <AssignmentRuleEditor
-            :id="`${id}-assignment`"
-            :model-value="state.task.assignment"
-            :label="`${label} task assigned to`"
-            :errors="assignmentErrors"
-            :variables="editor.variables.value"
-            :disabled="editor.readOnly.value"
-            @change="setAssignment"
-            @validity-changed="editor.setValidity(`${rowKey}:assignment`, $event)"
-          />
-        </div>
+            <div class="space-y-1">
+              <Label :for="`${id}-task-type`">Task type</Label>
+              <Select
+                :id="`${id}-task-type`"
+                :model-value="state.task.taskType ?? ''"
+                :options="taskTypeOptions"
+                placeholder="Approval (the default)"
+                :invalid="Boolean(errors['task.taskType'])"
+                :disabled="editor.readOnly.value"
+                @update:model-value="setTaskChoice('taskType', $event)"
+              />
+              <p v-if="errors['task.taskType']" class="text-xs text-destructive">
+                {{ errors['task.taskType'] }}
+              </p>
+            </div>
 
-        <div class="space-y-1">
-          <Label :for="`${id}-due`">Due in hours</Label>
-          <Input
-            :id="`${id}-due`"
-            inputmode="decimal"
-            :model-value="state.task.dueInHours === undefined ? '' : String(state.task.dueInHours)"
-            :invalid="Boolean(errors['task.dueInHours'])"
-            :disabled="editor.readOnly.value"
-            @update:model-value="setDueInHours"
-          />
-          <p v-if="errors['task.dueInHours']" class="text-xs text-destructive">
-            {{ errors['task.dueInHours'] }}
-          </p>
-        </div>
+            <div class="space-y-1">
+              <Label :for="`${id}-assignment-type`">Assigned to</Label>
+              <AssignmentRuleEditor
+                :id="`${id}-assignment`"
+                :model-value="state.task.assignment"
+                :label="`${label} task assigned to`"
+                :errors="assignmentErrors"
+                :variables="editor.variables.value"
+                :disabled="editor.readOnly.value"
+                @change="setAssignment"
+                @validity-changed="editor.setValidity(`${rowKey}:assignment`, $event)"
+              />
+            </div>
 
-        <div class="space-y-1">
-          <Label :for="`${id}-priority`">Priority</Label>
-          <Select
-            :id="`${id}-priority`"
-            :model-value="state.task.priority ?? ''"
-            :options="priorityOptions"
-            placeholder="Normal (the default)"
-            :invalid="Boolean(errors['task.priority'])"
-            :disabled="editor.readOnly.value"
-            @update:model-value="setTaskChoice('priority', $event)"
-          />
-          <p v-if="errors['task.priority']" class="text-xs text-destructive">
-            {{ errors['task.priority'] }}
-          </p>
-        </div>
-      </div>
+            <div class="space-y-1">
+              <Label :for="`${id}-due`">Due in hours</Label>
+              <Input
+                :id="`${id}-due`"
+                inputmode="decimal"
+                :model-value="
+                  state.task.dueInHours === undefined ? '' : String(state.task.dueInHours)
+                "
+                :invalid="Boolean(errors['task.dueInHours'])"
+                :disabled="editor.readOnly.value"
+                @update:model-value="setDueInHours"
+              />
+              <p v-if="errors['task.dueInHours']" class="text-xs text-destructive">
+                {{ errors['task.dueInHours'] }}
+              </p>
+            </div>
 
-      <!-- FR-WF-010 is unscheduled, so there is no field for an escalation;
+            <div class="space-y-1">
+              <Label :for="`${id}-priority`">Priority</Label>
+              <Select
+                :id="`${id}-priority`"
+                :model-value="state.task.priority ?? ''"
+                :options="priorityOptions"
+                placeholder="Normal (the default)"
+                :invalid="Boolean(errors['task.priority'])"
+                :disabled="editor.readOnly.value"
+                @update:model-value="setTaskChoice('priority', $event)"
+              />
+              <p v-if="errors['task.priority']" class="text-xs text-destructive">
+                {{ errors['task.priority'] }}
+              </p>
+            </div>
+          </div>
+
+          <!-- FR-WF-010 is unscheduled, so there is no field for an escalation;
            one already stored is kept as it is and said to be inert. -->
-      <p v-if="state.task?.escalation" class="text-xs text-muted-foreground">
-        This task declares an escalation, which is kept as stored. Nothing executes it: escalation
-        is not scheduled (JWSS §3.1).
-      </p>
-    </div>
+          <p v-if="state.task?.escalation" class="text-xs text-muted-foreground">
+            This task declares an escalation, which is kept as stored. Nothing executes it:
+            escalation is not scheduled (JWSS §3.1).
+          </p>
+        </div>
 
-    <div class="space-y-2">
-      <div class="flex items-center justify-between">
-        <h5 class="text-sm font-semibold">Transitions out of {{ state.code || 'this state' }}</h5>
-        <Button
-          v-if="!state.isFinal"
-          size="sm"
-          variant="secondary"
-          :disabled="editor.readOnly.value"
-          :data-testid="`add-transition-${index}`"
-          @click="addTransition"
-        >
-          <Plus class="mr-1 size-4" aria-hidden="true" />
-          Add transition
-        </Button>
-      </div>
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <h5 class="text-sm font-semibold">
+              Transitions out of {{ state.code || 'this state' }}
+            </h5>
+            <Button
+              v-if="!state.isFinal"
+              size="sm"
+              variant="secondary"
+              :disabled="editor.readOnly.value"
+              :data-testid="`add-transition-${index}`"
+              @click="addTransition"
+            >
+              <Plus class="mr-1 size-4" aria-hidden="true" />
+              Add transition
+            </Button>
+          </div>
 
-      <Table v-if="outgoing.length > 0">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Action</TableHead>
-            <TableHead>To</TableHead>
-            <TableHead>Allowed by</TableHead>
-            <TableHead>Comment</TableHead>
-            <TableHead class="text-right">Order</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          <WorkflowTransitionRow v-for="row in outgoing" :key="row.key" :index="row.at" />
-        </TableBody>
-      </Table>
+          <Table v-if="outgoing.length > 0">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Action</TableHead>
+                <TableHead>To</TableHead>
+                <TableHead>Allowed by</TableHead>
+                <TableHead>Comment</TableHead>
+                <TableHead class="text-right">Order</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <WorkflowTransitionRow v-for="row in outgoing" :key="row.key" :index="row.at" />
+            </TableBody>
+          </Table>
 
-      <p v-else class="text-sm text-muted-foreground">
-        {{
-          state.isFinal
-            ? 'A final state has no transitions out of it.'
-            : 'No transitions. A document that reaches this state cannot leave it.'
-        }}
-      </p>
+          <p v-else class="text-sm text-muted-foreground">
+            {{
+              state.isFinal
+                ? 'A final state has no transitions out of it.'
+                : 'No transitions. A document that reaches this state cannot leave it.'
+            }}
+          </p>
+        </div>
+      </template>
     </div>
   </section>
 </template>
