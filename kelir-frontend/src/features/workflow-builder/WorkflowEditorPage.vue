@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, h, onMounted, provide, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Redo2, Undo2 } from '@lucide/vue'
 
@@ -25,7 +25,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useFormErrors } from '@/composables/useFormErrors'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth'
-import type { WorkflowDefinition } from '@/types/workflow'
+import type { JwssDefinition, WorkflowDefinition } from '@/types/workflow'
 
 import { WORKFLOW_EDITOR } from './editorContext'
 import { conditionVariables, STATE_KINDS, starterDefinition, type StateKind } from './jwssRegistry'
@@ -36,6 +36,7 @@ import WorkflowGraphDeclined from './WorkflowGraphDeclined.vue'
 import { isAboveGraphCeiling, workflowGraphCountOf } from './workflowGraphMapping'
 import WorkflowStateCard from './WorkflowStateCard.vue'
 import WorkflowTransitionRow from './WorkflowTransitionRow.vue'
+import { isAboveListThreshold } from './workflowListCollapse'
 import { addressOf, placeVerdict } from './workflowVerdict'
 
 /**
@@ -190,6 +191,53 @@ const unfilledExpressions = computed(() => {
   ).length
 })
 
+/**
+ * **Above `WORKFLOW_LIST_THRESHOLD` a state's body is drawn once it is opened**
+ * (#800). Every header is drawn. Decided when a revision loads and fixed until
+ * another does, so an edit that crosses the threshold leaves the list as it is.
+ *
+ * **Mount once**: a body once drawn stays drawn, and closing it only hides it,
+ * so a logic builder's unfilled operand survives, as it does behind the graph.
+ * Opening is not an edit: it is held here, by row key, and not in the draft.
+ */
+const collapsible = ref(false)
+const opened = reactive(new Set<string>())
+const drawnBodies = reactive(new Set<string>())
+
+function isOpen(key: string): boolean {
+  return !collapsible.value || opened.has(key)
+}
+
+function setOpen(key: string, open: boolean): void {
+  if (open) {
+    opened.add(key)
+    drawnBodies.add(key)
+  } else {
+    opened.delete(key)
+  }
+}
+
+/**
+ * Takes what the server stored, keeping each open state open by its position.
+ * The stored definition is the one sent, row for row, but its rows get new
+ * keys, and a state being edited should not fold away under its author.
+ */
+function loadStored(stored: JwssDefinition): void {
+  const was = draft.current.value.stateKeys.map((key) => [opened.has(key), drawnBodies.has(key)])
+
+  draft.load(stored)
+  opened.clear()
+  drawnBodies.clear()
+  draft.current.value.stateKeys.forEach((key, at) => {
+    if (was[at]?.[1]) {
+      drawnBodies.add(key)
+    }
+    if (was[at]?.[0]) {
+      opened.add(key)
+    }
+  })
+}
+
 provide(WORKFLOW_EDITOR, {
   draft,
   fieldErrors,
@@ -200,7 +248,25 @@ provide(WORKFLOW_EDITOR, {
   setValidity(key, valid) {
     validity.value = { ...validity.value, [key]: valid }
   },
+  collapsible,
+  isOpen,
+  isDrawn: (key) => !collapsible.value || drawnBodies.has(key),
+  setOpen,
 })
+
+/** The states that draw a transition: each declared state whose code it leaves. */
+function ownersOf(transitionAt: number): number[] {
+  const from = definition.value.transitions[transitionAt]?.from
+  const owners: number[] = []
+
+  definition.value.states.forEach((state, at) => {
+    if (state.code === from) {
+      owners.push(at)
+    }
+  })
+
+  return owners
+}
 
 /** Transitions out of a state no state declares, which no card would draw. */
 const unattached = computed(() => {
@@ -237,15 +303,48 @@ const placed = computed(() =>
 
     const address = addressOf(path)
 
+    if (address === null) {
+      return false
+    }
+
+    const keys = draft.current.value.stateKeys
+
+    if (address.kind === 'state') {
+      return address.index < definition.value.states.length && isOpen(keys[address.index])
+    }
+
+    // A transition out of no declared state is in the unattached table, always drawn.
+    const owners = ownersOf(address.index)
+
     return (
-      address !== null &&
-      address.index <
-        (address.kind === 'state'
-          ? definition.value.states.length
-          : definition.value.transitions.length)
+      address.index < definition.value.transitions.length &&
+      (owners.length === 0 || owners.some((at) => isOpen(keys[at])))
     )
   }),
 )
+
+/**
+ * A refusal opens the collapsed state it is about, so it is drawn where it is
+ * drawn today: a detail at the state, or at a transition out of it. S6's and
+ * S7's are at the state already (`placeDetails`). **No focus moves.**
+ */
+watch(fieldErrors, (errors) => {
+  if (!collapsible.value) {
+    return
+  }
+
+  const keys = draft.current.value.stateKeys
+
+  for (const path of Object.keys(errors)) {
+    const address = addressOf(path)
+
+    if (address?.kind === 'state' && address.index < keys.length) {
+      setOpen(keys[address.index], true)
+    } else if (address?.kind === 'transition') {
+      ownersOf(address.index).forEach((at) => setOpen(keys[at], true))
+    }
+  }
+})
 
 const initialOptions = computed(() =>
   definition.value.states.map((state) => ({
@@ -266,6 +365,9 @@ async function load(id: string): Promise<void> {
     const loaded = await getWorkflowDefinition(id)
 
     record.value = loaded
+    opened.clear()
+    drawnBodies.clear()
+    collapsible.value = isAboveListThreshold(loaded.definition)
     draft.load(loaded.definition)
   } catch (failure) {
     loadError.value = toApiError(failure).message
@@ -331,7 +433,7 @@ async function save(): Promise<boolean> {
       : await createWorkflowDefinition({ workflowKey: sent.workflowKey, ...body })
 
     record.value = stored
-    draft.load(stored.definition)
+    loadStored(stored.definition)
     notice.value = 'Saved. What is shown is what the server stored.'
 
     if (isNew.value) {
@@ -417,7 +519,7 @@ async function publish(): Promise<void> {
 
   try {
     record.value = await publishWorkflowDefinition(target.id)
-    draft.load(record.value.definition)
+    loadStored(record.value.definition)
     notice.value = `Published. Revision ${record.value.version} can now be bound to a document type.`
   } catch (failure) {
     report(placeVerdict(failure, draft.definition.value))
@@ -454,7 +556,7 @@ async function deprecate(): Promise<void> {
 
   try {
     record.value = await deprecateWorkflowDefinition(target.id)
-    draft.load(record.value.definition)
+    loadStored(record.value.definition)
     notice.value = `Deprecated. New documents no longer route to revision ${record.value.version}; approvals already running on it carry on.`
   } catch (failure) {
     formError.value = toApiError(failure).message
