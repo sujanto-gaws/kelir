@@ -11,8 +11,10 @@
 #       probe tests the write the product makes, not one `mc` makes.
 #   encryption-at-rest.probe.sh backup <marker>
 #       Runs kelir-backup as the unit runs it, reads both archives raw, checks
-#       modes and command lines, restores both halves into scratch targets,
-#       and checks retention, the upgrade's conversion and the refusals.
+#       modes and command lines, restores both halves into scratch targets
+#       (the store half into a bucket with no default encryption, then asks
+#       each restored object for its own, #921), and checks retention, the
+#       upgrade's conversion and the refusals.
 #   encryption-at-rest.probe.sh deploy
 #       Runs deploy.sh against stubs and checks what it refuses, and that it
 #       refuses before any pull, build or deploy.
@@ -288,6 +290,32 @@ absent_from_scratch_store() {
         || { echo "        it is there: $(grep -o -E '(Size|size)[^,]*' "${work}/stat.log" | head -1)"; return 1; }
 }
 
+# Each line of `mc stat --json` output that is not an object encrypted at rest,
+# by name: SSE-S3, or SSE-KMS under the store's own key ($2), passes. A line
+# `mc` could not answer counts as not encrypted; a line jq cannot read fails.
+unencrypted_objects() {
+    jq -r --arg kms "arn:aws:kms:$2" '
+        select(.status != "success"
+               or ((.metadata["X-Amz-Server-Side-Encryption"] // "") as $sse
+                   | $sse != "AES256"
+                     and ($sse != "aws:kms"
+                          or .metadata["X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id"] != $kms)))
+        | .name // "(a stat line with no name)"' "$1"
+}
+
+every_object_encrypted() {
+    local plain
+    plain="$(unencrypted_objects "$1" "$2")" || { echo "        jq could not read the stat output"; return 1; }
+    [[ -z "${plain}" ]] || { echo "        not encrypted: $(head -5 <<< "${plain}" | tr '\n' ' ')"; return 1; }
+}
+
+# The control: the check names the one object written without SSE, and no other.
+names_exactly() {
+    local named
+    named="$(unencrypted_objects "$1" "$2")" || named='(nothing: jq could not read the stat output)'
+    [[ "${named}" == "$3" ]] || { echo "        it named: ${named:-nothing}"; return 1; }
+}
+
 # A restore that exits non-zero, given a store archive that is not whole.
 restore_refuses() {
     if "$@" > "${work}/restore-refusal.log" 2>&1; then
@@ -373,18 +401,52 @@ probe_backup() {
 
     # A scratch store under a key of its own: the restore needs the identity,
     # never the store key.
+    #
+    # **Its bucket has no default encryption rule** (#921). With one, the store
+    # encrypts every object whether the restore asks or not, and a restore that
+    # dropped its `--enc-s3` passed every check here. Without one, what each
+    # restored object reports is what the restore asked for. A production
+    # bucket keeps its default (`minio-init`); this one is made to see past it.
     scratch_store="kelir-probe-store-$$"
+    local scratch_key=probe
     docker run -d --name "${scratch_store}" --network "${KELIR_BACKUP_NETWORK}" \
         -e MINIO_ROOT_USER=probe -e MINIO_ROOT_PASSWORD="probe-$$-password" \
-        -e MINIO_KMS_SECRET_KEY="probe:$(head -c 32 /dev/urandom | base64)" \
+        -e MINIO_KMS_SECRET_KEY="${scratch_key}:$(head -c 32 /dev/urandom | base64)" \
         "${KELIR_PROBE_MINIO_IMAGE}" server /data > /dev/null
     printf 'KELIR_MINIO_USER=probe\nKELIR_MINIO_PASSWORD=probe-%s-password\n' "$$" > "${work}/scratch-env"
     store_host "${work}/scratch-env" "${scratch_store}"
     in_mc "until mc ls kelir > /dev/null 2>&1; do sleep 1; done
-           mc mb -q kelir/${BUCKET} && mc encrypt set sse-s3 kelir/${BUCKET} > /dev/null" < /dev/null
+           mc mb -q kelir/${BUCKET} > /dev/null" < /dev/null
+
+    echo "#921 the scratch bucket encrypts only what the restore asks it to"
+    in_mc "mc encrypt info --json kelir/${BUCKET}" < /dev/null > "${work}/scratch-default" 2>&1 || true
+    echo "        $(head -c 160 "${work}/scratch-default")"
+    check "the scratch bucket has no default encryption rule" \
+        grep -q -F 'ServerSideEncryptionConfigurationNotFoundError' "${work}/scratch-default"
+    # The check below, shown to tell the difference: a write that does not ask
+    # is stored plain in this bucket, and the same `mc stat` and the same
+    # check name it. It is removed before the restore.
+    in_mc "echo control | mc pipe --quiet kelir/${BUCKET}/probe-control/plain > /dev/null
+           mc stat --recursive --json kelir/${BUCKET}
+           mc rm --quiet kelir/${BUCKET}/probe-control/plain > /dev/null" < /dev/null > "${work}/control-stat" || true
+    check "a write that does not ask for SSE is stored plain, and the check below names it" \
+        names_exactly "${work}/control-stat" "${scratch_key}" "${BUCKET}/probe-control/plain"
 
     KELIR_RESTORE_IDENTITY="${identity}" KELIR_ENV_FILE="${work}/scratch-env" \
-        KELIR_BACKUP_MINIO_URL="http://${scratch_store}:9000" "${RESTORE}" "${objects}" | sed 's/^/        /'
+        KELIR_BACKUP_MINIO_URL="http://${scratch_store}:9000" "${RESTORE}" "${objects}" \
+        | tee "${work}/restore.log" | sed 's/^/        /'
+
+    # **Each restored object, asked for its own encryption** (#921): `mc stat`
+    # on every object in the bucket, which holds only what the restore wrote.
+    local wrote reported
+    wrote="$(sed -n 's/^kelir-restore-objects: \([0-9][0-9]*\) objects.*/\1/p' "${work}/restore.log")"
+    in_mc "mc stat --recursive --json kelir/${BUCKET}" < /dev/null > "${work}/restored-stats" 2>&1 || true
+    reported="$(grep -c . "${work}/restored-stats" || true)"
+    echo "        the restore wrote ${wrote:-an unknown number of} objects; mc stat answers for ${reported}"
+    check "mc stat answers for every object the restore wrote, and it wrote some" \
+        test "${wrote:-0}" -gt 0 -a "${reported}" -eq "${wrote:-0}"
+    check "every restored object is SSE-S3, or SSE-KMS under the store's key" \
+        every_object_encrypted "${work}/restored-stats" "${scratch_key}"
 
     # Every attachment the restored rows name, read back and hashed inside one
     # mc container, against the row's own checksum.

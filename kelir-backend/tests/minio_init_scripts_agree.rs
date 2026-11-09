@@ -28,11 +28,14 @@
 //! 2. Every workflow step that runs `mc mb` also runs `mc encrypt set
 //!    sse-s3`, and each `mc mb` and `mc encrypt` command it runs, read up to
 //!    its target, is one the compose script runs: a subset check. At least
-//!    two such steps are found, the backend tests' store and the probe's.
+//!    two such steps are found, the backend tests' store and the probe's
+//!    keyed store (not the probe script's scratch bucket, below).
 //!
 //! **Comments are stripped from the workflow first**, so prose naming a
-//! command is not a use of it. The probe's own `mc mb` and `mc encrypt`, in
-//! `encryption-at-rest.probe.sh`, make a scratch store and are not read.
+//! command is not a use of it. The scratch bucket's own `mc mb`, in the
+//! script `encryption-at-rest.probe.sh` (not the workflow), is not read: that
+//! bucket, made for the restore, has **no** default rule on purpose, so the
+//! probe sees what the restore itself asks for (#921), and checks so.
 //!
 //! # Seen to fail (coding standard §2.9), 2026-11-08
 //!
