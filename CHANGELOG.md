@@ -355,7 +355,7 @@ While the major version is `0`, the public API may change in any release.
   the whole record is still accepted, and so is `[null, X]`, which the engine
   answers `null` for. Saving a draft does not check it. **A form already
   published is not re-checked**; a clone of it is refused at its publish. No
-  migration, and JFSS's meta-schema is untouched.
+  migration, and JFSS's meta-schema is untouched; JFSS takes erratum E-7.
 - **A client or proxy that cached `/api/v1` GETs now refetches them**
   ([#881](https://github.com/sujanto-gaws/kelir/issues/881)). Every `/api/v1`
   response is `Cache-Control: no-store`, so nothing keeps a copy to answer the
