@@ -76,13 +76,15 @@ use crate::error::ValidationDetail;
 pub(crate) const CALCULATION_CYCLE: &str = "CALCULATION_CYCLE";
 
 /// The S10.3 `code` a form's expression carries at publish when it reads a path
-/// no reader of the definition can name ([#822], **D-135**).
+/// no reader of the definition can name ([#822], **D-135**), or a `calculate`
+/// carries when it reads the whole record ([#936], **D-137** B).
 ///
 /// **`rad`'s own, not `workflow`'s `CONDITION_PATH_COMPUTED`**, whose message
 /// cites JWSS: `workflow` imports this module, and not the other way round. One
 /// shape, one scan, and a code per standard.
 ///
 /// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
 pub(crate) const EXPRESSION_PATH_COMPUTED: &str = "EXPRESSION_PATH_COMPUTED";
 
 /// The S10.3 `code` a rule name outside the Validation Rule Registry carries.
@@ -339,7 +341,10 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 /// whole scope either, which would invent edges and cycles for every form
 /// holding one. A publish refuses the shape through [`reads_computed_path`], a
 /// workflow's and a form's alike, and a form already live goes on being walked
-/// here at each write, so this walk must not refuse it.
+/// here at each write, so this walk must not refuse it. **So does a `var` that
+/// names no path**, `null`, `[]` or `[null]`, for the same reason: a form's
+/// publish refuses it in a `calculate` through [`reads_whole_record`] ([#936],
+/// **D-137** B), and a `conditional` holding one is no cycle.
 ///
 /// **Nor does this see what a body reads through its element.** A workflow
 /// refuses to hand a body the context
@@ -348,6 +353,7 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 ///
 /// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
 /// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
 pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &mut F) {
     match expression {
         Value::Object(map) => {
@@ -415,6 +421,49 @@ pub(crate) fn reads_computed_path(expression: &Value) -> bool {
             }
         }),
         Value::Array(items) => items.iter().any(reads_computed_path),
+        _ => false,
+    }
+}
+
+/// Whether a `var` operand names no path, so that the engine answers the whole
+/// record: `null`, `[]` or `[null]` ([#936]'s probe). `[null, X]` is not one:
+/// the engine answers `null` for it and takes no default.
+///
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
+fn is_whole_record_var(operand: &Value) -> bool {
+    match operand {
+        Value::Null => true,
+        Value::Array(items) => matches!(items.as_slice(), [] | [Value::Null]),
+        _ => false,
+    }
+}
+
+/// Whether `expression` reads the whole record through a `var` that names no
+/// path ([`is_whole_record_var`]), **in the scope it is written in**: the
+/// scope rule of [`visit_paths`], which gives such a `var` no path and so no
+/// edge. A `var`'s default, an iterator's source and `reduce`'s initial value
+/// are read; an iterator's body is not, because there the same `var` is the
+/// element.
+///
+/// A form's publish reads it over a `calculate` only ([`computed_path_errors`],
+/// **D-137 B**). It is not [`reads_computed_path`], which a workflow's publish
+/// reads too.
+fn reads_whole_record(expression: &Value) -> bool {
+    match expression {
+        Value::Object(map) => map
+            .iter()
+            .any(|(operator, argument)| match operator.as_str() {
+                "var" => {
+                    is_whole_record_var(argument)
+                        || var_default(argument).is_some_and(reads_whole_record)
+                }
+                iterator if ITERATORS.contains(&iterator) => iterator_operands(iterator, argument)
+                    .into_iter()
+                    .flatten()
+                    .any(reads_whole_record),
+                _ => reads_whole_record(argument),
+            }),
+        Value::Array(items) => items.iter().any(reads_whole_record),
         _ => false,
     }
 }
@@ -799,10 +848,25 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
      it, and a loop through it goes unseen. Write each path as a string, with any default beside \
      it; an iterator's body reads only its element (JFSS S12.2).";
 
+/// What a refusal of a `calculate` reading the whole record says ([#936],
+/// **D-137 B**). It names no path: there is none, and the fault is the edge
+/// that is missing for it, not a path worked out as it runs.
+///
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
+const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, so it reads the \
+     whole record, and nothing orders it against the fields it reads: a loop through it goes \
+     unseen. Name each field it needs as a path of its own (JFSS S12.2).";
+
 /// Every `calculate` and `conditional.logic` that reads a path no reader of the
 /// definition can name ([#822], **D-135**): [`reads_computed_path`] over every
 /// component of every role, one detail per expression, in document order: a
 /// component's `calculate`, its `conditional.logic`, then what it holds.
+///
+/// **And every `calculate` that reads the whole record** ([#936], **D-137 B**):
+/// [`reads_whole_record`], with the same code and its own message. That read
+/// has no edge, so nothing orders the field against what it reads. A
+/// `conditional` doing it is no cycle and is not read for it. Per expression
+/// the computed shape is checked first, so one holding both gets one detail.
 ///
 /// **A publish's check and no one else's**, which is why it is not in
 /// [`definition_errors`]: that one runs at each save too, and a draft may hold
@@ -821,6 +885,7 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
 /// **Pure**: it reads the definition and nothing else.
 ///
 /// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
 pub(crate) fn computed_path_errors(definition: &Value) -> Vec<ValidationDetail> {
     let Some(components) = definition.get("components").and_then(Value::as_array) else {
         return Vec::new();
@@ -845,14 +910,27 @@ fn check_computed_paths(component: &Value, here: &str, details: &mut Vec<Validat
         .and_then(|conditional| conditional.get("logic"));
 
     for (property, expression) in [("calculate", calculate), ("conditional.logic", logic)] {
-        if expression.is_some_and(reads_computed_path) {
-            details.push(ValidationDetail::new(
-                format!("{here}.{property}"),
-                "expressionPath",
-                EXPRESSION_PATH_COMPUTED,
-                COMPUTED_PATH_MESSAGE,
-            ));
-        }
+        let Some(expression) = expression else {
+            continue;
+        };
+
+        // The computed shape first, so an expression holding both is told the
+        // computed message once. A `conditional` reading the whole record is
+        // no cycle, so only a `calculate` is read for it (D-137 B).
+        let message = if reads_computed_path(expression) {
+            COMPUTED_PATH_MESSAGE
+        } else if property == "calculate" && reads_whole_record(expression) {
+            WHOLE_RECORD_MESSAGE
+        } else {
+            continue;
+        };
+
+        details.push(ValidationDetail::new(
+            format!("{here}.{property}"),
+            "expressionPath",
+            EXPRESSION_PATH_COMPUTED,
+            message,
+        ));
     }
 
     for (child, child_path) in container_children_at(component, here) {
@@ -2019,7 +2097,7 @@ mod tests {
     /// whole record reads the field it fills, so `{"var": ""}` as a source is the
     /// self-loop it was before the walk learned anything: `t` → `t`, and not a
     /// refusal of the iterator. `{"var": null}` names no path to the walk, so it
-    /// is no edge and no refusal, a difference this leaves where it was.
+    /// is no edge and no save refuses it; its publish does (#936, D-137 B).
     #[test]
     fn a_calculate_iterating_its_whole_record_is_the_self_loop_it_was() {
         let summing = |source: Value| {
@@ -2044,11 +2122,13 @@ mod tests {
             );
         }
 
-        assert!(definition_errors(&definition(vec![
-            plain("qty"),
-            summing(json!({"var": null}))
-        ]))
-        .is_empty());
+        let whole = definition(vec![plain("qty"), summing(json!({"var": null}))]);
+
+        assert!(definition_errors(&whole).is_empty());
+        assert_eq!(
+            refused_whole_at(&whole),
+            ["definition.components.1.calculate"]
+        );
     }
 
     /// **#822 AC8**, #789 AC16 turned round. A computed `var` that names a field
@@ -2258,6 +2338,227 @@ mod tests {
         for unwanted in ["secret", "hidden", "JWSS", "context"] {
             assert!(!message.contains(unwanted), "{message}");
         }
+    }
+
+    // -- A `calculate` reading the whole record (#936, D-137 B) --------------
+
+    /// The `var` operands that name no path, so read the whole record.
+    /// `[null, X]` is not one: the probe below answers `null` for it.
+    fn whole_record_operands() -> [Value; 3] {
+        [json!(null), json!([]), json!([null])]
+    }
+
+    /// The paths a publish refuses for a whole-record read, each detail held
+    /// to the shape it has.
+    fn refused_whole_at(document: &Value) -> Vec<String> {
+        computed_path_errors(document)
+            .into_iter()
+            .map(|detail| {
+                assert_eq!(detail.rule, "expressionPath");
+                assert_eq!(detail.code, EXPRESSION_PATH_COMPUTED);
+                assert_eq!(detail.message, WHOLE_RECORD_MESSAGE);
+                detail.path
+            })
+            .collect()
+    }
+
+    /// **#936 AC-48-4, the probe**, with the engine the backend evaluates
+    /// with. `null`, `[]` and `[null]` answer the whole record; `[null, "a"]`
+    /// answers `null`, takes no default and reads nothing, so it stays
+    /// accepted. Seen red first against a wrong expectation (the record's
+    /// `a` for all four), which printed the four answers this asserts.
+    #[test]
+    fn each_operand_naming_no_path_evaluates_to_the_whole_record() {
+        let evaluator = crate::modules::rad::evaluator::RuleEvaluator::new();
+        let record = json!({"a": 1, "b": "two"});
+        let read = |operand: &Value| {
+            evaluator
+                .evaluate(&json!({"var": operand}), &record)
+                .expect("the read evaluates")
+        };
+
+        for operand in whole_record_operands() {
+            assert_eq!(read(&operand), record, "{operand}");
+        }
+
+        assert_eq!(read(&json!([null, "a"])), Value::Null);
+    }
+
+    /// **#936 AC-48-1 and AC-48-2.** Every position the scope walk reads, in a
+    /// `calculate`. An iterator's body, where the read is the element, is not
+    /// refused, and neither is a path that names a field, `0`, `[1, "a"]` or
+    /// `[null, "a"]`, which the probe answers `null` for.
+    #[test]
+    fn a_publish_refuses_a_calculate_reading_the_whole_record_where_the_walk_reads() {
+        for operand in whole_record_operands() {
+            let read = json!({"var": operand});
+            let sources: Vec<Value> = ITERATORS
+                .iter()
+                .map(|&iterator| json!({iterator: [read, {"var": "qty"}, 0]}))
+                .collect();
+            let bodies: Vec<Value> = ITERATORS
+                .iter()
+                .map(|&iterator| json!({iterator: [{"var": "rows"}, read, 0]}))
+                .collect();
+            let others = [
+                read.clone(),
+                json!({"if": [read, 1, 0]}),
+                json!({"merge": [[1], read]}),
+                json!({"+": [1, {"*": [2, read]}]}),
+                json!({"!!": [read]}),
+                json!({"var": ["a", read]}),
+                json!({"var": [0, read]}),
+                json!({"reduce": [{"var": "rows"}, {"var": "current"}, read]}),
+                json!({"map": [{"map": [read, {"var": "x"}]}, {"var": "y"}]}),
+            ];
+
+            for expression in sources.into_iter().chain(others) {
+                assert_eq!(
+                    refused_whole_at(&definition(vec![
+                        plain("a"),
+                        field("t", expression.clone())
+                    ])),
+                    ["definition.components.1.calculate"],
+                    "{expression}"
+                );
+            }
+
+            for expression in bodies {
+                assert!(
+                    computed_path_errors(&definition(vec![field("t", expression.clone())]))
+                        .is_empty(),
+                    "{expression}"
+                );
+            }
+        }
+
+        for operand in [
+            json!(0),
+            json!([1, "a"]),
+            json!([null, "a"]),
+            json!(["a", 0]),
+            json!("a"),
+        ] {
+            let expression = json!({"var": operand});
+
+            assert!(
+                computed_path_errors(&definition(vec![plain("a"), field("t", expression)]))
+                    .is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#936 AC-48-2.** A row template's `calculate`, and a `calculate` on a
+    /// layout and a display, each at its own path.
+    #[test]
+    fn a_publish_refuses_a_whole_record_read_in_a_row_and_on_any_role() {
+        let read = json!({"var": null});
+        let grid = json!({
+            "id": "g", "role": "data", "type": "datagrid", "key": "g", "label": "G",
+            "validation": {"type": "array"}, "components": [field("t", read.clone())]
+        });
+        let mut panel = json!({"id": "f", "role": "layout", "type": "fieldset", "components": []});
+        let mut note = json!({"id": "n", "role": "display", "type": "paragraph"});
+
+        panel["calculate"] = read.clone();
+        note["calculate"] = read;
+
+        assert_eq!(
+            refused_whole_at(&definition(vec![grid, panel, note])),
+            [
+                "definition.components.0.components.0.calculate",
+                "definition.components.1.calculate",
+                "definition.components.2.calculate",
+            ]
+        );
+    }
+
+    /// **#936 AC-48-3.** A computed shape and a whole-record read in one
+    /// expression are one detail, with the computed message.
+    #[test]
+    fn a_computed_shape_beside_a_whole_record_read_is_one_computed_detail() {
+        for operand in whole_record_operands() {
+            let expression = json!({"+": [{"var": operand}, {"var": {"var": "which"}}]});
+
+            assert_eq!(
+                refused_at(&definition(vec![field("t", expression)])),
+                ["definition.components.0.calculate"]
+            );
+        }
+    }
+
+    /// **#936 AC-48-5.** The message, exactly. It names no path.
+    #[test]
+    fn a_whole_record_refusal_says_what_it_reads_and_names_no_path() {
+        let details = computed_path_errors(&definition(vec![field(
+            "secret",
+            json!({"var": ["hidden", {"var": null}]}),
+        )]));
+
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert_eq!(
+            details[0].message,
+            "A `var` in this `calculate` names no path, so it reads the whole record, and nothing \
+             orders it against the fields it reads: a loop through it goes unseen. Name each field \
+             it needs as a path of its own (JFSS S12.2)."
+        );
+    }
+
+    /// **#936 AC-48-6.** The same reads in a `conditional` are no cycle, on a
+    /// data field and on a layout alike.
+    #[test]
+    fn a_conditional_reading_the_whole_record_is_not_refused_at_publish() {
+        for operand in whole_record_operands() {
+            let logic = json!({"!!": [{"var": operand}]});
+            let mut shown = plain("t");
+            shown["conditional"] = json!({"action": "show", "logic": logic});
+            let panel = json!({
+                "id": "f", "role": "layout", "type": "fieldset",
+                "conditional": {"action": "show", "logic": logic}, "components": [plain("p")]
+            });
+
+            assert!(
+                computed_path_errors(&definition(vec![shown, panel])).is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#936 AC-48-7.** Both refusals in one definition come in document
+    /// order, a row where its grid is declared.
+    #[test]
+    fn whole_record_and_computed_refusals_come_in_document_order() {
+        let whole = json!({"var": []});
+        let computed = json!({"var": {"var": "which"}});
+        let details = computed_path_errors(&definition(vec![
+            field("a", whole.clone()),
+            field("b", computed),
+            json!({
+                "id": "g", "role": "data", "type": "datagrid", "key": "g", "label": "G",
+                "validation": {"type": "array"}, "components": [field("t", whole.clone())]
+            }),
+            field("d", whole),
+        ]));
+        let told: Vec<(&str, bool)> = details
+            .iter()
+            .map(|detail| {
+                (
+                    detail.path.as_str(),
+                    detail.message == COMPUTED_PATH_MESSAGE,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            told,
+            [
+                ("definition.components.0.calculate", false),
+                ("definition.components.1.calculate", true),
+                ("definition.components.2.components.0.calculate", false),
+                ("definition.components.3.calculate", false),
+            ]
+        );
     }
 
     // -- The definition gate -----------------------------------------------

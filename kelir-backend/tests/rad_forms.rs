@@ -1025,7 +1025,9 @@ async fn a_publish_refuses_each_expression_once_at_its_own_path_in_declaration_o
 }
 
 /// **#822 AC5.** R-18's accepted shapes stay accepted. `""` is left out of
-/// `calculate`, where it reads the field it fills and is `CALCULATION_CYCLE`.
+/// `calculate`, where it reads the field it fills and is `CALCULATION_CYCLE`,
+/// and so are the operands that read the whole record, which a `calculate` is
+/// refused for (#936): those run through a `conditional` only.
 #[tokio::test]
 async fn a_publish_accepts_every_var_whose_path_can_be_named() {
     let app = TestApp::spawn().await;
@@ -1053,7 +1055,7 @@ async fn a_publish_accepts_every_var_whose_path_can_be_named() {
             shown_field("shown", json!({"!!": [read]})),
         ];
 
-        if operand != json!("") {
+        if operand != json!("") && !whole_record_operands().contains(&operand) {
             components.push(calculated_field("t", read));
         }
 
@@ -1070,8 +1072,9 @@ async fn a_publish_accepts_every_var_whose_path_can_be_named() {
     }
 }
 
-/// **#822 AC6.** A definition that is not valid is told that and only that: the
-/// computed shape waits until there is nothing worse to fix.
+/// **#822 AC6** and **#936 AC-48-7.** A definition that is not valid is told
+/// that and only that: the computed shape and the whole-record read wait until
+/// there is nothing worse to fix.
 #[tokio::test]
 async fn a_fault_the_validator_finds_is_the_only_one_a_publish_returns() {
     let app = TestApp::spawn().await;
@@ -1105,12 +1108,185 @@ async fn a_fault_the_validator_finds_is_the_only_one_a_publish_returns() {
         let mut components = fault.as_array().expect("a list").clone();
 
         components.push(computed.clone());
+        components.push(calculated_field("whole", json!({"var": null})));
         store_behind_the_api(&app, id, &definition_of(key, json!(components))).await;
 
         let refused = publish(&app, &token, id).await;
 
         assert_refused(&app, &token, id, &refused, &[(path, code)]).await;
     }
+}
+
+// -- A `calculate` reading the whole record (#936, D-137 B) ----------------
+
+/// The `var` operands that name no path, so read the whole record. `[null, X]`
+/// answers `null` and stays accepted (the probe in `engine.rs`).
+fn whole_record_operands() -> [Value; 3] {
+    [json!(null), json!([]), json!([null])]
+}
+
+/// **#936 AC-48-1 and AC-48-8.** Each operand saves in a draft, created and
+/// updated, and its `calculate` is refused at publish at its own path.
+#[tokio::test]
+async fn a_calculate_reading_the_whole_record_saves_and_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, operand) in whole_record_operands().into_iter().enumerate() {
+        let key = format!("whole-record-{index}");
+        let components = json!([
+            number_field("a"),
+            calculated_field("t", json!({"+": [{"var": operand}, 7]}))
+        ]);
+        let created =
+            create_form(&app, &token, &key, definition_of(&key, components.clone())).await;
+        let id = id_of(&created);
+        let updated = app
+            .send(
+                Method::PUT,
+                &format!("/api/v1/rad/forms/{id}"),
+                Some(&token),
+                Some(json!({
+                    "title": "Still a draft",
+                    "definition": definition_of(&key, components),
+                })),
+            )
+            .await;
+
+        assert_eq!(
+            updated.status,
+            StatusCode::OK,
+            "{operand}: {}",
+            updated.body
+        );
+
+        let refused = publish(&app, &token, id).await;
+
+        assert_refused(
+            &app,
+            &token,
+            id,
+            &refused,
+            &[("definition.components.1.calculate", COMPUTED)],
+        )
+        .await;
+        assert_eq!(
+            refused.body["error"]["details"][0]["rule"],
+            "expressionPath"
+        );
+    }
+}
+
+/// **#936 AC-48-6.** The same reads in a `conditional`, on a data field and on
+/// a layout, are no cycle, and the form publishes.
+#[tokio::test]
+async fn a_conditional_reading_the_whole_record_still_publishes() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, operand) in whole_record_operands().into_iter().enumerate() {
+        let key = format!("whole-record-shown-{index}");
+        let logic = json!({"!!": [{"var": operand}]});
+        let components = json!([
+            number_field("a"),
+            shown_field("shown", logic.clone()),
+            {"id": "panel", "role": "layout", "type": "fieldset",
+             "conditional": {"action": "show", "logic": logic},
+             "components": [number_field("in_panel")]}
+        ]);
+        let created = create_form(&app, &token, &key, definition_of(&key, components)).await;
+        let published = publish(&app, &token, id_of(&created)).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "{operand}: {}",
+            published.body
+        );
+        assert_eq!(published.body["data"]["status"], "PUBLISHED");
+    }
+}
+
+/// **#936 AC-48-9.** A form that went live with a whole-record `calculate` is
+/// not re-checked: it reads, and a submission evaluates the read. Its next
+/// revision is refused at publish. Published behind the API, because the API
+/// no longer publishes it.
+#[tokio::test]
+async fn a_form_live_with_a_whole_record_read_keeps_working_and_its_clone_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    let components = json!([
+        number_field("a"),
+        calculated_field("t", json!({"+": [{"var": null}, 7]}))
+    ]);
+    let created = create_form(
+        &app,
+        &token,
+        "whole-record-live",
+        definition_of("whole-record-live", components),
+    )
+    .await;
+    let id = id_of(&created);
+
+    assert_eq!(
+        form_repo::publish(&app.pool, fixtures::SYSTEM_TENANT_ID, id, None)
+            .await
+            .expect("the draft is published behind the API"),
+        1
+    );
+
+    let read = app
+        .send(
+            Method::GET,
+            &format!("/api/v1/rad/forms/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["data"]["status"], "PUBLISHED");
+
+    let submitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/submissions"),
+            Some(&token),
+            Some(json!({"payload": {"a": 2}})),
+        )
+        .await;
+
+    assert_eq!(submitted.status, StatusCode::CREATED, "{}", submitted.body);
+    assert_eq!(
+        submitted.body["data"]["payload"]["t"],
+        json!(7.0),
+        "{}",
+        submitted.body
+    );
+
+    let clone = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/revisions"),
+            Some(&token),
+            Some(json!({})),
+        )
+        .await;
+
+    assert_eq!(clone.status, StatusCode::CREATED, "{}", clone.body);
+
+    let clone_id = id_of(&clone.body["data"]);
+    let refused = publish(&app, &token, clone_id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        clone_id,
+        &refused,
+        &[("definition.components.1.calculate", COMPUTED)],
+    )
+    .await;
 }
 
 /// **#822 AC4, past the shapes it names.** The server never runs an `enable` or
