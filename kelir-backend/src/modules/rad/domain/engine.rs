@@ -2044,11 +2044,13 @@ mod tests {
             );
         }
 
-        assert!(definition_errors(&definition(vec![
-            plain("qty"),
-            summing(json!({"var": null}))
-        ]))
-        .is_empty());
+        let whole = definition(vec![plain("qty"), summing(json!({"var": null}))]);
+
+        assert!(definition_errors(&whole).is_empty());
+        assert_eq!(
+            refused_whole_at(&whole),
+            ["definition.components.1.calculate"]
+        );
     }
 
     /// **#822 AC8**, #789 AC16 turned round. A computed `var` that names a field
@@ -2258,6 +2260,227 @@ mod tests {
         for unwanted in ["secret", "hidden", "JWSS", "context"] {
             assert!(!message.contains(unwanted), "{message}");
         }
+    }
+
+    // -- A `calculate` reading the whole record (#936, D-137 B) --------------
+
+    /// The `var` operands that name no path, so read the whole record.
+    /// `[null, X]` is not one: the probe below answers `null` for it.
+    fn whole_record_operands() -> [Value; 3] {
+        [json!(null), json!([]), json!([null])]
+    }
+
+    /// The paths a publish refuses for a whole-record read, each detail held
+    /// to the shape it has.
+    fn refused_whole_at(document: &Value) -> Vec<String> {
+        computed_path_errors(document)
+            .into_iter()
+            .map(|detail| {
+                assert_eq!(detail.rule, "expressionPath");
+                assert_eq!(detail.code, EXPRESSION_PATH_COMPUTED);
+                assert_ne!(detail.message, COMPUTED_PATH_MESSAGE);
+                detail.path
+            })
+            .collect()
+    }
+
+    /// **#936 AC-48-4, the probe**, with the engine the backend evaluates
+    /// with. `null`, `[]` and `[null]` answer the whole record; `[null, "a"]`
+    /// answers `null`, takes no default and reads nothing, so it stays
+    /// accepted. Seen red first against a wrong expectation (the record's
+    /// `a` for all four), which printed the four answers this asserts.
+    #[test]
+    fn each_operand_naming_no_path_evaluates_to_the_whole_record() {
+        let evaluator = crate::modules::rad::evaluator::RuleEvaluator::new();
+        let record = json!({"a": 1, "b": "two"});
+        let read = |operand: &Value| {
+            evaluator
+                .evaluate(&json!({"var": operand}), &record)
+                .expect("the read evaluates")
+        };
+
+        for operand in whole_record_operands() {
+            assert_eq!(read(&operand), record, "{operand}");
+        }
+
+        assert_eq!(read(&json!([null, "a"])), Value::Null);
+    }
+
+    /// **#936 AC-48-1 and AC-48-2.** Every position the scope walk reads, in a
+    /// `calculate`. An iterator's body, where the read is the element, is not
+    /// refused, and neither is a path that names a field, `0`, `[1, "a"]` or
+    /// `[null, "a"]`, which the probe answers `null` for.
+    #[test]
+    fn a_publish_refuses_a_calculate_reading_the_whole_record_where_the_walk_reads() {
+        for operand in whole_record_operands() {
+            let read = json!({"var": operand});
+            let sources: Vec<Value> = ITERATORS
+                .iter()
+                .map(|&iterator| json!({iterator: [read, {"var": "qty"}, 0]}))
+                .collect();
+            let bodies: Vec<Value> = ITERATORS
+                .iter()
+                .map(|&iterator| json!({iterator: [{"var": "rows"}, read, 0]}))
+                .collect();
+            let others = [
+                read.clone(),
+                json!({"if": [read, 1, 0]}),
+                json!({"merge": [[1], read]}),
+                json!({"+": [1, {"*": [2, read]}]}),
+                json!({"!!": [read]}),
+                json!({"var": ["a", read]}),
+                json!({"var": [0, read]}),
+                json!({"reduce": [{"var": "rows"}, {"var": "current"}, read]}),
+                json!({"map": [{"map": [read, {"var": "x"}]}, {"var": "y"}]}),
+            ];
+
+            for expression in sources.into_iter().chain(others) {
+                assert_eq!(
+                    refused_whole_at(&definition(vec![
+                        plain("a"),
+                        field("t", expression.clone())
+                    ])),
+                    ["definition.components.1.calculate"],
+                    "{expression}"
+                );
+            }
+
+            for expression in bodies {
+                assert!(
+                    computed_path_errors(&definition(vec![field("t", expression.clone())]))
+                        .is_empty(),
+                    "{expression}"
+                );
+            }
+        }
+
+        for operand in [
+            json!(0),
+            json!([1, "a"]),
+            json!([null, "a"]),
+            json!(["a", 0]),
+            json!("a"),
+        ] {
+            let expression = json!({"var": operand});
+
+            assert!(
+                computed_path_errors(&definition(vec![plain("a"), field("t", expression)]))
+                    .is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#936 AC-48-2.** A row template's `calculate`, and a `calculate` on a
+    /// layout and a display, each at its own path.
+    #[test]
+    fn a_publish_refuses_a_whole_record_read_in_a_row_and_on_any_role() {
+        let read = json!({"var": null});
+        let grid = json!({
+            "id": "g", "role": "data", "type": "datagrid", "key": "g", "label": "G",
+            "validation": {"type": "array"}, "components": [field("t", read.clone())]
+        });
+        let mut panel = json!({"id": "f", "role": "layout", "type": "fieldset", "components": []});
+        let mut note = json!({"id": "n", "role": "display", "type": "paragraph"});
+
+        panel["calculate"] = read.clone();
+        note["calculate"] = read;
+
+        assert_eq!(
+            refused_whole_at(&definition(vec![grid, panel, note])),
+            [
+                "definition.components.0.components.0.calculate",
+                "definition.components.1.calculate",
+                "definition.components.2.calculate",
+            ]
+        );
+    }
+
+    /// **#936 AC-48-3.** A computed shape and a whole-record read in one
+    /// expression are one detail, with the computed message.
+    #[test]
+    fn a_computed_shape_beside_a_whole_record_read_is_one_computed_detail() {
+        for operand in whole_record_operands() {
+            let expression = json!({"+": [{"var": operand}, {"var": {"var": "which"}}]});
+
+            assert_eq!(
+                refused_at(&definition(vec![field("t", expression)])),
+                ["definition.components.0.calculate"]
+            );
+        }
+    }
+
+    /// **#936 AC-48-5.** The message, exactly. It names no path.
+    #[test]
+    fn a_whole_record_refusal_says_what_it_reads_and_names_no_path() {
+        let details = computed_path_errors(&definition(vec![field(
+            "secret",
+            json!({"var": ["hidden", {"var": null}]}),
+        )]));
+
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert_eq!(
+            details[0].message,
+            "A `var` in this `calculate` names no path, so it reads the whole record, and nothing \
+             orders it against the fields it reads: a loop through it goes unseen. Name each field \
+             it needs as a path of its own (JFSS S12.2)."
+        );
+    }
+
+    /// **#936 AC-48-6.** The same reads in a `conditional` are no cycle, on a
+    /// data field and on a layout alike.
+    #[test]
+    fn a_conditional_reading_the_whole_record_is_not_refused_at_publish() {
+        for operand in whole_record_operands() {
+            let logic = json!({"!!": [{"var": operand}]});
+            let mut shown = plain("t");
+            shown["conditional"] = json!({"action": "show", "logic": logic});
+            let panel = json!({
+                "id": "f", "role": "layout", "type": "fieldset",
+                "conditional": {"action": "show", "logic": logic}, "components": [plain("p")]
+            });
+
+            assert!(
+                computed_path_errors(&definition(vec![shown, panel])).is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#936 AC-48-7.** Both refusals in one definition come in document
+    /// order, a row where its grid is declared.
+    #[test]
+    fn whole_record_and_computed_refusals_come_in_document_order() {
+        let whole = json!({"var": []});
+        let computed = json!({"var": {"var": "which"}});
+        let details = computed_path_errors(&definition(vec![
+            field("a", whole.clone()),
+            field("b", computed),
+            json!({
+                "id": "g", "role": "data", "type": "datagrid", "key": "g", "label": "G",
+                "validation": {"type": "array"}, "components": [field("t", whole.clone())]
+            }),
+            field("d", whole),
+        ]));
+        let told: Vec<(&str, bool)> = details
+            .iter()
+            .map(|detail| {
+                (
+                    detail.path.as_str(),
+                    detail.message == COMPUTED_PATH_MESSAGE,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            told,
+            [
+                ("definition.components.0.calculate", false),
+                ("definition.components.1.calculate", true),
+                ("definition.components.2.components.0.calculate", false),
+                ("definition.components.3.calculate", false),
+            ]
+        );
     }
 
     // -- The definition gate -----------------------------------------------
