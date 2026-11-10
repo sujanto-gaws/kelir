@@ -76,13 +76,15 @@ use crate::error::ValidationDetail;
 pub(crate) const CALCULATION_CYCLE: &str = "CALCULATION_CYCLE";
 
 /// The S10.3 `code` a form's expression carries at publish when it reads a path
-/// no reader of the definition can name ([#822], **D-135**).
+/// no reader of the definition can name ([#822], **D-135**), or a `calculate`
+/// carries when it reads the whole record ([#936], **D-137** B).
 ///
 /// **`rad`'s own, not `workflow`'s `CONDITION_PATH_COMPUTED`**, whose message
 /// cites JWSS: `workflow` imports this module, and not the other way round. One
 /// shape, one scan, and a code per standard.
 ///
 /// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
 pub(crate) const EXPRESSION_PATH_COMPUTED: &str = "EXPRESSION_PATH_COMPUTED";
 
 /// The S10.3 `code` a rule name outside the Validation Rule Registry carries.
@@ -339,7 +341,10 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 /// whole scope either, which would invent edges and cycles for every form
 /// holding one. A publish refuses the shape through [`reads_computed_path`], a
 /// workflow's and a form's alike, and a form already live goes on being walked
-/// here at each write, so this walk must not refuse it.
+/// here at each write, so this walk must not refuse it. **So does a `var` that
+/// names no path**, `null`, `[]` or `[null]`, for the same reason: a form's
+/// publish refuses it in a `calculate` through [`reads_whole_record`] ([#936],
+/// **D-137** B), and a `conditional` holding one is no cycle.
 ///
 /// **Nor does this see what a body reads through its element.** A workflow
 /// refuses to hand a body the context
@@ -348,6 +353,7 @@ fn visit_names<'a, F: FnMut(&'a str)>(argument: &'a Value, visit: &mut F) {
 ///
 /// [#706]: https://github.com/sujanto-gaws/kelir/issues/706
 /// [#789]: https://github.com/sujanto-gaws/kelir/issues/789
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
 pub(crate) fn visit_paths<'a, F: FnMut(&'a str)>(expression: &'a Value, visit: &mut F) {
     match expression {
         Value::Object(map) => {
@@ -2091,7 +2097,7 @@ mod tests {
     /// whole record reads the field it fills, so `{"var": ""}` as a source is the
     /// self-loop it was before the walk learned anything: `t` → `t`, and not a
     /// refusal of the iterator. `{"var": null}` names no path to the walk, so it
-    /// is no edge and no refusal, a difference this leaves where it was.
+    /// is no edge and no save refuses it; its publish does (#936, D-137 B).
     #[test]
     fn a_calculate_iterating_its_whole_record_is_the_self_loop_it_was() {
         let summing = |source: Value| {

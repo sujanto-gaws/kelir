@@ -297,9 +297,10 @@ pub async fn publish_form(
     let mut details = jfss::validate_definition(&before.definition);
 
     // **A publish's own check, after the shared one and only when it is clean**
-    // (#822, D-135). A draft may hold a path no one can name until it goes live,
-    // so this cannot be in the validator a save runs, and a definition that is
-    // not valid has a worse fault to fix first.
+    // (#822, D-135; #936, D-137 B). A draft may hold a path no one can name, or
+    // a `calculate` reading the whole record, until it goes live, so this cannot
+    // be in the validator a save runs, and a definition that is not valid has a
+    // worse fault to fix first.
     if details.is_empty() {
         details = engine::computed_path_errors(&before.definition);
     }

@@ -329,7 +329,9 @@ While the major version is `0`, the public API may change in any release.
   array opening with an object or an array, the scope jump `[[1], "a"]` among
   them, and a `missing` or `missing_some` name that is an expression, anywhere,
   iterator bodies included. Only a raw JSON box or the API writes these. Write
-  each path as a string, with any default beside it. `{"var": 0}`, `null`, `[]`,
+  each path as a string, with any default beside it. `{"var": 0}`, ~~`null`,
+  `[]`,~~ (struck 2026-11-10: in a `calculate` these are refused since
+  [#936](https://github.com/sujanto-gaws/kelir/issues/936), in the next note)
   `""`, `[1, "a"]`, `["a", 0]`, `[null, X]`, `[true, X]` and `[false, X]` with X
   plain, and `["a", {"var": "b"}]` are still accepted. **One thing can no longer
   be written, in a form either**: a body comparing an element with a field
@@ -339,6 +341,21 @@ While the major version is `0`, the public API may change in any release.
   old order until a revision is written; a clone of it is refused at its
   publish, and a rewritten path is a dependency edge, so that revision can
   compute in a new order. No migration, and JFSS's meta-schema is untouched.
+- **A form's next publish can be refused for a `calculate` that reads the
+  whole record** ([#936](https://github.com/sujanto-gaws/kelir/issues/936),
+  decision **D-137** B). A `var` whose operand is `null`, `[]` or `[null]`
+  names no path, so the field gets no dependency edge and a loop through it
+  went unseen. Once a definition is otherwise valid, a form's publish refuses
+  such a `calculate` as 422 `VALIDATION_ERROR` with one
+  `EXPRESSION_PATH_COMPUTED` detail at its path, `rule: "expressionPath"`, and
+  a message of its own. **Before upgrading, go through each form's `calculate`
+  expressions, on every component of every role, and look for** such a `var`
+  outside an iterator's body, its source, a default and `reduce`'s initial
+  value included. Name each field it needs as a path. A `conditional` reading
+  the whole record is still accepted, and so is `[null, X]`, which the engine
+  answers `null` for. Saving a draft does not check it. **A form already
+  published is not re-checked**; a clone of it is refused at its publish. No
+  migration, and JFSS's meta-schema is untouched.
 - **A client or proxy that cached `/api/v1` GETs now refetches them**
   ([#881](https://github.com/sujanto-gaws/kelir/issues/881)). Every `/api/v1`
   response is `Cache-Control: no-store`, so nothing keeps a copy to answer the
