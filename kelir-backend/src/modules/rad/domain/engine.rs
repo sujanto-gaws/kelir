@@ -419,6 +419,49 @@ pub(crate) fn reads_computed_path(expression: &Value) -> bool {
     }
 }
 
+/// Whether a `var` operand names no path, so that the engine answers the whole
+/// record: `null`, `[]` or `[null]` ([#936]'s probe). `[null, X]` is not one:
+/// the engine answers `null` for it and takes no default.
+///
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
+fn is_whole_record_var(operand: &Value) -> bool {
+    match operand {
+        Value::Null => true,
+        Value::Array(items) => matches!(items.as_slice(), [] | [Value::Null]),
+        _ => false,
+    }
+}
+
+/// Whether `expression` reads the whole record through a `var` that names no
+/// path ([`is_whole_record_var`]), **in the scope it is written in**: the
+/// scope rule of [`visit_paths`], which gives such a `var` no path and so no
+/// edge. A `var`'s default, an iterator's source and `reduce`'s initial value
+/// are read; an iterator's body is not, because there the same `var` is the
+/// element.
+///
+/// A form's publish reads it over a `calculate` only ([`computed_path_errors`],
+/// **D-137 B**). It is not [`reads_computed_path`], which a workflow's publish
+/// reads too.
+fn reads_whole_record(expression: &Value) -> bool {
+    match expression {
+        Value::Object(map) => map
+            .iter()
+            .any(|(operator, argument)| match operator.as_str() {
+                "var" => {
+                    is_whole_record_var(argument)
+                        || var_default(argument).is_some_and(reads_whole_record)
+                }
+                iterator if ITERATORS.contains(&iterator) => iterator_operands(iterator, argument)
+                    .into_iter()
+                    .flatten()
+                    .any(reads_whole_record),
+                _ => reads_whole_record(argument),
+            }),
+        Value::Array(items) => items.iter().any(reads_whole_record),
+        _ => false,
+    }
+}
+
 /// Whether a `missing` or `missing_some` operand holds an expression where a
 /// name goes, however deep in lists. [`visit_names`]'s shape.
 fn is_computed_name(argument: &Value) -> bool {
@@ -799,10 +842,25 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
      it, and a loop through it goes unseen. Write each path as a string, with any default beside \
      it; an iterator's body reads only its element (JFSS S12.2).";
 
+/// What a refusal of a `calculate` reading the whole record says ([#936],
+/// **D-137 B**). It names no path: there is none, and the fault is the edge
+/// that is missing for it, not a path worked out as it runs.
+///
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
+const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, so it reads the \
+     whole record, and nothing orders it against the fields it reads: a loop through it goes \
+     unseen. Name each field it needs as a path of its own (JFSS S12.2).";
+
 /// Every `calculate` and `conditional.logic` that reads a path no reader of the
 /// definition can name ([#822], **D-135**): [`reads_computed_path`] over every
 /// component of every role, one detail per expression, in document order: a
 /// component's `calculate`, its `conditional.logic`, then what it holds.
+///
+/// **And every `calculate` that reads the whole record** ([#936], **D-137 B**):
+/// [`reads_whole_record`], with the same code and its own message. That read
+/// has no edge, so nothing orders the field against what it reads. A
+/// `conditional` doing it is no cycle and is not read for it. Per expression
+/// the computed shape is checked first, so one holding both gets one detail.
 ///
 /// **A publish's check and no one else's**, which is why it is not in
 /// [`definition_errors`]: that one runs at each save too, and a draft may hold
@@ -821,6 +879,7 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
 /// **Pure**: it reads the definition and nothing else.
 ///
 /// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
+/// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
 pub(crate) fn computed_path_errors(definition: &Value) -> Vec<ValidationDetail> {
     let Some(components) = definition.get("components").and_then(Value::as_array) else {
         return Vec::new();
@@ -845,14 +904,27 @@ fn check_computed_paths(component: &Value, here: &str, details: &mut Vec<Validat
         .and_then(|conditional| conditional.get("logic"));
 
     for (property, expression) in [("calculate", calculate), ("conditional.logic", logic)] {
-        if expression.is_some_and(reads_computed_path) {
-            details.push(ValidationDetail::new(
-                format!("{here}.{property}"),
-                "expressionPath",
-                EXPRESSION_PATH_COMPUTED,
-                COMPUTED_PATH_MESSAGE,
-            ));
-        }
+        let Some(expression) = expression else {
+            continue;
+        };
+
+        // The computed shape first, so an expression holding both is told the
+        // computed message once. A `conditional` reading the whole record is
+        // no cycle, so only a `calculate` is read for it (D-137 B).
+        let message = if reads_computed_path(expression) {
+            COMPUTED_PATH_MESSAGE
+        } else if property == "calculate" && reads_whole_record(expression) {
+            WHOLE_RECORD_MESSAGE
+        } else {
+            continue;
+        };
+
+        details.push(ValidationDetail::new(
+            format!("{here}.{property}"),
+            "expressionPath",
+            EXPRESSION_PATH_COMPUTED,
+            message,
+        ));
     }
 
     for (child, child_path) in container_children_at(component, here) {
@@ -2278,7 +2350,7 @@ mod tests {
             .map(|detail| {
                 assert_eq!(detail.rule, "expressionPath");
                 assert_eq!(detail.code, EXPRESSION_PATH_COMPUTED);
-                assert_ne!(detail.message, COMPUTED_PATH_MESSAGE);
+                assert_eq!(detail.message, WHOLE_RECORD_MESSAGE);
                 detail.path
             })
             .collect()
