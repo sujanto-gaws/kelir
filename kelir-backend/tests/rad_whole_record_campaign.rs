@@ -67,10 +67,11 @@ use uuid::Uuid;
 
 const COMPUTED: &str = "EXPRESSION_PATH_COMPUTED";
 
-/// `engine.rs`'s `WHOLE_RECORD_MESSAGE`, which is private: AC-48-5's text.
-const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, so it reads the \
-     whole record, and nothing orders it against the fields it reads: a loop through it goes \
-     unseen. Name each field it needs as a path of its own (JFSS S12.2).";
+/// `engine.rs`'s `WHOLE_RECORD_MESSAGE`, which is private: AC-48-5's text, as
+/// AC-49-8 (#941) reworded it to claim no loop.
+const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no field, so it reads the \
+     whole record, and a publish cannot see which fields it depends on. Name each field it needs \
+     as a path of its own (JFSS S12.2).";
 
 /// `engine.rs`'s `COMPUTED_PATH_MESSAGE` (#822), also private.
 const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in this expression \
@@ -560,21 +561,12 @@ async fn a_live_whole_record_form_is_a_conflict_and_its_corrected_clone_goes_liv
     assert_eq!(status_of(&app, &token, id).await, "PUBLISHED");
 }
 
-// -- Findings -------------------------------------------------------------------
+// -- A display reading the whole record as an empty path (#941) -----------------
 
-/// **Finding, low: the same read is refused on a display as `null` and
-/// accepted as `""`.** AC-48-2 refuses `{"var": null}` in a `calculate` "on a
-/// component of any role", and the builder's unit test does so on a display.
-/// `{"var": ""}` is the same read (the engine answers both with the whole
-/// record, and the probe above holds that), and #822 AC5 leaves it to
-/// `CALCULATION_CYCLE`. But a display is no node of the graph, so `""` there is
-/// no edge and no cycle, and neither scan reads it: it publishes.
-///
-/// Harmless on the server today, which evaluates no display's `calculate`; it
-/// is the publish's rule that is uneven. Ignored so CI stays green until the
-/// owner decides which way it should go; run with `--ignored` to see it red.
+/// **#941 AC-49-2, D-147 A.** The same read on a display is refused at publish
+/// as `""`, `[""]` and `null` alike: a display is no node of the graph, so `""`
+/// there is no cycle, and the publish's own check refuses it instead.
 #[tokio::test]
-#[ignore = "finding: a display's calculate reading the whole record as \"\" publishes (row 48 campaign)"]
 async fn a_display_reading_the_whole_record_as_an_empty_path_is_refused_as_null_is() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
@@ -598,5 +590,11 @@ async fn a_display_reading_the_whole_record_as_an_empty_path_is_refused_as_null_
             "{operand} publishes on a display: {}",
             published.body
         );
+        assert_eq!(
+            details(&published),
+            [whole_at("definition.components.1.calculate")],
+            "{operand}"
+        );
+        assert_eq!(status_of(&app, &token, id).await, "DRAFT");
     }
 }

@@ -2488,7 +2488,8 @@ mod tests {
         }
     }
 
-    /// **#936 AC-48-5.** The message, exactly. It names no path.
+    /// **#936 AC-48-5.** The message, exactly. It names no path, and since
+    /// #941 (AC-49-8) it claims no loop, which a display cannot hold.
     #[test]
     fn a_whole_record_refusal_says_what_it_reads_and_names_no_path() {
         let details = computed_path_errors(&definition(vec![field(
@@ -2499,10 +2500,11 @@ mod tests {
         assert_eq!(details.len(), 1, "{details:?}");
         assert_eq!(
             details[0].message,
-            "A `var` in this `calculate` names no path, so it reads the whole record, and nothing \
-             orders it against the fields it reads: a loop through it goes unseen. Name each field \
-             it needs as a path of its own (JFSS S12.2)."
+            "A `var` in this `calculate` names no field, so it reads the whole record, and a \
+             publish cannot see which fields it depends on. Name each field it needs as a path of \
+             its own (JFSS S12.2)."
         );
+        assert!(!details[0].message.contains("loop"), "{}", details[0].message);
     }
 
     /// **#936 AC-48-6.** The same reads in a `conditional` are no cycle, on a
@@ -2559,6 +2561,125 @@ mod tests {
                 ("definition.components.3.calculate", false),
             ]
         );
+    }
+
+    // -- A display reading the whole record as an empty path (#941, D-147 A) --
+
+    /// The `var` operands that read the whole record through an empty path.
+    /// On a data field each is a self-edge, refused at save as a cycle; on a
+    /// component that is no node of the graph, nothing but the publish sees it.
+    fn empty_path_operands() -> [Value; 3] {
+        [json!(""), json!([""]), json!(["", 0])]
+    }
+
+    /// A display whose `calculate` is `calculate`.
+    fn display(calculate: Value) -> Value {
+        json!({"id": "n", "role": "display", "type": "paragraph", "calculate": calculate})
+    }
+
+    /// **#941 AC-49-7, the probe**, as AC-48-4's. `""` and `[""]` answer the
+    /// whole record, and so does `["", X]`: the empty path never misses, so
+    /// the default is not taken and the read is the whole record still.
+    #[test]
+    fn each_empty_path_operand_evaluates_to_the_whole_record() {
+        let evaluator = crate::modules::rad::evaluator::RuleEvaluator::new();
+        let record = json!({"a": 1, "b": "two"});
+
+        for operand in empty_path_operands().into_iter().chain([json!(["", "a"])]) {
+            let read = json!({"var": operand});
+
+            assert_eq!(
+                evaluator.evaluate(&read, &record).expect("the read evaluates"),
+                record,
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#941 AC-49-1, AC-49-3 and AC-49-7.** On a display and on a layout,
+    /// every position the scope walk reads is refused, at its own path, with
+    /// the whole-record message: the expression itself, an iterator's source,
+    /// a `var` default and `reduce`'s initial value. An iterator's body, where
+    /// `""` is the element, is not.
+    #[test]
+    fn a_publish_refuses_a_display_reading_the_whole_record_as_an_empty_path() {
+        for operand in empty_path_operands() {
+            let read = json!({"var": operand});
+            let sources = ITERATORS
+                .iter()
+                .map(|&iterator| json!({iterator: [read, {"var": "qty"}, 0]}));
+            let others = [
+                read.clone(),
+                json!({"+": [1, {"*": [2, read]}]}),
+                json!({"var": ["a", read]}),
+                json!({"var": [0, read]}),
+                json!({"reduce": [{"var": "rows"}, {"var": "current"}, read]}),
+            ];
+
+            for expression in sources.chain(others) {
+                let mut panel = json!({"id": "f", "role": "layout", "type": "fieldset"});
+                panel["components"] = json!([]);
+                panel["calculate"] = expression.clone();
+
+                assert_eq!(
+                    refused_whole_at(&definition(vec![
+                        plain("a"),
+                        display(expression.clone()),
+                        panel
+                    ])),
+                    [
+                        "definition.components.1.calculate",
+                        "definition.components.2.calculate",
+                    ],
+                    "{expression}"
+                );
+            }
+
+            for &iterator in ITERATORS {
+                let body = json!({iterator: [{"var": "rows"}, read, 0]});
+
+                assert!(
+                    computed_path_errors(&definition(vec![display(body.clone())])).is_empty(),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    /// **#941 AC-49-4 and AC-49-5.** A display's `conditional` reading `""` is
+    /// no cycle and still publishes, and a save is told nothing of either: the
+    /// refusal is the publish's own, so a draft may hold it.
+    #[test]
+    fn an_empty_path_on_a_display_is_a_publish_refusal_of_its_calculate_only() {
+        for operand in empty_path_operands() {
+            let read = json!({"var": operand});
+            let mut shown = display(json!({"var": "a"}));
+            shown["conditional"] = json!({"action": "show", "logic": {"!!": [read]}});
+
+            assert!(
+                computed_path_errors(&definition(vec![plain("a"), shown])).is_empty(),
+                "{operand}"
+            );
+            assert!(
+                definition_errors(&definition(vec![plain("a"), display(read)])).is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#941 AC-49-6.** On a data field the same read is still the self-loop a
+    /// save refuses, which the publish meets first and stops at: it runs this
+    /// check only over a definition that is valid.
+    #[test]
+    fn an_empty_path_on_a_data_field_is_still_a_cycle_at_save() {
+        for operand in empty_path_operands() {
+            let details = definition_errors(&definition(vec![
+                plain("a"),
+                field("t", json!({"+": [{"var": operand}, 1]})),
+            ]));
+
+            assert_eq!(codes(&details), [CALCULATION_CYCLE], "{operand}");
+        }
     }
 
     // -- The definition gate -----------------------------------------------
