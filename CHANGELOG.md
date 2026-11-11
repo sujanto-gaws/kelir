@@ -332,7 +332,9 @@ While the major version is `0`, the public API may change in any release.
   each path as a string, with any default beside it. `{"var": 0}`, ~~`null`,
   `[]`,~~ (struck 2026-11-10: in a `calculate` these are refused since
   [#936](https://github.com/sujanto-gaws/kelir/issues/936), in the next note)
-  `""`, `[1, "a"]`, `["a", 0]`, `[null, X]`, `[true, X]` and `[false, X]` with X
+  ~~`""`,~~ (struck 2026-11-11: in a `calculate` it is refused since
+  [#941](https://github.com/sujanto-gaws/kelir/issues/941), two notes on)
+  `[1, "a"]`, `["a", 0]`, `[null, X]`, `[true, X]` and `[false, X]` with X
   plain, and `["a", {"var": "b"}]` are still accepted. **One thing can no longer
   be written, in a form either**: a body comparing an element with a field
   outside the row. A checked form is
@@ -356,6 +358,26 @@ While the major version is `0`, the public API may change in any release.
   answers `null` for. Saving a draft does not check it. **A form already
   published is not re-checked**; a clone of it is refused at its publish. No
   migration, and JFSS's meta-schema is untouched; JFSS takes erratum E-7.
+- **A form's next publish can be refused for a display's `calculate` that
+  reads the whole record through an empty path**
+  ([#941](https://github.com/sujanto-gaws/kelir/issues/941), decision
+  **D-147** A). `{"var": ""}`, `{"var": [""]}` and `{"var": ["", X]}` read
+  the whole record as `null` does, and are now refused the same way, on a
+  component of any role: once a definition is otherwise valid, a form's
+  publish answers 422 `VALIDATION_ERROR` with one `EXPRESSION_PATH_COMPUTED`
+  detail at the expression's path, `rule: "expressionPath"`. On a data field
+  the read was already `CALCULATION_CYCLE` at save and is not reported again,
+  so what newly fails is a non-data component's `calculate`, a display's
+  among them. **Before upgrading, go through the `calculate` expressions of
+  each form's non-data components and look for** such a `var` outside an
+  iterator's body, its source, a default and `reduce`'s initial value
+  included. Name each field it needs as a path. A `conditional` reading `""`
+  is still accepted. Every whole-record refusal, `null`'s included, now says
+  that a publish cannot see which fields the `calculate` depends on, where it
+  said a loop through it goes unseen; a client matching the old message must
+  match the new one. Saving a draft does not check it. **A form already
+  published is not re-checked**; a clone of it is refused at its publish. No
+  migration, and JFSS's meta-schema is untouched; JFSS takes erratum E-8.
 - **A client or proxy that cached `/api/v1` GETs now refetches them**
   ([#881](https://github.com/sujanto-gaws/kelir/issues/881)). Every `/api/v1`
   response is `Cache-Control: no-store`, so nothing keeps a copy to answer the
