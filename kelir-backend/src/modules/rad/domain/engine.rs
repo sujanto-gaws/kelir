@@ -2504,7 +2504,11 @@ mod tests {
              publish cannot see which fields it depends on. Name each field it needs as a path of \
              its own (JFSS S12.2)."
         );
-        assert!(!details[0].message.contains("loop"), "{}", details[0].message);
+        assert!(
+            !details[0].message.contains("loop"),
+            "{}",
+            details[0].message
+        );
     }
 
     /// **#936 AC-48-6.** The same reads in a `conditional` are no cycle, on a
@@ -2589,7 +2593,9 @@ mod tests {
             let read = json!({"var": operand});
 
             assert_eq!(
-                evaluator.evaluate(&read, &record).expect("the read evaluates"),
+                evaluator
+                    .evaluate(&read, &record)
+                    .expect("the read evaluates"),
                 record,
                 "{operand}"
             );
