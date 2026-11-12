@@ -1289,6 +1289,164 @@ async fn a_form_live_with_a_whole_record_read_keeps_working_and_its_clone_is_ref
     .await;
 }
 
+// -- A display reading the whole record as an empty path (#941, D-147 A) ----
+
+/// A display whose `calculate` reads `{"var": operand}`.
+fn display_reading(operand: Value) -> Value {
+    json!({"id": "note", "role": "display", "type": "paragraph", "content": "Total",
+           "calculate": {"var": operand}})
+}
+
+/// **#941 AC-49-1 and AC-49-5.** `""` and `[""]` on a display save in a
+/// draft, created and updated, and are refused at publish at their own path,
+/// as `null` is.
+#[tokio::test]
+async fn a_display_reading_an_empty_path_saves_and_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+
+    for (index, operand) in [json!(""), json!([""])].into_iter().enumerate() {
+        let key = format!("display-empty-{index}");
+        let components = json!([number_field("a"), display_reading(operand.clone())]);
+        let created =
+            create_form(&app, &token, &key, definition_of(&key, components.clone())).await;
+        let id = id_of(&created);
+        let updated = app
+            .send(
+                Method::PUT,
+                &format!("/api/v1/rad/forms/{id}"),
+                Some(&token),
+                Some(json!({
+                    "title": "Still a draft",
+                    "definition": definition_of(&key, components),
+                })),
+            )
+            .await;
+
+        assert_eq!(
+            updated.status,
+            StatusCode::OK,
+            "{operand}: {}",
+            updated.body
+        );
+
+        let refused = publish(&app, &token, id).await;
+
+        assert_refused(
+            &app,
+            &token,
+            id,
+            &refused,
+            &[("definition.components.1.calculate", COMPUTED)],
+        )
+        .await;
+        assert_eq!(
+            refused.body["error"]["details"][0]["rule"],
+            "expressionPath"
+        );
+    }
+}
+
+/// **#941 AC-49-6.** A data field's `""`, planted in a draft behind the API, is
+/// refused at publish as the cycle it is and nothing else: the publish's own
+/// check runs over a valid definition only, so it is not told twice.
+#[tokio::test]
+async fn a_data_field_reading_an_empty_path_is_one_cycle_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let key = "data-empty-path";
+    let clean = definition_of(key, json!([number_field("a")]));
+    let id = id_of(&create_form(&app, &token, key, clean).await);
+    let planted = definition_of(
+        key,
+        json!([
+            number_field("a"),
+            calculated_field("t", json!({"+": [{"var": ""}, 1]}))
+        ]),
+    );
+
+    assert_eq!(
+        form_repo::update_draft(
+            &app.pool,
+            fixtures::SYSTEM_TENANT_ID,
+            id,
+            &form_repo::FormFields {
+                title: None,
+                definition_json: Some(&planted),
+                entity_id: None,
+            },
+            None,
+        )
+        .await
+        .expect("the draft is rewritten behind the API"),
+        1
+    );
+
+    let refused = publish(&app, &token, id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        id,
+        &refused,
+        &[("definition.components.1", "CALCULATION_CYCLE")],
+    )
+    .await;
+}
+
+/// **#941 AC-49-5.** A form that went live with a display reading `""` is not
+/// re-checked: it reads and takes a submission. Its next revision is refused
+/// at publish.
+#[tokio::test]
+async fn a_form_live_with_a_display_reading_an_empty_path_keeps_working() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let key = "display-empty-live";
+    let components = json!([number_field("a"), display_reading(json!(""))]);
+    let id = id_of(&create_form(&app, &token, key, definition_of(key, components)).await);
+
+    assert_eq!(
+        form_repo::publish(&app.pool, fixtures::SYSTEM_TENANT_ID, id, None)
+            .await
+            .expect("the draft is published behind the API"),
+        1
+    );
+
+    let submitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/submissions"),
+            Some(&token),
+            Some(json!({"payload": {"a": 2}})),
+        )
+        .await;
+
+    assert_eq!(submitted.status, StatusCode::CREATED, "{}", submitted.body);
+
+    let clone = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/revisions"),
+            Some(&token),
+            Some(json!({})),
+        )
+        .await;
+
+    assert_eq!(clone.status, StatusCode::CREATED, "{}", clone.body);
+
+    let clone_id = id_of(&clone.body["data"]);
+    let refused = publish(&app, &token, clone_id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        clone_id,
+        &refused,
+        &[("definition.components.1.calculate", COMPUTED)],
+    )
+    .await;
+}
+
 /// **#822 AC4, past the shapes it names.** The server never runs an `enable` or
 /// `disable`, and a browser does; a `generated` field is computed once; an
 /// action has a `conditional`; and `type` is an open vocabulary, so a row

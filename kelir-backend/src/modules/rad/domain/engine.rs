@@ -425,23 +425,32 @@ pub(crate) fn reads_computed_path(expression: &Value) -> bool {
     }
 }
 
-/// Whether a `var` operand names no path, so that the engine answers the whole
-/// record: `null`, `[]` or `[null]` ([#936]'s probe). `[null, X]` is not one:
-/// the engine answers `null` for it and takes no default.
+/// Whether a `var` operand reads the whole record, as the engine answers it:
+/// one naming no path, `null`, `[]` or `[null]` ([#936]'s probe), or one naming
+/// the empty path, `""`, `[""]` or `["", X]` ([#941]'s). `[null, X]` is not
+/// one: the engine answers `null` for it and takes no default. `["", X]` is:
+/// the empty path never misses, so its default is not taken.
+///
+/// **The empty path is also an edge** ([`References::add_path`]), so on a data
+/// field it is the self-loop a save refuses as a cycle, and a publish, which
+/// runs this check over a valid definition only, never reaches it there. On a
+/// component that is no node of the graph, a display or a layout, it is no
+/// edge, and this is what refuses it (**D-147** A).
 ///
 /// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
+/// [#941]: https://github.com/sujanto-gaws/kelir/issues/941
 fn is_whole_record_var(operand: &Value) -> bool {
     match operand {
         Value::Null => true,
-        Value::Array(items) => matches!(items.as_slice(), [] | [Value::Null]),
-        _ => false,
+        Value::Array(items) if matches!(items.as_slice(), [] | [Value::Null]) => true,
+        _ => var_path(operand) == Some(""),
     }
 }
 
-/// Whether `expression` reads the whole record through a `var` that names no
-/// path ([`is_whole_record_var`]), **in the scope it is written in**: the
-/// scope rule of [`visit_paths`], which gives such a `var` no path and so no
-/// edge. A `var`'s default, an iterator's source and `reduce`'s initial value
+/// Whether `expression` reads the whole record through a `var`
+/// ([`is_whole_record_var`]), **in the scope it is written in**: the scope
+/// rule of [`visit_paths`], which gives such a `var` no path, or the empty
+/// one, and so no edge but on a data field. A `var`'s default, an iterator's source and `reduce`'s initial value
 /// are read; an iterator's body is not, because there the same `var` is the
 /// element.
 ///
@@ -849,13 +858,19 @@ const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in thi
      it; an iterator's body reads only its element (JFSS S12.2).";
 
 /// What a refusal of a `calculate` reading the whole record says ([#936],
-/// **D-137 B**). It names no path: there is none, and the fault is the edge
-/// that is missing for it, not a path worked out as it runs.
+/// **D-137 B**). It names no path: there is none, and the fault is the fields
+/// it depends on going unnamed, not a path worked out as it runs.
+///
+/// **It claims no loop** ([#941], **D-147** A). The same refusal reaches a
+/// display and a layout, which hold no value and are no node of the graph, so
+/// no loop can run through them. What is true on every role is that a publish
+/// cannot see which fields the read depends on.
 ///
 /// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
-const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, so it reads the \
-     whole record, and nothing orders it against the fields it reads: a loop through it goes \
-     unseen. Name each field it needs as a path of its own (JFSS S12.2).";
+/// [#941]: https://github.com/sujanto-gaws/kelir/issues/941
+const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no field, so it reads the \
+     whole record, and a publish cannot see which fields it depends on. Name each field it needs \
+     as a path of its own (JFSS S12.2).";
 
 /// Every `calculate` and `conditional.logic` that reads a path no reader of the
 /// definition can name ([#822], **D-135**): [`reads_computed_path`] over every
@@ -863,8 +878,10 @@ const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, s
 /// component's `calculate`, its `conditional.logic`, then what it holds.
 ///
 /// **And every `calculate` that reads the whole record** ([#936], **D-137 B**):
-/// [`reads_whole_record`], with the same code and its own message. That read
-/// has no edge, so nothing orders the field against what it reads. A
+/// [`reads_whole_record`], with the same code and its own message, on every
+/// role ([#941], **D-147** A: `""` too, which on a data field a save has
+/// already refused as a cycle). That read names no field, so nothing orders
+/// the component against what it reads. A
 /// `conditional` doing it is no cycle and is not read for it. Per expression
 /// the computed shape is checked first, so one holding both gets one detail.
 ///
@@ -886,6 +903,7 @@ const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, s
 ///
 /// [#822]: https://github.com/sujanto-gaws/kelir/issues/822
 /// [#936]: https://github.com/sujanto-gaws/kelir/issues/936
+/// [#941]: https://github.com/sujanto-gaws/kelir/issues/941
 pub(crate) fn computed_path_errors(definition: &Value) -> Vec<ValidationDetail> {
     let Some(components) = definition.get("components").and_then(Value::as_array) else {
         return Vec::new();
@@ -2488,7 +2506,8 @@ mod tests {
         }
     }
 
-    /// **#936 AC-48-5.** The message, exactly. It names no path.
+    /// **#936 AC-48-5.** The message, exactly. It names no path, and since
+    /// #941 (AC-49-8) it claims no loop, which a display cannot hold.
     #[test]
     fn a_whole_record_refusal_says_what_it_reads_and_names_no_path() {
         let details = computed_path_errors(&definition(vec![field(
@@ -2499,9 +2518,14 @@ mod tests {
         assert_eq!(details.len(), 1, "{details:?}");
         assert_eq!(
             details[0].message,
-            "A `var` in this `calculate` names no path, so it reads the whole record, and nothing \
-             orders it against the fields it reads: a loop through it goes unseen. Name each field \
-             it needs as a path of its own (JFSS S12.2)."
+            "A `var` in this `calculate` names no field, so it reads the whole record, and a \
+             publish cannot see which fields it depends on. Name each field it needs as a path of \
+             its own (JFSS S12.2)."
+        );
+        assert!(
+            !details[0].message.contains("loop"),
+            "{}",
+            details[0].message
         );
     }
 
@@ -2559,6 +2583,127 @@ mod tests {
                 ("definition.components.3.calculate", false),
             ]
         );
+    }
+
+    // -- A display reading the whole record as an empty path (#941, D-147 A) --
+
+    /// The `var` operands that read the whole record through an empty path.
+    /// On a data field each is a self-edge, refused at save as a cycle; on a
+    /// component that is no node of the graph, nothing but the publish sees it.
+    fn empty_path_operands() -> [Value; 3] {
+        [json!(""), json!([""]), json!(["", 0])]
+    }
+
+    /// A display whose `calculate` is `calculate`.
+    fn display(calculate: Value) -> Value {
+        json!({"id": "n", "role": "display", "type": "paragraph", "calculate": calculate})
+    }
+
+    /// **#941 AC-49-7, the probe**, as AC-48-4's. `""` and `[""]` answer the
+    /// whole record, and so does `["", X]`: the empty path never misses, so
+    /// the default is not taken and the read is the whole record still.
+    #[test]
+    fn each_empty_path_operand_evaluates_to_the_whole_record() {
+        let evaluator = crate::modules::rad::evaluator::RuleEvaluator::new();
+        let record = json!({"a": 1, "b": "two"});
+
+        for operand in empty_path_operands().into_iter().chain([json!(["", "a"])]) {
+            let read = json!({"var": operand});
+
+            assert_eq!(
+                evaluator
+                    .evaluate(&read, &record)
+                    .expect("the read evaluates"),
+                record,
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#941 AC-49-1, AC-49-3 and AC-49-7.** On a display and on a layout,
+    /// every position the scope walk reads is refused, at its own path, with
+    /// the whole-record message: the expression itself, an iterator's source,
+    /// a `var` default and `reduce`'s initial value. An iterator's body, where
+    /// `""` is the element, is not.
+    #[test]
+    fn a_publish_refuses_a_display_reading_the_whole_record_as_an_empty_path() {
+        for operand in empty_path_operands() {
+            let read = json!({"var": operand});
+            let sources = ITERATORS
+                .iter()
+                .map(|&iterator| json!({iterator: [read, {"var": "qty"}, 0]}));
+            let others = [
+                read.clone(),
+                json!({"+": [1, {"*": [2, read]}]}),
+                json!({"var": ["a", read]}),
+                json!({"var": [0, read]}),
+                json!({"reduce": [{"var": "rows"}, {"var": "current"}, read]}),
+            ];
+
+            for expression in sources.chain(others) {
+                let mut panel = json!({"id": "f", "role": "layout", "type": "fieldset"});
+                panel["components"] = json!([]);
+                panel["calculate"] = expression.clone();
+
+                assert_eq!(
+                    refused_whole_at(&definition(vec![
+                        plain("a"),
+                        display(expression.clone()),
+                        panel
+                    ])),
+                    [
+                        "definition.components.1.calculate",
+                        "definition.components.2.calculate",
+                    ],
+                    "{expression}"
+                );
+            }
+
+            for &iterator in ITERATORS {
+                let body = json!({iterator: [{"var": "rows"}, read, 0]});
+
+                assert!(
+                    computed_path_errors(&definition(vec![display(body.clone())])).is_empty(),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    /// **#941 AC-49-4 and AC-49-5.** A display's `conditional` reading `""` is
+    /// no cycle and still publishes, and a save is told nothing of either: the
+    /// refusal is the publish's own, so a draft may hold it.
+    #[test]
+    fn an_empty_path_on_a_display_is_a_publish_refusal_of_its_calculate_only() {
+        for operand in empty_path_operands() {
+            let read = json!({"var": operand});
+            let mut shown = display(json!({"var": "a"}));
+            shown["conditional"] = json!({"action": "show", "logic": {"!!": [read]}});
+
+            assert!(
+                computed_path_errors(&definition(vec![plain("a"), shown])).is_empty(),
+                "{operand}"
+            );
+            assert!(
+                definition_errors(&definition(vec![plain("a"), display(read)])).is_empty(),
+                "{operand}"
+            );
+        }
+    }
+
+    /// **#941 AC-49-6.** On a data field the same read is still the self-loop a
+    /// save refuses, which the publish meets first and stops at: it runs this
+    /// check only over a definition that is valid.
+    #[test]
+    fn an_empty_path_on_a_data_field_is_still_a_cycle_at_save() {
+        for operand in empty_path_operands() {
+            let details = definition_errors(&definition(vec![
+                plain("a"),
+                field("t", json!({"+": [{"var": operand}, 1]})),
+            ]));
+
+            assert_eq!(codes(&details), [CALCULATION_CYCLE], "{operand}");
+        }
     }
 
     // -- The definition gate -----------------------------------------------

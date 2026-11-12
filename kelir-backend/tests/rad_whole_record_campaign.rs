@@ -53,6 +53,26 @@
 //!
 //! The last survives the builder's whole suite: it refuses a default the engine
 //! never takes, which is the over-refusal AC-48-4's probe rules out.
+//!
+//! # Row 49's mutations (#941, D-147 A)
+//!
+//! Run 2026-11-12 in `kelir-rust-tools:1.89`, each made alone on `engine.rs`
+//! at `ca50a6b` and the file restored, then this file's binary run. Only
+//! *here* was run, not the builder's suites. Red first: against `main`'s
+//! engine this file is 7 red of 8. The one green is
+//! `a_data_fields_empty_path_is_a_cycle_at_save_wherever_it_is_read_in_scope`,
+//! a guard on what row 49 leaves unchanged. With the engine restored it is
+//! 8 of 8 green.
+//!
+//! | Mutation | Here |
+//! |---|---|
+//! | the empty path not whole (`var_path == Some("")` dropped) | red (3 of the row's 3) |
+//! | a `var` default dropped from the scan | red, `a_display_keeps_back_exactly_…` and 3 more |
+//! | the scan descending into iterator bodies | red, `an_empty_path_on_a_display_…`, the data-field guard and 1 more |
+//! | an iterator's source and initial value dropped from the scan | red, `an_empty_path_on_a_display_…` and 1 more |
+//! | the check applied to `conditional.logic` | red, `an_empty_path_on_a_display_…` and 1 more |
+//! | a grid's rows not walked | red, `an_empty_path_on_a_display_…` and 1 more |
+//! | a container's slots not walked | red, `an_empty_path_on_a_display_…` and 1 more |
 
 mod common;
 
@@ -67,10 +87,11 @@ use uuid::Uuid;
 
 const COMPUTED: &str = "EXPRESSION_PATH_COMPUTED";
 
-/// `engine.rs`'s `WHOLE_RECORD_MESSAGE`, which is private: AC-48-5's text.
-const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no path, so it reads the \
-     whole record, and nothing orders it against the fields it reads: a loop through it goes \
-     unseen. Name each field it needs as a path of its own (JFSS S12.2).";
+/// `engine.rs`'s `WHOLE_RECORD_MESSAGE`, which is private: AC-48-5's text, as
+/// AC-49-8 (#941) reworded it to claim no loop.
+const WHOLE_RECORD_MESSAGE: &str = "A `var` in this `calculate` names no field, so it reads the \
+     whole record, and a publish cannot see which fields it depends on. Name each field it needs \
+     as a path of its own (JFSS S12.2).";
 
 /// `engine.rs`'s `COMPUTED_PATH_MESSAGE` (#822), also private.
 const COMPUTED_PATH_MESSAGE: &str = "A `var`, `missing` or `missing_some` in this expression \
@@ -560,21 +581,12 @@ async fn a_live_whole_record_form_is_a_conflict_and_its_corrected_clone_goes_liv
     assert_eq!(status_of(&app, &token, id).await, "PUBLISHED");
 }
 
-// -- Findings -------------------------------------------------------------------
+// -- A display reading the whole record as an empty path (#941) -----------------
 
-/// **Finding, low: the same read is refused on a display as `null` and
-/// accepted as `""`.** AC-48-2 refuses `{"var": null}` in a `calculate` "on a
-/// component of any role", and the builder's unit test does so on a display.
-/// `{"var": ""}` is the same read (the engine answers both with the whole
-/// record, and the probe above holds that), and #822 AC5 leaves it to
-/// `CALCULATION_CYCLE`. But a display is no node of the graph, so `""` there is
-/// no edge and no cycle, and neither scan reads it: it publishes.
-///
-/// Harmless on the server today, which evaluates no display's `calculate`; it
-/// is the publish's rule that is uneven. Ignored so CI stays green until the
-/// owner decides which way it should go; run with `--ignored` to see it red.
+/// **#941 AC-49-2, D-147 A.** The same read on a display is refused at publish
+/// as `""`, `[""]` and `null` alike: a display is no node of the graph, so `""`
+/// there is no cycle, and the publish's own check refuses it instead.
 #[tokio::test]
-#[ignore = "finding: a display's calculate reading the whole record as \"\" publishes (row 48 campaign)"]
 async fn a_display_reading_the_whole_record_as_an_empty_path_is_refused_as_null_is() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
@@ -598,5 +610,253 @@ async fn a_display_reading_the_whole_record_as_an_empty_path_is_refused_as_null_
             "{operand} publishes on a display: {}",
             published.body
         );
+        assert_eq!(
+            details(&published),
+            [whole_at("definition.components.1.calculate")],
+            "{operand}"
+        );
+        assert_eq!(status_of(&app, &token, id).await, "DRAFT");
     }
+}
+
+// -- Row 49's campaign (#941, D-147 A) ------------------------------------------
+
+/// A display whose `calculate` is `calculate`.
+fn display(id: &str, calculate: Value) -> Value {
+    json!({"id": id, "role": "display", "type": "paragraph", "content": "Total",
+           "calculate": calculate})
+}
+
+/// **AC-49-1 and AC-49-7 against the engine, on a display.**
+/// The first test's table asks only of a data field, where `""` is a cycle at
+/// save; here the same question is asked where nothing but the publish can
+/// answer it. Every operand the engine answers with the whole record is
+/// refused at publish with the whole-record message, and every operand it does
+/// not publishes.
+///
+/// A layout is not asked here: the JFSS meta-schema refuses a `calculate` on a
+/// layout at save, so no layout reaches a publish through the API. The engine's
+/// own test reads one.
+///
+/// Past the builder's three: `["", X]` with an expression and with a third
+/// element, an empty path reached through the default of a path that misses
+/// (`" "`, `"."`), and the near-misses a reader might take for an empty path,
+/// whitespace and dots, which the engine answers `null` and so must publish.
+#[tokio::test]
+async fn a_display_keeps_back_exactly_the_operands_the_engine_reads_whole() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let evaluator = RuleEvaluator::new();
+    let record = json!({"a": 1, "b": "two"});
+
+    let table = [
+        (json!(""), true),
+        (json!([""]), true),
+        (json!(["", 3]), true),
+        (json!(["", "a"]), true),
+        (json!(["", {"var": "a"}]), true),
+        (json!(["", 3, 4]), true),
+        (json!(["", null]), true),
+        (json!([" ", {"var": ""}]), true),
+        (json!([".", {"var": [""]}]), true),
+        (json!(["missing", {"var": ["", 0]}]), true),
+        (json!(null), true),
+        (json!([]), true),
+        (json!([null]), true),
+        (json!(" "), false),
+        (json!("  "), false),
+        (json!("\t"), false),
+        (json!([" "]), false),
+        (json!([" ", 1]), false),
+        (json!("."), false),
+        (json!(".."), false),
+        (json!(" ."), false),
+        (json!("a"), false),
+        (json!([null, ""]), false),
+        (json!([null, {"var": ""}]), false),
+    ];
+
+    for (index, (operand, whole)) in table.into_iter().enumerate() {
+        let read = json!({"var": operand});
+        let answer = evaluator.evaluate(&read, &record);
+        let reads_whole = matches!(&answer, Ok(value) if *value == record);
+
+        assert_eq!(
+            reads_whole, whole,
+            "the table is wrong about {operand}: the engine answers {answer:?}"
+        );
+
+        let key = format!("display-operand-{index}");
+        let components = json!([number_field("a"), display("note", read.clone())]);
+        let id = create_draft(&app, &token, &key, definition_of(&key, components)).await;
+        let published = publish(&app, &token, id).await;
+
+        if whole {
+            assert_eq!(
+                details(&published),
+                [whole_at("definition.components.1.calculate")],
+                "{operand}"
+            );
+            assert_eq!(status_of(&app, &token, id).await, "DRAFT", "{operand}");
+        } else {
+            assert_eq!(
+                published.status,
+                StatusCode::OK,
+                "{operand}: {}",
+                published.body
+            );
+        }
+    }
+}
+
+/// **AC-49-3 and AC-49-4 at the endpoint, at every depth a display can sit.**
+/// Each refused expression is a form of its own, with a display in a grid's
+/// row, a `columns` slot, a fieldset in a `tabs` slot and at the top, each
+/// refused at its own path in document order. Each accepted one, an empty path
+/// in an iterator's body, publishes from the same places beside a display
+/// whose `conditional` reads `[""]`.
+#[tokio::test]
+async fn an_empty_path_on_a_display_is_refused_by_position_not_by_depth() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let sum_of_rows = json!({"+": [{"var": "current"}, {"var": "accumulator"}]});
+
+    let refused = [
+        json!({"+": [1, {"*": [2, {"var": ""}]}]}),
+        json!({"var": ["a", {"var": [""]}]}),
+        json!({"var": ["", {"var": "a"}]}),
+        json!({"reduce": [{"var": "rows"}, sum_of_rows, {"var": ""}]}),
+        json!({"sum": [{"map": [{"var": [""]}, 1]}]}),
+        json!({"+": [{"all": [{"var": ""}, true]}, 0]}),
+        json!({"sum": [{"map": [{"filter": [{"var": ["", 0]}, true]}, 1]}]}),
+        // A body's empty path is the element; the next source is not.
+        json!({"+": [{"sum": [{"map": [{"var": "rows"}, {"var": ""}]}]}, {"var": [""]}]}),
+    ];
+    let accepted = [
+        json!({"sum": [{"map": [{"var": "rows"}, {"var": ""}]}]}),
+        json!({"sum": [{"map": [{"var": "rows"}, {"var": [""]}]}]}),
+        json!({"sum": [{"map": [{"var": "rows"}, {"var": ["", 0]}]}]}),
+        json!({"reduce": [{"var": "rows"}, {"+": [{"var": "accumulator"}, {"var": [""]}]}, 0]}),
+        json!({"+": [{"some": [{"var": "rows"}, {"var": ""}]}, 0]}),
+        // A `reduce` inside a body: its initial value reads the element.
+        json!({"sum": [{"map": [{"var": "rows"}, {"reduce": [[1], sum_of_rows, {"var": ""}]}]}]}),
+    ];
+
+    let placed = |expression: &Value| {
+        json!([
+            number_field("a"),
+            datagrid("rows", vec![number_field("x"), display("in-row", expression.clone())]),
+            {"id": "cols", "role": "layout", "type": "columns", "columns": [
+                {"components": [display("in-col", expression.clone())]}
+            ]},
+            {"id": "tabs", "role": "layout", "type": "tabs", "tabs": [
+                {"title": "One", "components": [
+                    fieldset("in-tab", vec![display("deep", expression.clone())])
+                ]}
+            ]},
+            display("top", expression.clone())
+        ])
+    };
+
+    for (index, expression) in refused.iter().enumerate() {
+        let key = format!("display-refused-{index}");
+        let id = create_draft(&app, &token, &key, definition_of(&key, placed(expression))).await;
+
+        assert_eq!(
+            details(&publish(&app, &token, id).await),
+            [
+                whole_at("definition.components.1.components.1.calculate"),
+                whole_at("definition.components.2.columns.0.components.0.calculate"),
+                whole_at("definition.components.3.tabs.0.components.0.components.0.calculate"),
+                whole_at("definition.components.4.calculate"),
+            ],
+            "{expression}"
+        );
+    }
+
+    for (index, expression) in accepted.iter().enumerate() {
+        let key = format!("display-accepted-{index}");
+        let mut components = placed(expression);
+        components.as_array_mut().expect("a list").push(json!({
+            "id": "shown", "role": "display", "type": "paragraph", "content": "Shown",
+            "calculate": {"var": "a"},
+            "conditional": {"action": "show", "logic": {"!!": [{"var": [""]}]}}
+        }));
+        let id = create_draft(&app, &token, &key, definition_of(&key, components)).await;
+        let published = publish(&app, &token, id).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "{expression}: {}",
+            published.body
+        );
+    }
+}
+
+/// **AC-49-6, past the builder's one shape.** On a data field every way of
+/// reaching the empty path in its own scope, at the top and in a grid's row,
+/// is still the cycle a save refuses; and the same read in a body is not.
+#[tokio::test]
+async fn a_data_fields_empty_path_is_a_cycle_at_save_wherever_it_is_read_in_scope() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let sum_of_rows = json!({"+": [{"var": "current"}, {"var": "accumulator"}]});
+
+    let cycles = [
+        json!({"var": ["a", {"var": ""}]}),
+        json!({"var": ["", 1]}),
+        json!({"reduce": [{"var": "rows"}, sum_of_rows, {"var": [""]}]}),
+        json!({"sum": [{"map": [{"var": ""}, 1]}]}),
+    ];
+
+    for (index, expression) in cycles.iter().enumerate() {
+        let places = [
+            (
+                "top",
+                json!([
+                    number_field("a"),
+                    datagrid("rows", vec![number_field("x")]),
+                    calculated("t", expression.clone())
+                ]),
+            ),
+            (
+                "row",
+                json!([datagrid(
+                    "rows",
+                    vec![number_field("x"), calculated("t", expression.clone())]
+                )]),
+            ),
+        ];
+
+        for (place, components) in places {
+            let key = format!("data-cycle-{place}-{index}");
+            let created = create(&app, &token, &key, definition_of(&key, components)).await;
+
+            assert_eq!(
+                created.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{place} {expression}: {}",
+                created.body
+            );
+            assert_eq!(
+                created.body["error"]["details"][0]["code"], "CALCULATION_CYCLE",
+                "{place} {expression}: {}",
+                created.body
+            );
+        }
+    }
+
+    let key = "data-body-empty-path";
+    let components = json!([
+        datagrid("rows", vec![number_field("x")]),
+        calculated(
+            "t",
+            json!({"sum": [{"map": [{"var": "rows"}, {"var": ["", 0]}]}]})
+        )
+    ]);
+    let id = create_draft(&app, &token, key, definition_of(key, components)).await;
+    let published = publish(&app, &token, id).await;
+
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
 }
