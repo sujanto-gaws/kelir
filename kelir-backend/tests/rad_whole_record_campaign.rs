@@ -598,3 +598,267 @@ async fn a_display_reading_the_whole_record_as_an_empty_path_is_refused_as_null_
         assert_eq!(status_of(&app, &token, id).await, "DRAFT");
     }
 }
+
+// -- Row 49's campaign (#941, D-147 A) ------------------------------------------
+
+/// A display whose `calculate` is `calculate`.
+fn display(id: &str, calculate: Value) -> Value {
+    json!({"id": id, "role": "display", "type": "paragraph", "content": "Total",
+           "calculate": calculate})
+}
+
+/// **AC-49-1 and AC-49-7 against the engine, on a display and on a layout.**
+/// The first test's table asks only of a data field, where `""` is a cycle at
+/// save; here the same question is asked where nothing but the publish can
+/// answer it. Every operand the engine answers with the whole record is
+/// refused at publish with the whole-record message, on both roles, and every
+/// operand it does not publishes.
+///
+/// Past the builder's three: `["", X]` with an expression and with a third
+/// element, an empty path reached through the default of a path that misses
+/// (`" "`, `"."`), and the near-misses a reader might take for an empty path,
+/// whitespace and dots, which the engine answers `null` and so must publish.
+#[tokio::test]
+async fn a_display_and_a_layout_keep_back_exactly_the_operands_the_engine_reads_whole() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let evaluator = RuleEvaluator::new();
+    let record = json!({"a": 1, "b": "two"});
+
+    let table = [
+        (json!(""), true),
+        (json!([""]), true),
+        (json!(["", 3]), true),
+        (json!(["", "a"]), true),
+        (json!(["", {"var": "a"}]), true),
+        (json!(["", 3, 4]), true),
+        (json!(["", null]), true),
+        (json!([" ", {"var": ""}]), true),
+        (json!([".", {"var": [""]}]), true),
+        (json!(["a", {"var": ["", 0]}]), true),
+        (json!(null), true),
+        (json!([]), true),
+        (json!([null]), true),
+        (json!(" "), false),
+        (json!("  "), false),
+        (json!("\t"), false),
+        (json!([" "]), false),
+        (json!([" ", 1]), false),
+        (json!("."), false),
+        (json!(".."), false),
+        (json!(" ."), false),
+        (json!("a"), false),
+        (json!([null, ""]), false),
+        (json!([null, {"var": ""}]), false),
+    ];
+
+    for (index, (operand, whole)) in table.into_iter().enumerate() {
+        let read = json!({"var": operand});
+        let answer = evaluator.evaluate(&read, &record);
+        let reads_whole = matches!(&answer, Ok(value) if *value == record);
+
+        assert_eq!(
+            reads_whole, whole,
+            "the table is wrong about {operand}: the engine answers {answer:?}"
+        );
+
+        let mut panel = fieldset("panel", vec![]);
+        panel["calculate"] = read.clone();
+
+        let key = format!("display-operand-{index}");
+        let components = json!([number_field("a"), display("note", read.clone()), panel]);
+        let id = create_draft(&app, &token, &key, definition_of(&key, components)).await;
+        let published = publish(&app, &token, id).await;
+
+        if whole {
+            assert_eq!(
+                details(&published),
+                [
+                    whole_at("definition.components.1.calculate"),
+                    whole_at("definition.components.2.calculate"),
+                ],
+                "{operand}"
+            );
+            assert_eq!(status_of(&app, &token, id).await, "DRAFT", "{operand}");
+        } else {
+            assert_eq!(
+                published.status,
+                StatusCode::OK,
+                "{operand}: {}",
+                published.body
+            );
+        }
+    }
+
+    // The operator's case: `Var` and `VAR` are no operator the engine has, and
+    // the registry refuses them on a display at save, before a publish.
+    for operator in ["Var", "VAR"] {
+        let key = format!("display-operator-{operator}");
+        let components = json!([number_field("a"), display("note", json!({operator: ""}))]);
+        let created = create(&app, &token, &key, definition_of(&key, components)).await;
+
+        assert_eq!(
+            created.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{operator}: {}",
+            created.body
+        );
+        assert_eq!(
+            created.body["error"]["details"][0]["code"], "OPERATOR_NOT_REGISTERED",
+            "{operator}: {}",
+            created.body
+        );
+    }
+}
+
+/// **AC-49-3 and AC-49-4 at the endpoint, at every depth a display can sit.**
+/// Each refused expression is a form of its own, with a display in a grid's
+/// row, a `columns` slot, a fieldset in a `tabs` slot and at the top, each
+/// refused at its own path in document order. Each accepted one, an empty path
+/// in an iterator's body, publishes from the same places beside a display
+/// whose `conditional` reads `[""]`.
+#[tokio::test]
+async fn an_empty_path_on_a_display_is_refused_by_position_not_by_depth() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let sum_of_rows = json!({"+": [{"var": "current"}, {"var": "accumulator"}]});
+
+    let refused = [
+        json!({"+": [1, {"*": [2, {"var": ""}]}]}),
+        json!({"var": ["a", {"var": [""]}]}),
+        json!({"var": ["", {"var": "a"}]}),
+        json!({"reduce": [{"var": "rows"}, sum_of_rows, {"var": ""}]}),
+        json!({"sum": [{"map": [{"var": [""]}, 1]}]}),
+        json!({"+": [{"all": [{"var": ""}, true]}, 0]}),
+        json!({"sum": [{"map": [{"filter": [{"var": ["", 0]}, true]}, 1]}]}),
+        // A body's empty path is the element; the next source is not.
+        json!({"+": [{"sum": [{"map": [{"var": "rows"}, {"var": ""}]}]}, {"var": [""]}]}),
+    ];
+    let accepted = [
+        json!({"sum": [{"map": [{"var": "rows"}, {"var": ""}]}]}),
+        json!({"sum": [{"map": [{"var": "rows"}, {"var": [""]}]}]}),
+        json!({"sum": [{"map": [{"var": "rows"}, {"var": ["", 0]}]}]}),
+        json!({"reduce": [{"var": "rows"}, {"+": [{"var": "accumulator"}, {"var": [""]}]}, 0]}),
+        json!({"+": [{"some": [{"var": "rows"}, {"var": ""}]}, 0]}),
+        // A `reduce` inside a body: its initial value reads the element.
+        json!({"sum": [{"map": [{"var": "rows"}, {"reduce": [[1], sum_of_rows, {"var": ""}]}]}]}),
+    ];
+
+    let placed = |expression: &Value| {
+        json!([
+            number_field("a"),
+            datagrid("rows", vec![number_field("x"), display("in-row", expression.clone())]),
+            {"id": "cols", "role": "layout", "type": "columns", "columns": [
+                {"components": [display("in-col", expression.clone())]}
+            ]},
+            {"id": "tabs", "role": "layout", "type": "tabs", "tabs": [
+                {"title": "One", "components": [
+                    fieldset("in-tab", vec![display("deep", expression.clone())])
+                ]}
+            ]},
+            display("top", expression.clone())
+        ])
+    };
+
+    for (index, expression) in refused.iter().enumerate() {
+        let key = format!("display-refused-{index}");
+        let id = create_draft(&app, &token, &key, definition_of(&key, placed(expression))).await;
+
+        assert_eq!(
+            details(&publish(&app, &token, id).await),
+            [
+                whole_at("definition.components.1.components.1.calculate"),
+                whole_at("definition.components.2.columns.0.components.0.calculate"),
+                whole_at("definition.components.3.tabs.0.components.0.components.0.calculate"),
+                whole_at("definition.components.4.calculate"),
+            ],
+            "{expression}"
+        );
+    }
+
+    for (index, expression) in accepted.iter().enumerate() {
+        let key = format!("display-accepted-{index}");
+        let mut components = placed(expression);
+        components.as_array_mut().expect("a list").push(json!({
+            "id": "shown", "role": "display", "type": "paragraph", "content": "Shown",
+            "calculate": {"var": "a"},
+            "conditional": {"action": "show", "logic": {"!!": [{"var": [""]}]}}
+        }));
+        let id = create_draft(&app, &token, &key, definition_of(&key, components)).await;
+        let published = publish(&app, &token, id).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::OK,
+            "{expression}: {}",
+            published.body
+        );
+    }
+}
+
+/// **AC-49-6, past the builder's one shape.** On a data field every way of
+/// reaching the empty path in its own scope, at the top and in a grid's row,
+/// is still the cycle a save refuses; and the same read in a body is not.
+#[tokio::test]
+async fn a_data_fields_empty_path_is_a_cycle_at_save_wherever_it_is_read_in_scope() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let sum_of_rows = json!({"+": [{"var": "current"}, {"var": "accumulator"}]});
+
+    let cycles = [
+        json!({"var": ["a", {"var": ""}]}),
+        json!({"var": ["", 1]}),
+        json!({"reduce": [{"var": "rows"}, sum_of_rows, {"var": [""]}]}),
+        json!({"sum": [{"map": [{"var": ""}, 1]}]}),
+    ];
+
+    for (index, expression) in cycles.iter().enumerate() {
+        let places = [
+            (
+                "top",
+                json!([
+                    number_field("a"),
+                    datagrid("rows", vec![number_field("x")]),
+                    calculated("t", expression.clone())
+                ]),
+            ),
+            (
+                "row",
+                json!([datagrid(
+                    "rows",
+                    vec![number_field("x"), calculated("t", expression.clone())]
+                )]),
+            ),
+        ];
+
+        for (place, components) in places {
+            let key = format!("data-cycle-{place}-{index}");
+            let created = create(&app, &token, &key, definition_of(&key, components)).await;
+
+            assert_eq!(
+                created.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{place} {expression}: {}",
+                created.body
+            );
+            assert_eq!(
+                created.body["error"]["details"][0]["code"], "CALCULATION_CYCLE",
+                "{place} {expression}: {}",
+                created.body
+            );
+        }
+    }
+
+    let key = "data-body-empty-path";
+    let components = json!([
+        datagrid("rows", vec![number_field("x")]),
+        calculated(
+            "t",
+            json!({"sum": [{"map": [{"var": "rows"}, {"var": ["", 0]}]}]})
+        )
+    ]);
+    let id = create_draft(&app, &token, key, definition_of(key, components)).await;
+    let published = publish(&app, &token, id).await;
+
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+}
