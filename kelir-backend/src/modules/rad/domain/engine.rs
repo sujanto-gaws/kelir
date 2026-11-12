@@ -17,7 +17,10 @@
 //! not two), and its `calculate` and `conditional.logic` operators against the
 //! [Calculation Rule
 //! Registry](../../../../../docs/schema/JFSS%20Calculation%20Rule%20Registry.md)
-//! (through [`super::jfss::check_operators`], for the same reason). **A name
+//! (through [`super::jfss::check_operators`], for the same reason). A display's,
+//! a layout's and an action's expressions meet the same two registries in a
+//! walk of their own beside it, so the catalogue stays `data` only (#948).
+//! **A name
 //! outside a registry is refused where the definition is written, not where it
 //! is filled in.** Until this module, an unregistered `rules[].rule` was
 //! discovered at submit — by the person typing, who cannot fix it — and the
@@ -802,7 +805,57 @@ pub(crate) fn definition_errors(definition: &Value) -> Vec<ValidationDetail> {
     let components: Vec<&Value> = components.iter().collect();
 
     check_scope(&components, "definition.components", &mut details);
+
+    for (index, component) in components.iter().enumerate() {
+        check_role_operators(
+            component,
+            &format!("definition.components.{index}"),
+            &mut details,
+        );
+    }
+
     details
+}
+
+/// The operators of every component the catalogue does not hold, against the
+/// same two registries ([#948], **D-149** A).
+///
+/// **A regression closed.** Until #344 the operator walk read every
+/// component's `calculate` and `conditional.logic`, whatever its role; moved
+/// onto [`ScopeCatalogue`], it read `data` components only, and a display's
+/// `calculate` or a layout's `conditional` stored any operator at all. The
+/// server evaluates a non-data `conditional` at every write
+/// ([`super::super::service::evaluation`]), with an evaluator that has no
+/// allow-list, so the registry is the only gate it has.
+///
+/// **Separate from the catalogue, as [`check_computed_paths`] is.** A display
+/// or a layout is no node of the graph and joins no scope, so the catalogue
+/// stays `data` only and the order is untouched. It walks the components
+/// themselves, with the one definition of *child* the catalogue uses,
+/// [`container_children_at`] and [`row_template`], so every §4.3.1 position
+/// is reached: a panel, a slot, a row template.
+///
+/// **A `data` component is the catalogue's**, through [`check_operator_sets`],
+/// so it is passed over here and told once. Its row template is still walked,
+/// for the displays and layouts in it.
+///
+/// [#948]: https://github.com/sujanto-gaws/kelir/issues/948
+fn check_role_operators(component: &Value, here: &str, details: &mut Vec<ValidationDetail>) {
+    match role_of(component) {
+        Some("data") => {}
+        // A container's own expressions; its children are walked below.
+        Some("layout") => check_expression_operators(component, here, details),
+        // A display, an action, and a role the meta-schema refuses beside this.
+        _ => check_expression_operators(component, here, details),
+    }
+
+    for (child, child_path) in container_children_at(component, here) {
+        check_role_operators(child, &child_path, details);
+    }
+
+    for (index, row) in row_template(component).into_iter().flatten().enumerate() {
+        check_role_operators(row, &format!("{here}.components.{index}"), details);
+    }
 }
 
 /// One scope: its catalogue, its rule names, its order — then its rows.
@@ -1605,25 +1658,33 @@ fn divergence_reason(construct: &DivergentConstruct, flags: &str) -> (&'static s
 /// already has to visit every data component to build the graph. One walk, both
 /// registries, which is what makes AC1's *resolves against both* a single gate
 /// rather than two that could disagree about which components exist.
+///
+/// **For a `data` component.** The catalogue holds no other role, so every
+/// other one is [`check_role_operators`]'s, with the same check (#948).
 fn check_operator_sets(entry: &Entry<'_>, details: &mut Vec<ValidationDetail>) {
-    if let Some(calculate) = entry.component.get("calculate") {
+    check_expression_operators(entry.component, &entry.path, details);
+}
+
+/// One component's `calculate` against the Calculation Rule Registry and its
+/// `conditional.logic` against the floor, whatever its role.
+fn check_expression_operators(component: &Value, here: &str, details: &mut Vec<ValidationDetail>) {
+    if let Some(calculate) = component.get("calculate") {
         check_operators(
             calculate,
             CALCULATE_OPERATORS,
-            &format!("{}.calculate", entry.path),
+            &format!("{here}.calculate"),
             details,
         );
     }
 
-    if let Some(logic) = entry
-        .component
+    if let Some(logic) = component
         .get("conditional")
         .and_then(|conditional| conditional.get("logic"))
     {
         check_operators(
             logic,
             CONDITIONAL_OPERATORS,
-            &format!("{}.conditional.logic", entry.path),
+            &format!("{here}.conditional.logic"),
             details,
         );
     }
