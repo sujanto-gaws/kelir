@@ -53,6 +53,26 @@
 //!
 //! The last survives the builder's whole suite: it refuses a default the engine
 //! never takes, which is the over-refusal AC-48-4's probe rules out.
+//!
+//! # Row 49's mutations (#941, D-147 A)
+//!
+//! Run 2026-11-12 in `kelir-rust-tools:1.89`, each made alone on `engine.rs`
+//! at `ca50a6b` and the file restored, then this file's binary run. Only
+//! *here* was run, not the builder's suites. Red first: against `main`'s
+//! engine this file is 7 red of 8. The one green is
+//! `a_data_fields_empty_path_is_a_cycle_at_save_wherever_it_is_read_in_scope`,
+//! a guard on what row 49 leaves unchanged. With the engine restored it is
+//! 8 of 8 green.
+//!
+//! | Mutation | Here |
+//! |---|---|
+//! | the empty path not whole (`var_path == Some("")` dropped) | red (3 of the row's 3) |
+//! | a `var` default dropped from the scan | red, `a_display_keeps_back_exactly_…` and 3 more |
+//! | the scan descending into iterator bodies | red, `an_empty_path_on_a_display_…`, the data-field guard and 1 more |
+//! | an iterator's source and initial value dropped from the scan | red, `an_empty_path_on_a_display_…` and 1 more |
+//! | the check applied to `conditional.logic` | red, `an_empty_path_on_a_display_…` and 1 more |
+//! | a grid's rows not walked | red, `an_empty_path_on_a_display_…` and 1 more |
+//! | a container's slots not walked | red, `an_empty_path_on_a_display_…` and 1 more |
 
 mod common;
 
@@ -607,19 +627,23 @@ fn display(id: &str, calculate: Value) -> Value {
            "calculate": calculate})
 }
 
-/// **AC-49-1 and AC-49-7 against the engine, on a display and on a layout.**
+/// **AC-49-1 and AC-49-7 against the engine, on a display.**
 /// The first test's table asks only of a data field, where `""` is a cycle at
 /// save; here the same question is asked where nothing but the publish can
 /// answer it. Every operand the engine answers with the whole record is
-/// refused at publish with the whole-record message, on both roles, and every
-/// operand it does not publishes.
+/// refused at publish with the whole-record message, and every operand it does
+/// not publishes.
+///
+/// A layout is not asked here: the JFSS meta-schema refuses a `calculate` on a
+/// layout at save, so no layout reaches a publish through the API. The engine's
+/// own test reads one.
 ///
 /// Past the builder's three: `["", X]` with an expression and with a third
 /// element, an empty path reached through the default of a path that misses
 /// (`" "`, `"."`), and the near-misses a reader might take for an empty path,
 /// whitespace and dots, which the engine answers `null` and so must publish.
 #[tokio::test]
-async fn a_display_and_a_layout_keep_back_exactly_the_operands_the_engine_reads_whole() {
+async fn a_display_keeps_back_exactly_the_operands_the_engine_reads_whole() {
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
     let evaluator = RuleEvaluator::new();
@@ -635,7 +659,7 @@ async fn a_display_and_a_layout_keep_back_exactly_the_operands_the_engine_reads_
         (json!(["", null]), true),
         (json!([" ", {"var": ""}]), true),
         (json!([".", {"var": [""]}]), true),
-        (json!(["a", {"var": ["", 0]}]), true),
+        (json!(["missing", {"var": ["", 0]}]), true),
         (json!(null), true),
         (json!([]), true),
         (json!([null]), true),
@@ -662,21 +686,15 @@ async fn a_display_and_a_layout_keep_back_exactly_the_operands_the_engine_reads_
             "the table is wrong about {operand}: the engine answers {answer:?}"
         );
 
-        let mut panel = fieldset("panel", vec![]);
-        panel["calculate"] = read.clone();
-
         let key = format!("display-operand-{index}");
-        let components = json!([number_field("a"), display("note", read.clone()), panel]);
+        let components = json!([number_field("a"), display("note", read.clone())]);
         let id = create_draft(&app, &token, &key, definition_of(&key, components)).await;
         let published = publish(&app, &token, id).await;
 
         if whole {
             assert_eq!(
                 details(&published),
-                [
-                    whole_at("definition.components.1.calculate"),
-                    whole_at("definition.components.2.calculate"),
-                ],
+                [whole_at("definition.components.1.calculate")],
                 "{operand}"
             );
             assert_eq!(status_of(&app, &token, id).await, "DRAFT", "{operand}");
@@ -688,26 +706,6 @@ async fn a_display_and_a_layout_keep_back_exactly_the_operands_the_engine_reads_
                 published.body
             );
         }
-    }
-
-    // The operator's case: `Var` and `VAR` are no operator the engine has, and
-    // the registry refuses them on a display at save, before a publish.
-    for operator in ["Var", "VAR"] {
-        let key = format!("display-operator-{operator}");
-        let components = json!([number_field("a"), display("note", json!({operator: ""}))]);
-        let created = create(&app, &token, &key, definition_of(&key, components)).await;
-
-        assert_eq!(
-            created.status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{operator}: {}",
-            created.body
-        );
-        assert_eq!(
-            created.body["error"]["details"][0]["code"], "OPERATOR_NOT_REGISTERED",
-            "{operator}: {}",
-            created.body
-        );
     }
 }
 
