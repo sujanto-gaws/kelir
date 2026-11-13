@@ -1671,6 +1671,18 @@ While the major version is `0`, the public API may change in any release.
   `0052` changes no table and no column, and the audit module only inserts and
   selects, so the previous image runs against the schema it leaves (release
   process §6).
+- **The Calculation Rule Registry no longer approves `cat` in a
+  `conditional`** ([#828](https://github.com/sujanto-gaws/kelir/issues/828)).
+  A note under
+  [§2.3](docs/schema/JFSS%20Calculation%20Rule%20Registry.md) said every
+  operator its table forbids in `calculate` is approved in
+  `conditional.logic`, `log` excepted. `cat` is in that table, and §2.5's
+  tier has never listed it nor a data field's check accepted it; since
+  [#950](https://github.com/sujanto-gaws/kelir/pull/950) (decision
+  **D-149**) a `conditional.logic` using it is refused on every role. The
+  note now excepts `cat` too, because it returns a string and a conditional
+  needs a boolean, and §2.5 says it is not in the tier. Nothing the server or
+  the screens do changed; the registry takes 1.7.3.
 
 ### Known limitations
 
@@ -1683,14 +1695,17 @@ While the major version is `0`, the public API may change in any release.
   to fill in (*Fixed*, above), so check each before publishing.~~ (Struck
   2026-10-15: such a rule is refused at save and publish since #722, under
   *Changed*. A revision published before it is not re-checked.)
-- **A non-data component's expression escapes the operator check**
+- ~~**A non-data component's expression escapes the operator check**
   ([#828](https://github.com/sujanto-gaws/kelir/issues/828)). A save and a
   publish check the operators of data components only, so a layout's, a
   display's or an action's `conditional`, or a display's `calculate`, can hold
   an operator the set refuses. A form can publish that nobody can submit,
   `merge` there has discarded what the person typed, and `val` or `exists`
   reads a computed path past **D-135**'s check. It is unprioritised and
-  unplaced.
+  unplaced.~~ (Struck 2026-11-13: every role's `conditional` and a display's
+  `calculate` are held to the registry at save and publish since
+  [#950](https://github.com/sujanto-gaws/kelir/pull/950), under *Upgrade notes*. A
+  revision published before it is not re-checked.)
 - **A refused layout `conditional` cannot be edited in the form builder**
   ([#830](https://github.com/sujanto-gaws/kelir/issues/830)). The refusal shows
   on the component, and the builder offers no way to change the expression;
