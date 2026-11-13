@@ -378,6 +378,30 @@ While the major version is `0`, the public API may change in any release.
   match the new one. Saving a draft does not check it. **A form already
   published is not re-checked**; a clone of it is refused at its publish. No
   migration, and JFSS's meta-schema is untouched; JFSS takes erratum E-8.
+- **A form's next save or publish can be refused for an operator in a
+  display's `calculate` or a non-data component's `conditional`**
+  ([#948](https://github.com/sujanto-gaws/kelir/issues/948), decision
+  **D-149** A). Since [#344](https://github.com/sujanto-gaws/kelir/issues/344)
+  (2026-09-05) the operator check read data fields only, so a display's
+  `calculate`, and a display's, layout's or button's `conditional.logic`, was
+  stored with any operator. Each is now held to the Calculation Rule Registry
+  as a data field's always was: a `calculate` to its `calculate` tiers, a
+  `conditional.logic` to its §2.5 tier. A save or a publish answers 422
+  `VALIDATION_ERROR` with an `OPERATOR_NOT_REGISTERED` detail at the
+  expression's path, such as `definition.components.2.calculate`, and a
+  `sum` given more than one argument there is `SUM_TAKES_ONE_ARRAY`. **What
+  newly fails most often is §2.3's**: `cat`, `if`, `?:`, the comparisons and
+  `and`, `or` and `!` in a display's `calculate`, which compute text or a
+  boolean, and are refused there as in a field's. **Before upgrading, go
+  through the `calculate` and `conditional` expressions of each form's
+  non-data components, through containers and data grid rows, and look for**
+  an operator the registry does not list for that property. Only a raw JSON
+  box or the API writes these. A display's `calculate` computes a number,
+  not text or a boolean. A draft stored before the upgrade is refused at
+  its next save or publish. **A form already published is not re-checked**;
+  a clone of it is refused at its publish. No migration, and JFSS's
+  meta-schema is untouched; the registry takes 1.7.2, which corrects where
+  its rule is enforced and not the rule.
 - **A client or proxy that cached `/api/v1` GETs now refetches them**
   ([#881](https://github.com/sujanto-gaws/kelir/issues/881)). Every `/api/v1`
   response is `Cache-Control: no-store`, so nothing keeps a copy to answer the
