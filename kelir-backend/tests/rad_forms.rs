@@ -1447,6 +1447,264 @@ async fn a_form_live_with_a_display_reading_an_empty_path_keeps_working() {
     .await;
 }
 
+// -- Every role's operators against the registries (#948, D-149 A) ----------
+
+const UNREGISTERED: &str = "OPERATOR_NOT_REGISTERED";
+
+/// A display whose `calculate` is `calculate`.
+fn display_calculating(calculate: Value) -> Value {
+    json!({"id": "note", "role": "display", "type": "paragraph", "content": "Note",
+           "calculate": calculate})
+}
+
+/// A component of `role`, not `data`, shown while `logic` holds. A layout
+/// holds `b`.
+fn non_data_shown_when(role: &str, logic: Value) -> Value {
+    let mut component = match role {
+        "display" => json!({"id": "note", "role": "display", "type": "paragraph",
+                            "content": "Note"}),
+        "layout" => json!({"id": "panel", "role": "layout", "type": "fieldset",
+                           "components": [number_field("b")]}),
+        _ => json!({"id": "go", "role": "action", "type": "button", "label": "Go",
+                    "action": "submit"}),
+    };
+    component["conditional"] = json!({"action": "show", "logic": logic});
+    component
+}
+
+/// The `(path, code)` of each detail of a refusal.
+fn details_of(response: &common::TestResponse) -> Vec<(String, String)> {
+    response.body["error"]["details"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .map(|detail| {
+            (
+                detail["path"].as_str().unwrap_or_default().to_owned(),
+                detail["code"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// `components` written into a draft and published, both behind the API, which
+/// since #948 refuses some of them at save: a form that went live before.
+async fn live_behind_the_api(app: &TestApp, token: &str, key: &str, components: Value) -> Uuid {
+    let clean = definition_of(key, json!([number_field("a")]));
+    let id = id_of(&create_form(app, token, key, clean).await);
+
+    store_behind_the_api(app, id, &definition_of(key, components)).await;
+    assert_eq!(
+        form_repo::publish(&app.pool, fixtures::SYSTEM_TENANT_ID, id, None)
+            .await
+            .expect("the draft is published behind the API"),
+        1
+    );
+
+    id
+}
+
+async fn submit(app: &TestApp, token: &str, id: Uuid, payload: Value) -> common::TestResponse {
+    app.send(
+        Method::POST,
+        &format!("/api/v1/rad/forms/{id}/submissions"),
+        Some(token),
+        Some(json!({ "payload": payload })),
+    )
+    .await
+}
+
+/// **#948 AC-50-1, the probe**, measured on `4e88d7f`. On a live form, a
+/// layout's and a display's `conditional` holding `datetime` is evaluated at a
+/// submit: this build of the engine knows no `datetime`, so it produces no
+/// value and the submission is refused at the component. A display's
+/// `calculate` holding the same is not evaluated: the form submits.
+#[tokio::test]
+async fn a_live_non_data_conditional_is_evaluated_at_submit_and_a_display_calculate_is_not() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let datetime = json!({"datetime": ["2026-08-25"]});
+
+    for (role, at) in [("layout", "panel"), ("display", "note")] {
+        let key = format!("probe-{role}");
+        let components = json!([
+            number_field("a"),
+            non_data_shown_when(role, datetime.clone())
+        ]);
+        let id = live_behind_the_api(&app, &token, &key, components).await;
+        let refused = submit(&app, &token, id, json!({"a": 1, "b": 5})).await;
+
+        assert_eq!(
+            details_of(&refused),
+            [(at.to_owned(), "EVALUATION_FAILED".to_owned())],
+            "{role}: {}",
+            refused.body
+        );
+    }
+
+    let components = json!([number_field("a"), display_calculating(datetime)]);
+    let id = live_behind_the_api(&app, &token, "probe-calculate", components).await;
+    let submitted = submit(&app, &token, id, json!({"a": 1})).await;
+
+    assert_eq!(submitted.status, StatusCode::CREATED, "{}", submitted.body);
+}
+
+/// **#948 AC-50-2 and AC-50-3.** At save, a display's `calculate` meets the
+/// Calculation Rule Registry, and a display's, a layout's and an action's
+/// `conditional` the floor, each at its own path; the floor's operators pass.
+///
+/// **Seen red** on `4e88d7f`: every refusal here stored with a `201`.
+#[tokio::test]
+async fn a_non_data_operator_no_registry_approves_is_refused_at_save() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let datetime = json!({"datetime": ["2026-08-25"]});
+    let mut cases = vec![
+        (display_calculating(json!({"Var": ""})), "calculate"),
+        (display_calculating(datetime.clone()), "calculate"),
+    ];
+
+    for role in ["display", "layout", "action"] {
+        cases.push((
+            non_data_shown_when(role, datetime.clone()),
+            "conditional.logic",
+        ));
+    }
+
+    for (index, (component, property)) in cases.into_iter().enumerate() {
+        let key = format!("non-data-{index}");
+        let document = definition_of(&key, json!([number_field("a"), component]));
+        let response = post_form(&app, &token, &key, document).await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{key}: {}",
+            response.body
+        );
+        assert_eq!(
+            details_of(&response),
+            [(
+                format!("definition.components.1.{property}"),
+                UNREGISTERED.to_owned()
+            )],
+            "{key}: {}",
+            response.body
+        );
+    }
+
+    let floor = json!({"and": [{">": [{"var": "a"}, 1]}, {"in": ["x", ["x", "y"]]}]});
+
+    for role in ["display", "layout", "action"] {
+        let key = format!("floor-{role}");
+        let document = definition_of(
+            &key,
+            json!([number_field("a"), non_data_shown_when(role, floor.clone())]),
+        );
+        let response = post_form(&app, &token, &key, document).await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::CREATED,
+            "{role}: {}",
+            response.body
+        );
+    }
+}
+
+/// **#948 AC-50-5.** A draft stored with the shape before the check is
+/// refused at publish, stays a draft and writes no audit row.
+///
+/// **Seen red** on `4e88d7f`: the draft published.
+#[tokio::test]
+async fn a_draft_stored_with_a_non_data_operator_is_refused_at_publish() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let key = "non-data-draft";
+    let datetime = json!({"datetime": ["2026-08-25"]});
+    let id = id_of(
+        &create_form(
+            &app,
+            &token,
+            key,
+            definition_of(key, json!([number_field("a")])),
+        )
+        .await,
+    );
+    let planted = definition_of(
+        key,
+        json!([
+            number_field("a"),
+            display_calculating(datetime.clone()),
+            non_data_shown_when("layout", datetime)
+        ]),
+    );
+
+    store_behind_the_api(&app, id, &planted).await;
+
+    let refused = publish(&app, &token, id).await;
+
+    assert_refused(
+        &app,
+        &token,
+        id,
+        &refused,
+        &[
+            ("definition.components.1.calculate", UNREGISTERED),
+            ("definition.components.2.conditional.logic", UNREGISTERED),
+        ],
+    )
+    .await;
+}
+
+/// **#948 AC-50-6.** A form live with the shape is not re-checked: it
+/// submits, its display's `calculate` unread, and its layout's `conditional`,
+/// `cat` in it, is still evaluated and hides `b`. Its next revision's save is
+/// refused at both.
+///
+/// **Seen red** on `4e88d7f`: the revision stored with a `201`.
+#[tokio::test]
+async fn a_form_live_with_a_non_data_operator_keeps_working_and_its_next_save_is_refused() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let key = "non-data-live";
+    let components = json!([
+        number_field("a"),
+        non_data_shown_when("layout", json!({"==": [{"cat": ["a", "b"]}, "x"]})),
+        display_calculating(json!({"datetime": ["2026-08-25"]}))
+    ]);
+    let id = live_behind_the_api(&app, &token, key, components.clone()).await;
+    let submitted = submit(&app, &token, id, json!({"a": 1, "b": 5})).await;
+
+    assert_eq!(submitted.status, StatusCode::CREATED, "{}", submitted.body);
+    assert!(
+        submitted.body["data"]["payload"].get("b").is_none(),
+        "{}",
+        submitted.body
+    );
+
+    let revised = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/rad/forms/{id}/revisions"),
+            Some(&token),
+            Some(json!({"definition": definition_of(key, components)})),
+        )
+        .await;
+
+    assert_eq!(
+        details_of(&revised),
+        [
+            ("definition.components.1.conditional.logic", UNREGISTERED),
+            ("definition.components.2.calculate", UNREGISTERED),
+        ]
+        .map(|(path, code)| (path.to_owned(), code.to_owned())),
+        "{}",
+        revised.body
+    );
+}
+
 /// **#822 AC4, past the shapes it names.** The server never runs an `enable` or
 /// `disable`, and a browser does; a `generated` field is computed once; an
 /// action has a `conditional`; and `type` is an open vocabulary, so a row
