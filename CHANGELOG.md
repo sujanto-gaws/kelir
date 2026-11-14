@@ -1083,6 +1083,12 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **`SECURITY.md` states its response times**
+  ([#975](https://github.com/sujanto-gaws/kelir/issues/975)). A report is
+  acknowledged within 3 business days, first assessed within 10 business
+  days, and updated at least every 14 days while a fix is in progress.
+  Before, the three times were placeholders.
+
 - **The workflow editor opens a large draft in under a second**
   ([#800](https://github.com/sujanto-gaws/kelir/issues/800), construction
   plan 21 row 38). Above 40 states or 112 transitions, the list shows each

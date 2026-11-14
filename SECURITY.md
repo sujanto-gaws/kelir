@@ -29,9 +29,9 @@ Test only against an installation you run yourself. Do not test against anyone e
 
 ## What happens next
 
-- **Acknowledgement:** within **[TO BE SET BY THE MAINTAINER]** of the report.
-- **Assessment:** a first assessment, with whether the report is accepted, within **[TO BE SET BY THE MAINTAINER]**.
-- **Updates:** at least every **[TO BE SET BY THE MAINTAINER]** while a fix is in progress.
+- **Acknowledgement:** within **3 business days** of the report.
+- **Assessment:** a first assessment, with whether the report is accepted, within **10 business days**.
+- **Updates:** at least every **14 days** while a fix is in progress.
 - **If it is accepted:** the fix is developed in a private security advisory and released in a patch of the supported line. The advisory is then published with credit to the reporter, unless they ask not to be named.
 - **If it is declined:** the reply says why, and whether it is treated as an ordinary bug instead.
 
