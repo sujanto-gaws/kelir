@@ -163,7 +163,13 @@ async fn published_form(app: &TestApp, token: &str, key: &str) -> Uuid {
 }
 
 async fn document_type(app: &TestApp, token: &str, code: &str, workflow: Uuid) -> Uuid {
-    document_type_bound(app, token, code, json!({ "workflowDefinitionId": workflow })).await
+    document_type_bound(
+        app,
+        token,
+        code,
+        json!({ "workflowDefinitionId": workflow }),
+    )
+    .await
 }
 
 /// A document type bound by `binding`, sent as the caller wrote it.
@@ -792,7 +798,12 @@ async fn a_blank_binding_condition_is_stored_null_and_starts_the_approval() {
 
         let document = draft(&app, &token, type_id, 5_000).await;
         let submitted = submit(&app, &token, document).await;
-        assert_eq!(submitted.status, StatusCode::OK, "{code}: {}", submitted.body);
+        assert_eq!(
+            submitted.status,
+            StatusCode::OK,
+            "{code}: {}",
+            submitted.body
+        );
         assert_eq!(
             instances_of(&app, document).await,
             1,
@@ -813,8 +824,12 @@ async fn a_blank_condition_already_stored_starts_the_approval() {
     let token = app.administrator_token().await;
     approver_role(&app).await;
 
-    let workflow =
-        publish_workflow(&app, &token, branching_workflow("wf_cond_stored_blank", 10, true)).await;
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        branching_workflow("wf_cond_stored_blank", 10, true),
+    )
+    .await;
     let type_id = document_type(&app, &token, "PR_COND_STORED_BLANK", workflow).await;
 
     sqlx::query(
