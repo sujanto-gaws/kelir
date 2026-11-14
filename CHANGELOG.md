@@ -1089,6 +1089,18 @@ While the major version is `0`, the public API may change in any release.
   days, and updated at least every 14 days while a fix is in progress.
   Before, the three times were placeholders.
 
+- **A blank workflow-binding condition starts the approval**
+  ([#970](https://github.com/sujanto-gaws/kelir/issues/970)). A document
+  type bound with a `conditionExpression` that is empty, whitespace or
+  invisible alone (such as U+200B) is now stored as `null`, the default
+  binding, and its documents start their approval on submission. Before,
+  the blank was stored as sent and read as a condition this release does
+  not evaluate, so the document submitted with no approval. A blank stored
+  before the upgrade is read the same way and needs no repair. A visible
+  condition is now stored trimmed, so a client comparing its own sent body
+  rather than the one it read back may see the leading and trailing spaces
+  gone.
+
 - **The workflow editor opens a large draft in under a second**
   ([#800](https://github.com/sujanto-gaws/kelir/issues/800), construction
   plan 21 row 38). Above 40 states or 112 transitions, the list shows each

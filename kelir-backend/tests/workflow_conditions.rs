@@ -163,6 +163,17 @@ async fn published_form(app: &TestApp, token: &str, key: &str) -> Uuid {
 }
 
 async fn document_type(app: &TestApp, token: &str, code: &str, workflow: Uuid) -> Uuid {
+    document_type_bound(
+        app,
+        token,
+        code,
+        json!({ "workflowDefinitionId": workflow }),
+    )
+    .await
+}
+
+/// A document type bound by `binding`, sent as the caller wrote it.
+async fn document_type_bound(app: &TestApp, token: &str, code: &str, binding: Value) -> Uuid {
     let form = published_form(app, token, &code.to_lowercase().replace('_', "-")).await;
 
     let created = app
@@ -173,7 +184,7 @@ async fn document_type(app: &TestApp, token: &str, code: &str, workflow: Uuid) -
                 "typeCode": code,
                 "name": code,
                 "formId": form,
-                "workflows": [{ "workflowDefinitionId": workflow }],
+                "workflows": [binding],
             }),
         )
         .await;
@@ -721,4 +732,169 @@ async fn the_trail_is_on_the_wire_for_the_screen_that_shows_the_history() {
         .clone();
 
     assert!(start["routing"].is_null(), "{start}");
+}
+
+// ---------------------------------------------------------------------------
+// #970 — a blank binding condition is no condition
+// ---------------------------------------------------------------------------
+
+/// How many workflow instances a document has.
+async fn instances_of(app: &TestApp, document_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow_instances WHERE document_id = $1")
+        .bind(document_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("count the instances")
+}
+
+/// **A binding sent with a blank `conditionExpression` is the default
+/// binding, and its documents start their approval** ([#970]).
+///
+/// A blank optional body text is absent (#797; coding standard line 81), and
+/// an absent `conditionExpression` is the default binding. Before #970 the
+/// blank was stored as sent, `workflow_binding` answered `is_some()`, and
+/// `start_workflow` skipped it as a condition this release does not evaluate:
+/// the document submitted with no approval. Each blank here is one the
+/// standard names: empty, whitespace, and U+200B alone.
+///
+/// Seen red before the fix: each blank was stored as sent and the submission
+/// started 0 instances. The `null` control started 1 both before and after.
+///
+/// [#970]: https://github.com/sujanto-gaws/kelir/issues/970
+#[tokio::test]
+async fn a_blank_binding_condition_is_stored_null_and_starts_the_approval() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    approver_role(&app).await;
+
+    let workflow =
+        publish_workflow(&app, &token, branching_workflow("wf_cond_blank", 10, true)).await;
+
+    let cases: [(&str, Value); 4] = [
+        ("PR_COND_BLANK_NULL", Value::Null),
+        ("PR_COND_BLANK_EMPTY", json!("")),
+        ("PR_COND_BLANK_SPACES", json!("   ")),
+        ("PR_COND_BLANK_ZWSP", json!("\u{200B}")),
+    ];
+
+    for (code, condition) in cases {
+        let type_id = document_type_bound(
+            &app,
+            &token,
+            code,
+            json!({ "workflowDefinitionId": workflow, "conditionExpression": condition }),
+        )
+        .await;
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT condition_expression FROM document_type_workflows \
+             WHERE document_type_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(type_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("read the binding");
+        assert_eq!(stored, None, "{code}: a blank condition is stored null");
+
+        let document = draft(&app, &token, type_id, 5_000).await;
+        let submitted = submit(&app, &token, document).await;
+        assert_eq!(
+            submitted.status,
+            StatusCode::OK,
+            "{code}: {}",
+            submitted.body
+        );
+        assert_eq!(
+            instances_of(&app, document).await,
+            1,
+            "{code}: the submission starts the approval"
+        );
+    }
+}
+
+/// **A blank condition stored before #970 is read as no condition too.**
+///
+/// The write no longer stores one, but a deployment upgraded from 0.9.x may
+/// hold one already, so `workflow_binding` asks `non_blank` rather than
+/// `is_some()`. The row is written blank directly, as an older release stored
+/// it. Seen red before the fix: 0 instances.
+#[tokio::test]
+async fn a_blank_condition_already_stored_starts_the_approval() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    approver_role(&app).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        branching_workflow("wf_cond_stored_blank", 10, true),
+    )
+    .await;
+    let type_id = document_type(&app, &token, "PR_COND_STORED_BLANK", workflow).await;
+
+    sqlx::query(
+        "UPDATE document_type_workflows SET condition_expression = $2 \
+         WHERE document_type_id = $1",
+    )
+    .bind(type_id)
+    .bind(" \u{200B} ")
+    .execute(&app.pool)
+    .await
+    .expect("store a blank condition as an older release did");
+
+    let document = draft(&app, &token, type_id, 5_000).await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(instances_of(&app, document).await, 1);
+}
+
+/// **An update that sends a blank condition stores it null too.**
+///
+/// Create and update both write through `replace_workflows`, and this pins the
+/// update's path, which the create-only tests above do not: a binding that held
+/// a condition is replaced by one whose condition is blank, and the type's
+/// documents then start their approval. Seen red with the write's `non_blank`
+/// removed: the update stored `"   "` and the submission started 0 instances.
+#[tokio::test]
+async fn an_update_that_sends_a_blank_condition_stores_it_null() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    approver_role(&app).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        branching_workflow("wf_cond_put_blank", 10, true),
+    )
+    .await;
+    let type_id = document_type_bound(
+        &app,
+        &token,
+        "PR_COND_PUT_BLANK",
+        json!({ "workflowDefinitionId": workflow, "conditionExpression": "amount > 5" }),
+    )
+    .await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}"),
+            Some(&token),
+            Some(json!({
+                "name": "PR_COND_PUT_BLANK",
+                "workflows": [{ "workflowDefinitionId": workflow, "conditionExpression": "   " }]
+            })),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    assert!(
+        updated.body["data"]["workflows"][0]["conditionExpression"].is_null(),
+        "{}",
+        updated.body
+    );
+
+    let document = draft(&app, &token, type_id, 5_000).await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(instances_of(&app, document).await, 1);
 }

@@ -119,7 +119,9 @@ pub struct WorkflowBinding {
     /// that PUTs the whole type. It stays bound to that revision, and a
     /// submission still refuses it (#187, #713).
     pub workflow_definition_id: Uuid,
-    /// `null` means this is the default binding.
+    /// `null` means this is the default binding. A blank value (empty,
+    /// whitespace, or invisible characters alone) is stored `null`, and a
+    /// visible one is stored trimmed (#970).
     pub condition_expression: Option<String>,
     #[serde(default = "default_priority")]
     pub priority: i32,

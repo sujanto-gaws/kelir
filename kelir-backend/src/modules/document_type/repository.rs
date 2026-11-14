@@ -7,6 +7,7 @@ use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use crate::utils::search::like_contains;
+use crate::utils::text::non_blank;
 
 use super::domain::{
     DocumentType, DocumentTypeStatus, DocumentTypeSummary, SecurityLevel, WorkflowBinding,
@@ -527,7 +528,9 @@ pub async fn replace_workflows(
             tenant_id,
             document_type_id,
             binding.workflow_definition_id,
-            binding.condition_expression.as_deref(),
+            // A blank condition is no condition (#970): stored null, it is
+            // the default binding, and a submission starts its approval.
+            binding.condition_expression.as_deref().and_then(non_blank),
             binding.priority,
             binding.valid_from,
             binding.valid_to,
@@ -643,7 +646,8 @@ pub async fn has_documents<'e, E: PgExecutor<'e>>(
 ///
 /// * `status = 'ACTIVE'`, so a binding can be turned off without deleting it;
 /// * the `valid_from` / `valid_to` window, evaluated against today;
-/// * `condition_expression IS NULL`.
+/// * `condition_expression IS NULL`, or [blank](non_blank), which is the
+///   same thing (#970).
 ///
 /// **The third is the one worth arguing.** That column holds the *superseded*
 /// string form of a condition (`'amount <= 10000000'`) — JWSS §1.1 replaces it
@@ -738,7 +742,11 @@ pub async fn workflow_binding<'e, E: sqlx::PgExecutor<'e>>(
     Ok(row.map(|row| {
         (
             row.workflow_definition_id,
-            row.condition_expression.is_some(),
+            // One stored blank before #970 is no condition either.
+            row.condition_expression
+                .as_deref()
+                .and_then(non_blank)
+                .is_some(),
         )
     }))
 }
