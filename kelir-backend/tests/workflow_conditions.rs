@@ -847,3 +847,54 @@ async fn a_blank_condition_already_stored_starts_the_approval() {
     assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
     assert_eq!(instances_of(&app, document).await, 1);
 }
+
+/// **An update that sends a blank condition stores it null too.**
+///
+/// Create and update both write through `replace_workflows`, and this pins the
+/// update's path, which the create-only tests above do not: a binding that held
+/// a condition is replaced by one whose condition is blank, and the type's
+/// documents then start their approval. Seen red with the write's `non_blank`
+/// removed: the update stored `"   "` and the submission started 0 instances.
+#[tokio::test]
+async fn an_update_that_sends_a_blank_condition_stores_it_null() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    approver_role(&app).await;
+
+    let workflow = publish_workflow(
+        &app,
+        &token,
+        branching_workflow("wf_cond_put_blank", 10, true),
+    )
+    .await;
+    let type_id = document_type_bound(
+        &app,
+        &token,
+        "PR_COND_PUT_BLANK",
+        json!({ "workflowDefinitionId": workflow, "conditionExpression": "amount > 5" }),
+    )
+    .await;
+
+    let updated = app
+        .send(
+            Method::PUT,
+            &format!("/api/v1/document-types/{type_id}"),
+            Some(&token),
+            Some(json!({
+                "name": "PR_COND_PUT_BLANK",
+                "workflows": [{ "workflowDefinitionId": workflow, "conditionExpression": "   " }]
+            })),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    assert!(
+        updated.body["data"]["workflows"][0]["conditionExpression"].is_null(),
+        "{}",
+        updated.body
+    );
+
+    let document = draft(&app, &token, type_id, 5_000).await;
+    let submitted = submit(&app, &token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    assert_eq!(instances_of(&app, document).await, 1);
+}

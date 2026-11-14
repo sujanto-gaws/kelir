@@ -1096,7 +1096,10 @@ While the major version is `0`, the public API may change in any release.
   binding, and its documents start their approval on submission. Before,
   the blank was stored as sent and read as a condition this release does
   not evaluate, so the document submitted with no approval. A blank stored
-  before the upgrade is read the same way and needs no repair.
+  before the upgrade is read the same way and needs no repair. A visible
+  condition is now stored trimmed, so a client comparing its own sent body
+  rather than the one it read back may see the leading and trailing spaces
+  gone.
 
 - **The workflow editor opens a large draft in under a second**
   ([#800](https://github.com/sujanto-gaws/kelir/issues/800), construction
