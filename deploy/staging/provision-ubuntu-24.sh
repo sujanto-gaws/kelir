@@ -217,7 +217,10 @@ else
         "CREATE ROLE ${KELIR_DB_APP_USER} WITH LOGIN PASSWORD '${DB_APP_PASSWORD}'"
 fi
 
+# One transaction: a running kelir_app never sees the moment between the
+# GRANT ON ALL TABLES and the two REVOKEs, when it could write _sqlx_migrations.
 sudo -u postgres psql -q -v ON_ERROR_STOP=1 -d "${KELIR_DB_NAME}" <<SQL
+BEGIN;
 GRANT CONNECT ON DATABASE ${KELIR_DB_NAME} TO ${KELIR_DB_APP_USER};
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO ${KELIR_DB_APP_USER};
@@ -237,6 +240,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE ${KELIR_DB_USER} IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${KELIR_DB_APP_USER};
 ALTER DEFAULT PRIVILEGES FOR ROLE ${KELIR_DB_USER} IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO ${KELIR_DB_APP_USER};
+COMMIT;
 SQL
 
 # ---------------------------------------------------------------------------

@@ -543,73 +543,97 @@ impl std::error::Error for ServingRoleError {
 }
 
 /// What [`check_serving_posture`] reads, on the serving pool.
+///
+/// The privilege lists are text, empty when nothing is held, so the query
+/// names each privilege it found rather than answering a flag per privilege.
 #[derive(sqlx::FromRow)]
 struct ServingRolePosture {
     role: String,
     superuser: bool,
+    creates_roles: bool,
     owner: String,
     member_of_owner: bool,
-    can_update: bool,
-    can_delete: bool,
-    can_truncate: bool,
+    memberships: String,
+    owned_relations: i64,
+    owned_examples: String,
+    audit_writes: String,
+    migration_writes: String,
     creates_in_public: bool,
+    creates_in_the_database: bool,
 }
 
 /// The serving role's posture, read on its own pool before the server binds
-/// (ADR-0051 §2). It is refused when it:
+/// (ADR-0051 §2, Database Schema §1.5.1). It is refused when it:
 ///
-/// - is a superuser;
-/// - is a member of the owner of `audit_events`, the owner itself included;
-/// - holds any of `UPDATE`, `DELETE`, `TRUNCATE` on `audit_events`;
-/// - holds `CREATE` on schema `public`.
+/// - is a superuser, or holds `CREATEROLE`;
+/// - is a member of the owner of `audit_events`, the owner itself included,
+///   or of any other role, directly or inherited: `pg_write_all_data` and the
+///   roles that reach the server's files and programs among them;
+/// - owns a relation;
+/// - holds `UPDATE`, on the table or on any column, `DELETE` or `TRUNCATE` on
+///   `audit_events`;
+/// - holds any write on `_sqlx_migrations`, on the table or on a column;
+/// - holds `CREATE` on schema `public` or on the database.
 ///
 /// So one URL naming the owner twice, a serving role granted too much, or a
 /// superuser in `KELIR_DATABASE_URL` cannot pass for the deployed shape.
 /// Privileges are read as effective ones, so a grant through `PUBLIC` or a
-/// membership counts.
+/// membership counts, and the narrowing, which revokes from the role by name,
+/// cannot take those back.
 pub async fn check_serving_posture(serving: &PgPool) -> Result<(), ServingRoleError> {
     let posture: ServingRolePosture = sqlx::query_as(
         "SELECT current_user::text AS role,
                 r.rolsuper AS superuser,
+                r.rolcreaterole AS creates_roles,
                 pg_get_userbyid(c.relowner)::text AS owner,
                 pg_has_role(current_user, c.relowner, 'MEMBER') AS member_of_owner,
-                has_table_privilege(c.oid, 'UPDATE') AS can_update,
-                has_table_privilege(c.oid, 'DELETE') AS can_delete,
-                has_table_privilege(c.oid, 'TRUNCATE') AS can_truncate,
-                has_schema_privilege('public', 'CREATE') AS creates_in_public
-         FROM pg_roles r, pg_class c
+                coalesce((
+                    SELECT string_agg(m.rolname::text, ', ' ORDER BY m.rolname)
+                    FROM pg_roles m
+                    WHERE NOT r.rolsuper
+                      AND m.oid NOT IN (r.oid, c.relowner)
+                      AND pg_has_role(r.oid, m.oid, 'MEMBER')
+                ), '') AS memberships,
+                (
+                    SELECT count(*)
+                    FROM pg_class o
+                    WHERE NOT r.rolsuper AND o.relowner = r.oid AND o.relpersistence <> 't'
+                ) AS owned_relations,
+                coalesce((
+                    SELECT string_agg(owned.relname, ', ')
+                    FROM (
+                        SELECT o.relname::text AS relname
+                        FROM pg_class o
+                        WHERE NOT r.rolsuper AND o.relowner = r.oid AND o.relpersistence <> 't'
+                        ORDER BY 1
+                        LIMIT 5
+                    ) owned
+                ), '') AS owned_examples,
+                array_to_string(ARRAY(
+                    SELECT verb
+                    FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) AS verb
+                    WHERE has_table_privilege(c.oid, verb)
+                       OR (verb = 'UPDATE' AND has_any_column_privilege(c.oid, verb))
+                ), ', ') AS audit_writes,
+                coalesce(array_to_string(ARRAY(
+                    SELECT verb
+                    FROM unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS verb
+                    WHERE has_table_privilege(migrations.oid, verb)
+                       OR (verb IN ('INSERT', 'UPDATE') AND has_any_column_privilege(migrations.oid, verb))
+                ), ', '), '') AS migration_writes,
+                has_schema_privilege('public', 'CREATE') AS creates_in_public,
+                has_database_privilege(current_database(), 'CREATE') AS creates_in_the_database
+         FROM pg_roles r
+         CROSS JOIN pg_class c
+         LEFT JOIN pg_class migrations
+             ON migrations.oid = to_regclass('public._sqlx_migrations')
          WHERE r.rolname = current_user AND c.oid = 'audit_events'::regclass",
     )
     .fetch_one(serving)
     .await
     .map_err(|error| ServingRoleError::Unreadable(name_the_tls_settings(error)))?;
 
-    let mut found = Vec::new();
-
-    if posture.superuser {
-        found.push("it is a superuser".to_owned());
-    }
-    if posture.member_of_owner {
-        found.push(format!(
-            "it is, or is a member of, `{}`, the owner of audit_events",
-            posture.owner
-        ));
-    }
-
-    let writes: Vec<&str> = [
-        ("UPDATE", posture.can_update),
-        ("DELETE", posture.can_delete),
-        ("TRUNCATE", posture.can_truncate),
-    ]
-    .into_iter()
-    .filter_map(|(privilege, held)| held.then_some(privilege))
-    .collect();
-    if !writes.is_empty() {
-        found.push(format!("it holds {} on audit_events", writes.join(", ")));
-    }
-    if posture.creates_in_public {
-        found.push("it holds CREATE on schema public".to_owned());
-    }
+    let found = posture.findings();
 
     if found.is_empty() {
         Ok(())
@@ -618,6 +642,52 @@ pub async fn check_serving_posture(serving: &PgPool) -> Result<(), ServingRoleEr
             role: posture.role,
             found,
         })
+    }
+}
+
+impl ServingRolePosture {
+    /// Each thing the role holds that the serving role may not, as a phrase.
+    fn findings(&self) -> Vec<String> {
+        let mut found = Vec::new();
+
+        if self.superuser {
+            found.push("it is a superuser".to_owned());
+        }
+        if self.creates_roles {
+            found.push("it holds CREATEROLE".to_owned());
+        }
+        if self.member_of_owner {
+            found.push(format!(
+                "it is, or is a member of, `{}`, the owner of audit_events",
+                self.owner
+            ));
+        }
+        if !self.memberships.is_empty() {
+            found.push(format!("it is a member of {}", self.memberships));
+        }
+        if self.owned_relations > 0 {
+            found.push(format!(
+                "it owns {} relation(s), among them {}",
+                self.owned_relations, self.owned_examples
+            ));
+        }
+        if !self.audit_writes.is_empty() {
+            found.push(format!("it holds {} on audit_events", self.audit_writes));
+        }
+        if !self.migration_writes.is_empty() {
+            found.push(format!(
+                "it holds {} on _sqlx_migrations",
+                self.migration_writes
+            ));
+        }
+        if self.creates_in_public {
+            found.push("it holds CREATE on schema public".to_owned());
+        }
+        if self.creates_in_the_database {
+            found.push("it holds CREATE on the database".to_owned());
+        }
+
+        found
     }
 }
 
