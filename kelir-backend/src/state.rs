@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use sqlx::PgPool;
-use tokio_util::task::TaskTracker;
 
 use crate::config::AppConfig;
+use crate::detached::DetachedTasks;
 use crate::mail::Mailer;
 use crate::middleware::rate_limit::RateLimiter;
 use crate::modules::attachment::storage::ObjectStorage;
@@ -35,11 +35,12 @@ pub struct AppState {
     /// the reset mail ([`Mailer::send_detached`]).
     ///
     /// Tracked rather than spawned loose so a stop can wait for it ([#856]):
-    /// `server::serve` closes this once the last request has been answered and
-    /// waits for what is left, up to the stop's deadline.
+    /// `server::serve` closes this once the last request has been answered,
+    /// waits for what is left up to the stop's deadline, and abandons the
+    /// rest.
     ///
     /// [#856]: https://github.com/sujanto-gaws/kelir/issues/856
-    pub detached: TaskTracker,
+    pub detached: DetachedTasks,
 }
 
 impl AppState {
@@ -70,7 +71,7 @@ impl AppState {
             rate_limiter: Arc::new(RateLimiter::new()),
             mailer,
             storage,
-            detached: TaskTracker::new(),
+            detached: DetachedTasks::new(),
         }
     }
 }

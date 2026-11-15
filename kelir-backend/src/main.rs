@@ -43,6 +43,9 @@ fn init_tracing() {
 }
 
 async fn run() -> anyhow::Result<()> {
+    // First, so a stop signal that arrives while the backend migrates or
+    // bootstraps is held for the stop rather than ending it there (#856).
+    let shutdown = shutdown_signal()?;
     let config = AppConfig::from_env()?;
 
     tracing::info!(
@@ -76,43 +79,52 @@ async fn run() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
     tracing::info!(address = %bind_address, "listening");
 
-    server::serve(listener, state, shutdown_signal()?).await?;
+    server::serve(listener, state, shutdown).await?;
 
     Ok(())
 }
 
-/// Completes on SIGTERM, which `docker stop` sends, or on Ctrl-C (#856).
+/// Completes on SIGTERM, which `docker stop` sends, or on SIGINT, which Ctrl-C
+/// sends (#856).
 ///
-/// **SIGTERM is listened for from here, before serving**, not from when the
-/// future is first polled: the binary is the container's PID 1, and PID 1
+/// **Both are listened for from when this is called**, first thing in `run`,
+/// not from when the future is first polled: the binary is the container's PID 1, and PID 1
 /// ignores a signal it has no handler for, which is why `docker stop` used to
-/// wait out its ten seconds and kill. A handler that cannot be installed fails
-/// startup rather than leaving a process that can only be killed.
+/// wait out its ten seconds and kill. Installed up front, a SIGINT during
+/// startup is held for the stop rather than ending the process outright. A
+/// handler that cannot be installed fails startup rather than leaving a
+/// process that can only be killed.
+///
+/// The handlers stay installed after the first signal, so a second one during
+/// the stop is ignored rather than killing the drain.
+#[cfg(unix)]
 fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
-    #[cfg(unix)]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
 
     Ok(async move {
-        #[cfg(unix)]
-        let terminated = async move {
-            terminate.recv().await;
-        };
-        // No SIGTERM off Unix; a developer's machine stops on Ctrl-C.
-        #[cfg(not(unix))]
-        let terminated = std::future::pending::<()>();
+        tokio::select! {
+            _ = terminate.recv() => tracing::info!("SIGTERM received"),
+            _ = interrupt.recv() => tracing::info!("SIGINT received"),
+        }
+    })
+}
 
-        let interrupted = async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                // Not a stop: SIGTERM is still heard, and stopping on the error
-                // would stop a healthy process at once.
+/// Completes on Ctrl-C. There is no SIGTERM off Unix, and a developer's
+/// machine stops on Ctrl-C.
+#[cfg(not(unix))]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
+    Ok(async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => tracing::info!("Ctrl-C received"),
+            // Not a stop: stopping on the error would stop a healthy process at
+            // once.
+            Err(error) => {
                 tracing::error!(%error, "could not listen for Ctrl-C");
                 std::future::pending::<()>().await;
             }
-        };
-
-        tokio::select! {
-            () = terminated => tracing::info!("SIGTERM received"),
-            () = interrupted => tracing::info!("Ctrl-C received"),
         }
     })
 }

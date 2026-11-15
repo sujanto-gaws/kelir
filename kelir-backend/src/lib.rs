@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod db;
+pub mod detached;
 pub mod error;
 pub mod extract;
 pub mod health;

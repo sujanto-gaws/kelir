@@ -1170,16 +1170,20 @@ While the major version is `0`, the public API may change in any release.
 ### Fixed
 
 - **A stop finishes the work in hand**
-  ([#856](https://github.com/sujanto-gaws/kelir/issues/856)). On SIGTERM,
-  which `docker stop` sends, or on Ctrl-C, the backend stops accepting
-  connections, answers the requests it already holds, waits for a reset
-  mail it has handed off, and stops the attachment scanner, the
-  notification sender and the outbox worker, then exits. The whole stop
-  is bounded at 8 seconds, inside Docker's 10; whatever is still running
-  then is abandoned and logged, and a worker's claimed rows return when
-  their lease passes, as after a crash. Before, the backend ignored
-  SIGTERM, so `docker stop` waited 10 seconds and killed it (`Exited
-  (137)`), and the requests and the reset mail in flight were lost.
+  ([#856](https://github.com/sujanto-gaws/kelir/issues/856)). On
+  SIGTERM, which `docker stop` sends, or on Ctrl-C, the backend stops
+  accepting connections, answers the requests it already holds, waits
+  for a reset mail it has handed off, and stops the attachment scanner,
+  the notification sender and the outbox worker, then exits. The whole
+  stop is bounded at 8 seconds, inside Docker's 10, which the shipped
+  compose files now pin as `stop_grace_period: 10s`. Whatever is still
+  running then is aborted and logged: a request still being handled is
+  answered 503 `SHUTTING_DOWN` and a change it had not committed is
+  rolled back, a reset mail still sending is not sent, and a worker's
+  claimed rows return when their lease passes, as after a crash. A stop
+  that overran still exits 0. Before, the backend ignored SIGTERM, so
+  `docker stop` waited 10 seconds and killed it (`Exited (137)`), and
+  the requests and the reset mail in flight were lost.
 
 - **Two backends send each notification email once**
   ([#853](https://github.com/sujanto-gaws/kelir/issues/853)). The
