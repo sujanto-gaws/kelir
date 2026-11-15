@@ -181,7 +181,8 @@ async fn abandon_at_deadline(
             Json(ErrorEnvelope::new(
                 "SHUTTING_DOWN",
                 "The server stopped before this request was answered. A change it \
-                 had not committed was rolled back.",
+                 had not committed was rolled back; one it had already committed \
+                 stands, so check before repeating the request.",
                 Vec::new(),
             )),
         )

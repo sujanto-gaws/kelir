@@ -1178,8 +1178,9 @@ While the major version is `0`, the public API may change in any release.
   stop is bounded at 8 seconds, inside Docker's 10, which the shipped
   compose files now pin as `stop_grace_period: 10s`. Whatever is still
   running then is aborted and logged: a request still being handled is
-  answered 503 `SHUTTING_DOWN` and a change it had not committed is
-  rolled back, a reset mail still sending is not sent, and a worker's
+  answered 503 `SHUTTING_DOWN`, a change it had not committed is rolled
+  back and one it had committed stands (the 503 says to check before
+  repeating), a reset mail still sending is not sent, and a worker's
   claimed rows return when their lease passes, as after a crash. A stop
   that overran still exits 0. A stop that arrives while the backend is
   still starting, for example while its migrations wait on a database
