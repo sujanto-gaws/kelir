@@ -114,77 +114,138 @@ pub async fn find_credentials_by_id(
     .await
 }
 
+/// Records a successful sign-in: stamps `last_login_at` and clears the
+/// failed-login count and the lock. Returns whether the row matched.
+///
+/// **Only while the stored hash is still `password_hash`, the one the sign-in
+/// verified** (#855's closing gate). The reset runs on the pool after the
+/// sign-in's transaction commits, so a password write can land between the two.
+/// That write resets the count itself, and failures counted after it are
+/// guesses against the new password: a reset that matched no hash erased them,
+/// and an attacker was checked more than five times against the new password
+/// before the lock. When the hash has changed, the statement matches nothing
+/// and changes nothing, `last_login_at` included.
 pub async fn record_successful_login(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
     user_id: Uuid,
-) -> Result<(), sqlx::Error> {
+    password_hash: &str,
+) -> Result<bool, sqlx::Error> {
     sqlx::query!(
         r#"
         UPDATE users
         SET last_login_at = now(), failed_login_count = 0, locked_until = NULL, updated_at = now()
-        WHERE tenant_id = $1 AND id = $2
+        WHERE tenant_id = $1 AND id = $2 AND password_hash = $3
         "#,
         tenant_id,
-        user_id
+        user_id,
+        password_hash
     )
     .execute(executor)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected() == 1)
 }
 
-/// What recording a failed sign-in left behind.
+/// What counting a sign-in attempt left behind.
 #[derive(Debug)]
-pub struct FailedLogin {
-    /// Failures counted since the last success, password change or lockout.
+pub struct CountedAttempt {
+    /// Attempts counted since the last success, password change or lockout.
+    /// Zero when this attempt was the one that locked the account.
     pub failed_login_count: i32,
     /// When the lockout ends, if the account is under one.
     pub locked_until: Option<DateTime<Utc>>,
 }
 
-/// Counts a failed sign-in and locks the account once `threshold` failures have
-/// accumulated, for `lockout_minutes` (NFR-SEC-008).
+impl CountedAttempt {
+    /// The lockout this attempt put on, if it was the one that did.
+    ///
+    /// Only the locking attempt leaves the counter at zero: one that did not
+    /// lock left it at one or more. An expired `locked_until` from an earlier
+    /// run is not this attempt's.
+    pub fn locked(&self) -> Option<DateTime<Utc>> {
+        self.locked_until.filter(|_| self.failed_login_count == 0)
+    }
+}
+
+/// Counts a sign-in attempt as a failure **before its password is checked**,
+/// and locks the account once `threshold` have accumulated, for
+/// `lockout_minutes` (NFR-SEC-008, #855). `None` when, by the time the
+/// statement reaches the row, the account is locked, deleted, or no longer
+/// holds `password_hash`, the hash the sign-in read and will verify against:
+/// the attempt is refused, and its password is not checked.
 ///
-/// Counting and locking are one statement because they are one decision. As two
-/// writes they race: concurrent attempts each read a count below the threshold,
-/// each increments, and none of them locks.
+/// **Counting before the check is what bounds a burst.** Counted after it,
+/// every attempt in flight read the account unlocked, checked its password,
+/// and only then counted: a burst of any size was that many guesses. Here the
+/// statement takes the row, so concurrent attempts, through any number of
+/// backends, count one after another, each against the count and the lock the
+/// one before it committed. The one that reaches `threshold` locks, and every
+/// attempt after it finds the lock and matches nothing. So at most `threshold`
+/// passwords are checked between a success, a password write or an expired
+/// lock, and the next.
+///
+/// **A count is never given back** (#855's closing gate). A sign-in refused
+/// because the password changed during it (ADR-0048) is not counted towards a
+/// lockout, and that holds without a give-back, because of the `password_hash`
+/// match:
+/// - a password write that commits before the count leaves a hash the count
+///   does not match, so nothing is counted, and the sign-in is refused here;
+/// - one that commits after the count resets the counter (`set_password_hash`),
+///   which removes this attempt's count with the rest.
+///
+/// A give-back in the second case took one from failures counted since the
+/// write, and gave an attacker a sixth check.
+///
+/// A sign-in whose password then verifies is cleared by
+/// [`record_successful_login`], which resets the counter and the lock while
+/// the hash it verified is still stored. An
+/// attempt that never answers, or that verified and then failed on a server
+/// error, stays counted as the failure it was assumed to be, and its lock
+/// expires like any other.
+///
+/// The statement holds the row for itself only, in the `FOR NO KEY UPDATE` an
+/// `UPDATE` of non-key columns takes, and commits before the sign-in opens its
+/// transaction (ADR-0048). It conflicts with no stamping key's `FOR KEY SHARE`
+/// (record 23 §5.1).
 ///
 /// The counter resets as the lock goes on, so the next lockout needs a fresh run
 /// of `threshold` failures rather than a single failure against a counter left
-/// sitting at the threshold. `locked_until` is returned rather than a flag
-/// because the caller cannot otherwise tell a lock this attempt applied from an
-/// expired one left by an earlier run.
+/// sitting at the threshold.
 ///
 /// Tenant-scoped like every other identity write (FR-IDM-009): the counter
 /// belongs to a user *within* a tenant, so the same user id may only ever be
 /// touched through the tenant the sign-in resolved to.
-pub async fn record_failed_login(
+pub async fn count_sign_in_attempt(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
     user_id: Uuid,
+    password_hash: &str,
     threshold: i32,
     lockout_minutes: i32,
-) -> Result<FailedLogin, sqlx::Error> {
+) -> Result<Option<CountedAttempt>, sqlx::Error> {
     sqlx::query_as!(
-        FailedLogin,
+        CountedAttempt,
         r#"
         UPDATE users
         SET failed_login_count =
-                CASE WHEN failed_login_count + 1 >= $3 THEN 0
+                CASE WHEN failed_login_count + 1 >= $4 THEN 0
                      ELSE failed_login_count + 1 END,
             locked_until =
-                CASE WHEN failed_login_count + 1 >= $3 THEN now() + make_interval(mins => $4::int)
+                CASE WHEN failed_login_count + 1 >= $4 THEN now() + make_interval(mins => $5::int)
                      ELSE locked_until END,
             updated_at = now()
-        WHERE tenant_id = $1 AND id = $2
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+          AND password_hash = $3
+          AND (locked_until IS NULL OR locked_until <= now())
         RETURNING failed_login_count, locked_until
         "#,
         tenant_id,
         user_id,
+        password_hash,
         threshold,
         lockout_minutes
     )
-    .fetch_one(executor)
+    .fetch_optional(executor)
     .await
 }
 
@@ -1359,6 +1420,9 @@ mod tests {
         }
     }
 
+    /// The hash [`given_user`] stores, which a count must name to match.
+    const HASH: &str = "not-a-real-hash";
+
     /// A tenant and one user inside it, both rolled back with the transaction.
     async fn given_user(transaction: &mut sqlx::PgConnection, code: &str) -> (Uuid, Uuid) {
         let tenant_id = Uuid::now_v7();
@@ -1381,7 +1445,7 @@ mod tests {
             tenant_id,
             &format!("user-{code}"),
             &format!("user-{code}@example.test"),
-            "not-a-real-hash",
+            HASH,
             "Test User",
             None,
             false,
@@ -1420,8 +1484,9 @@ mod tests {
         let (other_tenant_id, _) = given_user(&mut tx, "LOCKOUT-B").await;
 
         assert_eq!(
-            record_failed_login(&mut *tx, tenant_id, user_id, 5, 15)
+            count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 5, 15)
                 .await
+                .expect("the statement runs")
                 .expect("the owning tenant increments the counter")
                 .failed_login_count,
             1
@@ -1434,10 +1499,11 @@ mod tests {
         // The threshold is 1 here so that a row matching at all would lock the
         // account outright: an assertion that only watched the counter would
         // pass even if the lock had escaped the tenant guard.
-        let cross_tenant = record_failed_login(&mut *tx, other_tenant_id, user_id, 1, 15).await;
+        let cross_tenant =
+            count_sign_in_attempt(&mut *tx, other_tenant_id, user_id, HASH, 1, 15).await;
 
         assert!(
-            matches!(cross_tenant, Err(sqlx::Error::RowNotFound)),
+            matches!(cross_tenant, Ok(None)),
             "expected no row to match, got {cross_tenant:?}"
         );
         assert_eq!(
@@ -1461,13 +1527,16 @@ mod tests {
         let (tenant_id, user_id) = given_user(&mut tx, "SUCCESS-A").await;
         let (other_tenant_id, _) = given_user(&mut tx, "SUCCESS-B").await;
 
-        record_failed_login(&mut *tx, tenant_id, user_id, 5, 15)
+        count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 5, 15)
             .await
+            .expect("the statement runs")
             .expect("counted");
 
-        record_successful_login(&mut *tx, other_tenant_id, user_id)
-            .await
-            .expect("the statement runs, but must match nothing");
+        assert!(
+            !record_successful_login(&mut *tx, other_tenant_id, user_id, HASH)
+                .await
+                .expect("the statement runs, but must match nothing")
+        );
 
         assert_eq!(
             failure_count(&mut tx, user_id).await,
@@ -1475,10 +1544,155 @@ mod tests {
             "another tenant must not be able to clear the counter"
         );
 
-        record_successful_login(&mut *tx, tenant_id, user_id)
+        assert!(record_successful_login(&mut *tx, tenant_id, user_id, HASH)
             .await
-            .expect("cleared");
+            .expect("cleared"));
 
         assert_eq!(failure_count(&mut tx, user_id).await, 0);
+    }
+
+    /// #855's closing gate: a success reset for a hash written over since
+    /// leaves the count and the lock as they are, since they now count
+    /// guesses against the new password.
+    #[tokio::test]
+    async fn a_successful_login_on_a_hash_written_since_leaves_the_count() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "SUCCESS-REHASHED").await;
+
+        count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 1, 15)
+            .await
+            .expect("the statement runs")
+            .expect("counted and locked");
+        let locked = lockout(&mut tx, user_id).await;
+        assert!(locked.is_some());
+
+        assert!(
+            !record_successful_login(&mut *tx, tenant_id, user_id, "a-hash-written-over")
+                .await
+                .expect("the statement runs, but must match nothing")
+        );
+        assert_eq!(
+            (
+                failure_count(&mut tx, user_id).await,
+                lockout(&mut tx, user_id).await
+            ),
+            (0, locked),
+            "a reset for another hash must leave the lock on"
+        );
+
+        let last_login: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT last_login_at FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("user exists");
+        assert_eq!(last_login, None, "nothing about the row changes");
+    }
+
+    async fn set_lockout(transaction: &mut sqlx::PgConnection, user_id: Uuid, value: &str) {
+        sqlx::query(&format!(
+            "UPDATE users SET locked_until = {value} WHERE id = $1"
+        ))
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("lockout set");
+    }
+
+    /// #855: the attempt that reaches the threshold locks, and an attempt on a
+    /// locked account is not counted and matches nothing, so its password is
+    /// never checked. An expired lock counts again.
+    #[tokio::test]
+    async fn an_attempt_on_a_locked_account_is_not_counted() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "COUNT-LOCKED").await;
+
+        let first = count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 2, 15)
+            .await
+            .expect("the statement runs")
+            .expect("counted");
+        assert_eq!((first.failed_login_count, first.locked()), (1, None));
+
+        let second = count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 2, 15)
+            .await
+            .expect("the statement runs")
+            .expect("counted");
+        assert_eq!(second.failed_login_count, 0);
+        assert!(
+            second.locked().is_some(),
+            "the attempt that reaches the threshold locks"
+        );
+
+        let third = count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 2, 15)
+            .await
+            .expect("the statement runs");
+        assert!(
+            third.is_none(),
+            "a locked account counts nothing, got {third:?}"
+        );
+        assert_eq!(lockout(&mut tx, user_id).await, second.locked_until);
+
+        set_lockout(&mut tx, user_id, "now() - interval '1 second'").await;
+        let after_expiry = count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 2, 15)
+            .await
+            .expect("the statement runs")
+            .expect("an expired lock counts again");
+        assert_eq!(
+            (after_expiry.failed_login_count, after_expiry.locked()),
+            (1, None),
+            "an expired lock is not this attempt's"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attempt_on_a_deleted_account_is_not_counted() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "COUNT-DELETED").await;
+        sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .expect("user deleted");
+
+        let counted = count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 5, 15)
+            .await
+            .expect("the statement runs");
+        assert!(counted.is_none(), "got {counted:?}");
+        assert_eq!(failure_count(&mut tx, user_id).await, 0);
+    }
+
+    /// #855's closing gate: a count matches only the hash the sign-in read, so
+    /// an attempt that a password write overtook before its count is not
+    /// counted, and there is never a count to give back.
+    #[tokio::test]
+    async fn an_attempt_against_a_hash_written_since_is_not_counted() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "COUNT-REHASHED").await;
+
+        let stale =
+            count_sign_in_attempt(&mut *tx, tenant_id, user_id, "a-hash-written-over", 1, 15)
+                .await
+                .expect("the statement runs");
+        assert!(stale.is_none(), "got {stale:?}");
+        assert_eq!(
+            (
+                failure_count(&mut tx, user_id).await,
+                lockout(&mut tx, user_id).await
+            ),
+            (0, None),
+            "an attempt against a hash no longer stored must neither count nor lock"
+        );
     }
 }

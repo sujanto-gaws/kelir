@@ -87,6 +87,16 @@ While the major version is `0`, the public API may change in any release.
   `v0.9.0` today: that connection is the owner's again. The serving role is
   not given `CREATE` to make `v0.9.0` start. The development stack keeps one
   URL, as `postgres`.
+- **A sign-in counts towards the lockout before its password is checked**
+  ([#855](https://github.com/sujanto-gaws/kelir/issues/855), NFR-SEC-008;
+  see *The lockout bounds a burst of guesses* under Fixed). While five
+  sign-ins of one account are in flight or have failed, the next is refused
+  as locked out, even with the right password, until fifteen minutes pass
+  or one of them succeeds. A client that signs one account in many times at
+  once, such as a script or a test harness, can now meet that refusal where
+  it signed in before. A right password whose sign-in then fails with a
+  server error stays counted as a failure. Nothing in the data changes on
+  upgrade, and there is no migration.
 - **A role code with an invisible edge is refused, and five more code points
   are blank** ([#805](https://github.com/sujanto-gaws/kelir/issues/805),
   **D-120**, **D-121**). A client that creates a role with a `roleCode`
@@ -1173,6 +1183,28 @@ While the major version is `0`, the public API may change in any release.
   notifications; a binary of the previous release runs against it
   unchanged. During a rolling upgrade, a previous-release backend beside a
   new one still sends duplicates until it is replaced.
+
+- **The lockout bounds a burst of guesses**
+  ([#855](https://github.com/sujanto-gaws/kelir/issues/855), NFR-SEC-008).
+  A sign-in now counts its attempt as a failure before it checks the
+  password, in one statement on the user's row, and a password that
+  verifies clears the count. So at most five passwords are checked before
+  the fifteen-minute lock, however many guesses arrive at once and through
+  however many backends. Before, every guess in flight read the account
+  unlocked and checked its password before any was counted, so a burst of
+  any size checked that many. A sign-in refused because the password
+  changed during it is still not counted
+  ([ADR-0048](docs/architectures/adr/0048.%20The%20User's%20Row%20Before%20Any%20Refresh%20Token,%20and%20a%20Password%20Write%20Revokes%20in%20Its%20Own%20Transaction.md)):
+  its count matches only the hash it read, so a write before the count
+  leaves nothing counted, and a write after it resets the counter. No count
+  is ever given back. A successful sign-in clears the count only while the
+  password it verified is still stored, so a write that lands just before
+  that clear leaves the failures counted against the new password in place.
+  One consequence: while five sign-ins of one account are in flight or have
+  failed, the next is refused as locked out, even with the right password.
+  The lock ends after fifteen minutes, or as soon as one of those sign-ins
+  succeeds. A right password whose sign-in then fails with a server error
+  stays counted. No migration; see the upgrade note.
 
 - **`SECURITY.md` states its response times**
   ([#975](https://github.com/sujanto-gaws/kelir/issues/975)). A report is
