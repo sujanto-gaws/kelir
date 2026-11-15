@@ -183,12 +183,34 @@ common_env=(
     -e KELIR_BOOTSTRAP_ADMIN_EMAIL=admin@localhost
 )
 
+# settle_connections: waits until no client holds a connection to kelir, so
+# that audited_write counts only the backend started next. A force-removed
+# container's connections can outlive it, and #987's CI once read the
+# rolled-back v0.9.0's `kelir` connection as the next backend's. What is
+# still open after 15 seconds belonged to a container that is gone; it is
+# ended, and said so. A connection the next backend opens comes after this,
+# so a real leak is still caught.
+settle_connections() {
+    local query="FROM pg_stat_activity WHERE datname = 'kelir'
+        AND backend_type = 'client backend' AND pid <> pg_backend_pid()"
+    local left
+    for _ in $(seq 15); do
+        left="$(psql_as_superuser -c "SELECT count(*) ${query}")"
+        [[ "${left}" == "0" ]] && return 0
+        sleep 1
+    done
+    echo "ending ${left} connection(s) a removed backend left: $(psql_as_superuser \
+        -c "SELECT string_agg(usename || '@' || coalesce(host(client_addr), 'local'), ', ') ${query}")"
+    psql_as_superuser -c "SELECT count(pg_terminate_backend(pid)) ${query}" > /dev/null
+}
+
 # start_backend <image> <env...>: runs it and waits for /health/ready. Returns
 # non-zero with the container's log printed when it never gets there.
 start_backend() {
     local image="$1"
     shift
     docker rm -f "${BACKEND}" > /dev/null 2>&1 || true
+    settle_connections
     docker run -d --name "${BACKEND}" --network "${NETWORK}" -p "127.0.0.1:${PORT}:8080" \
         "${common_env[@]}" "$@" "${image}" > /dev/null
 
