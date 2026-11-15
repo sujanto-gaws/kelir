@@ -11,6 +11,55 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **The backend migrates as `kelir` and serves as `kelir_app`, a role that
+  owns nothing, and the upgrade from `v0.9.0` needs database steps first**
+  ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
+  `KELIR_DATABASE_URL` is now the serving role's URL, and the new
+  `KELIR_DATABASE_MIGRATION_URL` is the owner's, which migrates at startup
+  through a pool closed before the server binds. `staging` and `production`
+  refuse to start without it, and refuse a serving role that is a superuser,
+  is or belongs to the owner of `audit_events`, may change `audit_events`, or
+  may create in schema `public`. The release compose file needs a new
+  `.env` value, `KELIR_DB_APP_PASSWORD`, and `deploy.sh` refuses a `.env`
+  without it. Take a backup first. On the staging-shape host the provisioner
+  does the database half:
+
+  ```bash
+  cd /opt/kelir
+  printf 'KELIR_DB_APP_PASSWORD=%s\n' "$(openssl rand -base64 36 | tr -d '\n/+=' | head -c 40)" >> .env
+  sudo ./provision-ubuntu-24.sh   # creates kelir_app, grants it, admits it in pg_hba.conf
+  cp <release>/deploy/staging/docker-compose.staging.yml <release>/deploy/staging/.env.staging.example .
+  ./deploy.sh 1.0.0
+  ```
+
+  On any other host, the local deployment included, as a superuser:
+
+  ```sql
+  CREATE ROLE kelir_app WITH LOGIN PASSWORD '...';     -- KELIR_DB_APP_PASSWORD
+  GRANT CONNECT ON DATABASE kelir TO kelir_app;
+  \c kelir
+  REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+  GRANT USAGE ON SCHEMA public TO kelir_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO kelir_app;
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO kelir_app;
+  REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM kelir_app;
+  REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON _sqlx_migrations FROM kelir_app;
+  ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kelir_app;
+  ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+      GRANT USAGE, SELECT ON SEQUENCES TO kelir_app;
+  ```
+
+  Where `pg_hba.conf` names roles, add a line for `kelir_app` beside
+  `kelir`'s and run `SELECT pg_reload_conf();`. Then add
+  `KELIR_DB_APP_PASSWORD` to `.env`, copy the new compose file, and deploy.
+  Nothing changes owner and no data is rewritten. **The rollback to
+  `v0.9.0` has not been rehearsed yet**
+  (`deploy/staging/n-minus-one.rehearsal.sh`). Until it is, roll back in
+  `v0.9.0`'s posture: in the compose file, point `KELIR_DATABASE_URL` at the
+  owner, `postgres://kelir:${KELIR_DB_PASSWORD}@...`, for as long as the
+  rollback lasts. The serving role is not given `CREATE` to make it start.
+  The development stack keeps one URL, as `postgres`.
 - **A role code with an invisible edge is refused, and five more code points
   are blank** ([#805](https://github.com/sujanto-gaws/kelir/issues/805),
   **D-120**, **D-121**). A client that creates a role with a `roleCode`
