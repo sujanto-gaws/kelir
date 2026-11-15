@@ -20,8 +20,9 @@ set -euo pipefail
 
 KELIR_DB_NAME="${KELIR_DB_NAME:-kelir}"
 KELIR_DB_USER="${KELIR_DB_USER:-kelir}"
-# The role the backend serves as (ADR-0051): owns nothing, may not change
-# audit_events. KELIR_DB_USER owns the schema and only migrates.
+# The role the backend serves as (ADR-0051): owns no relation, function,
+# schema or type, and may not change audit_events. KELIR_DB_USER owns the
+# schema and only migrates.
 KELIR_DB_APP_USER="${KELIR_DB_APP_USER:-kelir_app}"
 KELIR_APP_DIR="${KELIR_APP_DIR:-/opt/kelir}"
 KELIR_BACKUP_DIR="${KELIR_BACKUP_DIR:-/var/backups/kelir}"

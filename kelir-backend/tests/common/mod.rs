@@ -110,7 +110,8 @@ pub struct TestApp {
     /// test's own trigger or [`fixtures::write_past_the_audit_trigger`].
     pub pool: PgPool,
     /// **The pool the router serves on**, as [`SERVING_ROLE`]: a role that
-    /// owns nothing and may not change `audit_events` (ADR-0051 §2, #842).
+    /// owns no relation, function, schema or type and may not change
+    /// `audit_events` (ADR-0051 §2, #842).
     /// **A test that starves the router of connections holds these**, not
     /// [`TestApp::pool`]'s: the two pools are separate since #842.
     pub serving_pool: PgPool,
@@ -1104,8 +1105,9 @@ pub struct ScratchServingRole {
 impl TestApp {
     /// A [`ScratchServingRole`] on this application's database. The test
     /// calls [`ScratchServingRole::drop_from`] when it is done; a test that
-    /// panics first leaves a role behind that owns nothing and reaches no
-    /// database, since its database is dropped.
+    /// panics first leaves a role behind that owns no relation, function,
+    /// schema or type and reaches no database, since its database is
+    /// dropped.
     pub async fn scratch_serving_role(&self) -> ScratchServingRole {
         // The whole id: a v7's leading digits are its timestamp, shared by
         // tests that start together. 51 characters, with room for a suffix.

@@ -427,9 +427,9 @@ async fn both_deployments_refuse_a_serving_role_that_reaches_the_server() {
 }
 
 /// **A serving role that owns a table is refused at startup**, named.
-/// ADR-0051's serving role *owns nothing*: one that owns a table (a migration
-/// run as it by hand, say) may disable that table's triggers, drop it, or
-/// grant it away (red on #984 while the check read ownership of `audit_events`
+/// ADR-0051's serving role *owns no relation, function, schema or type*: one
+/// that owns a table (a migration run as it by hand, say) may disable that
+/// table's triggers, drop it, or grant it away (red on #984 while the check read ownership of `audit_events`
 /// alone).
 #[tokio::test]
 async fn both_deployments_refuse_a_serving_role_that_owns_a_table() {
@@ -572,8 +572,8 @@ async fn both_deployments_refuse_a_column_write_on_the_migrations_table() {
 // The roads out of the database
 // ---------------------------------------------------------------------------
 
-/// Everything a role that owns nothing must be refused **on privilege**: the
-/// server's programs and files, large objects to and from them, another
+/// Everything a role that owns no relation, function, schema or type must be
+/// refused **on privilege**: the server's programs and files, large objects to and from them, another
 /// role's identity, its own attributes, default privileges, and the objects on
 /// `audit_events` that would hide or swallow a row without touching the
 /// trigger (a rule, a policy, a trigger of its own, a lock that stalls every

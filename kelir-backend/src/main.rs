@@ -56,8 +56,9 @@ async fn run() -> anyhow::Result<()> {
     // KELIR_DATABASE_MIGRATION_URL and a pool of its own, narrows the serving
     // role, and its pool is closed before this returns, so it is gone before
     // the server binds. Everything below runs on the serving pool, as a role
-    // that owns nothing and may not change `audit_events`; staging and
-    // production check that posture before going on.
+    // that owns no relation, function, schema or type and may not change
+    // `audit_events`; staging and production check that posture before going
+    // on.
     //
     // Migrations run at startup so a fresh compose stack is usable immediately.
     // This is safe while deployments are single-instance; once several replicas

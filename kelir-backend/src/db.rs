@@ -788,7 +788,10 @@ pub async fn prepare_serving_pool(config: &AppConfig) -> Result<PgPool, Database
         check_serving_posture(&serving)
             .await
             .map_err(DatabaseStartupError::ServingRole)?;
-        tracing::info!("the serving role owns nothing and may not change audit_events");
+        tracing::info!(
+            "the serving role owns no relation, function, schema or type and may not change \
+             audit_events"
+        );
     }
 
     Ok(serving)

@@ -20,7 +20,8 @@ While the major version is `0`, the public API may change in any release.
   (`config.rs`, `debug_prints_no_secret`). No log line printed it before;
   nothing to rotate.
 - **The backend migrates as `kelir` and serves as `kelir_app`, a role that
-  owns nothing, and the upgrade from `v0.9.0` needs database steps first**
+  owns no relation, function, schema or type, and the upgrade from `v0.9.0`
+  needs database steps first**
   ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
   `KELIR_DATABASE_URL` is now the serving role's URL, and the new
   `KELIR_DATABASE_MIGRATION_URL` is the owner's, which migrates at startup
@@ -29,9 +30,9 @@ While the major version is `0`, the public API may change in any release.
   belongs to any role, owns a relation, function, schema or type, may change
   `audit_events` or `_sqlx_migrations` (a column grant or a grant to `PUBLIC`
   included), may create in schema `public` or the database, or holds
-  `CREATEROLE`. The
-  release compose file needs a new `.env` value, `KELIR_DB_APP_PASSWORD`,
-  and `deploy.sh` refuses a `.env` without it. Take a backup first. On the
+  `CREATEROLE`. The release compose file needs a new `.env` value,
+  `KELIR_DB_APP_PASSWORD`, and `deploy.sh` refuses a `.env` without it. Take
+  a backup first. On the
   staging-shape host the provisioner does the database half, run from the
   new release's `deploy/staging/` as Installation guide §6.1 says, because
   it installs the two backup scripts beside it:
