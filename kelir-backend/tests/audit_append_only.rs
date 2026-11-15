@@ -833,6 +833,7 @@ async fn the_serving_role_owns_nothing_and_may_create_nothing() {
                 EXISTS (SELECT 1 FROM pg_class o WHERE o.relowner = r.oid)
                     OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid)
                     OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+                    OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid)
                     OR EXISTS (
                         SELECT 1 FROM pg_database d
                         WHERE d.datname = current_database() AND d.datdba = r.oid

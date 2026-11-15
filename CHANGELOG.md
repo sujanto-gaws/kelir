@@ -18,7 +18,7 @@ While the major version is `0`, the public API may change in any release.
   `KELIR_DATABASE_MIGRATION_URL` is the owner's, which migrates at startup
   through a pool closed before the server binds. `staging` and `production`
   refuse to start without it, and refuse a serving role that is a superuser,
-  belongs to any role, owns a relation, may change `audit_events` or
+  belongs to any role, owns a relation, function, schema or type, may change `audit_events` or
   `_sqlx_migrations` (a column grant or a grant to `PUBLIC` included), may
   create in schema `public` or the database, or holds `CREATEROLE`. The
   release compose file needs a new `.env` value, `KELIR_DB_APP_PASSWORD`,

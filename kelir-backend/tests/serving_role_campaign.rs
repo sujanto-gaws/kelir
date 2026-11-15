@@ -327,13 +327,13 @@ async fn a_column_grant_on_audit_events_to_the_serving_role_is_narrowed_away() {
     }
 }
 
-/// **DEFECT, red until fixed.** A column grant on `audit_events` **to
-/// `PUBLIC`** survives the narrowing, which revokes from the serving role by
-/// name, and the posture check reads `has_table_privilege`, which counts no
-/// column grant. So both deployments start, and the serving role's
-/// `UPDATE audit_events SET reason = …` passes privilege and is stopped only by
-/// the trigger: the probe's first bullet is red in a deployment that started.
-/// `has_any_column_privilege` counts it.
+/// **A column grant on `audit_events` to `PUBLIC` is refused at startup.** It
+/// survives the narrowing, which revokes from the serving role by name, and
+/// `has_table_privilege` counts no column grant, so the posture check reads
+/// `has_any_column_privilege` too. Without it both deployments started, and
+/// the serving role's `UPDATE audit_events SET reason = …` passed privilege
+/// and was stopped only by the trigger (red on #984 until `check_serving_posture`
+/// read it).
 #[tokio::test]
 async fn both_deployments_refuse_a_column_grant_on_audit_events_to_public() {
     let app = TestApp::spawn().await;
@@ -349,13 +349,13 @@ async fn both_deployments_refuse_a_column_grant_on_audit_events_to_public() {
     );
 }
 
-/// **DEFECT, red until fixed.** The narrowing revokes `INSERT`, `UPDATE`,
-/// `DELETE` and `TRUNCATE` on `_sqlx_migrations` from the serving role by
-/// name; the posture check never reads `_sqlx_migrations`. Granted through
-/// `PUBLIC`, or through a membership, the writes survive both, and the
-/// deployment starts with a serving role that can mark a later migration
-/// applied (so the owner skips it at the next start) or delete a row (so the
-/// owner runs it again).
+/// **A write on `_sqlx_migrations` granted through `PUBLIC` is refused at
+/// startup.** The narrowing revokes from the serving role by name, so such a
+/// grant survives it, and the posture check reads the table's writes as
+/// effective privilege. A serving role that held them could mark a later
+/// migration applied, so the owner skips it at the next start, or delete a
+/// row, so the owner runs it again (red on #984 until the check read the
+/// table).
 #[tokio::test]
 async fn both_deployments_refuse_a_serving_role_that_may_write_the_migrations_table() {
     let app = TestApp::spawn().await;
@@ -398,12 +398,12 @@ async fn both_deployments_refuse_a_serving_role_that_may_write_the_migrations_ta
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// **DEFECT, red until fixed.** The predefined roles that reach the server's
-/// files and programs are not read by the posture check. A serving role in
-/// `pg_execute_server_program` runs `COPY … TO PROGRAM` as the database
-/// server's operating-system user, which reads the data directory and signs in
-/// as anyone; the file roles read and write it. Each deployment starts with
-/// any of them.
+/// **Membership of a predefined role that reaches the server is refused at
+/// startup**, named. A serving role in `pg_execute_server_program` runs
+/// `COPY … TO PROGRAM` as the database server's operating-system user, which
+/// reads the data directory and signs in as anyone; the file roles read and
+/// write it. The posture check refuses any membership (red on #984 until it
+/// read them).
 #[tokio::test]
 async fn both_deployments_refuse_a_serving_role_that_reaches_the_server() {
     let app = TestApp::spawn().await;
@@ -426,11 +426,11 @@ async fn both_deployments_refuse_a_serving_role_that_reaches_the_server() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// **DEFECT, red until fixed.** ADR-0051's serving role *owns nothing*, and
-/// the posture check reads ownership of `audit_events` alone. A serving role
-/// that owns another table (one a migration was run as it by hand, say) may
-/// disable that table's triggers, drop it, or grant it away, and each
-/// deployment starts.
+/// **A serving role that owns a table is refused at startup**, named.
+/// ADR-0051's serving role *owns nothing*: one that owns a table (a migration
+/// run as it by hand, say) may disable that table's triggers, drop it, or
+/// grant it away (red on #984 while the check read ownership of `audit_events`
+/// alone).
 #[tokio::test]
 async fn both_deployments_refuse_a_serving_role_that_owns_a_table() {
     let app = TestApp::spawn().await;
@@ -455,12 +455,12 @@ async fn both_deployments_refuse_a_serving_role_that_owns_a_table() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// **DEFECT, red until fixed.** ADR-0051's serving role *owns nothing*, and
-/// the posture check reads `pg_class` alone. A serving role that owns a
-/// function may replace its body under every caller; one that owns a schema
-/// may create in it, which is the `CREATE` the record withholds; one that
-/// owns a type may alter it under every column of it. Each deployment starts
-/// with any of them.
+/// **A serving role that owns a function, a schema or a type is refused at
+/// startup**, named. One that owns a function may replace its body under
+/// every caller; one that owns a schema may create in it, which is the
+/// `CREATE` ADR-0051 withholds; one that owns a type may alter it under every
+/// column of it (red on #984, run 43726618923, while the check read `pg_class`
+/// alone).
 #[tokio::test]
 async fn both_deployments_refuse_a_serving_role_that_owns_a_function_a_schema_or_a_type() {
     let app = TestApp::spawn().await;

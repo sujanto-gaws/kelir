@@ -554,7 +554,7 @@ struct ServingRolePosture {
     owner: String,
     member_of_owner: bool,
     memberships: String,
-    owned_relations: i64,
+    owned_objects: i64,
     owned_examples: String,
     audit_writes: String,
     migration_writes: String,
@@ -569,7 +569,7 @@ struct ServingRolePosture {
 /// - is a member of the owner of `audit_events`, the owner itself included,
 ///   or of any other role, directly or inherited: `pg_write_all_data` and the
 ///   roles that reach the server's files and programs among them;
-/// - owns a relation;
+/// - owns an object: a relation, a function, a schema or a type;
 /// - holds `UPDATE`, on the table or on any column, `DELETE` or `TRUNCATE` on
 ///   `audit_events`;
 /// - holds any write on `_sqlx_migrations`, on the table or on a column;
@@ -594,21 +594,8 @@ pub async fn check_serving_posture(serving: &PgPool) -> Result<(), ServingRoleEr
                       AND m.oid NOT IN (r.oid, c.relowner)
                       AND pg_has_role(r.oid, m.oid, 'MEMBER')
                 ), '') AS memberships,
-                (
-                    SELECT count(*)
-                    FROM pg_class o
-                    WHERE NOT r.rolsuper AND o.relowner = r.oid AND o.relpersistence <> 't'
-                ) AS owned_relations,
-                coalesce((
-                    SELECT string_agg(owned.relname, ', ')
-                    FROM (
-                        SELECT o.relname::text AS relname
-                        FROM pg_class o
-                        WHERE NOT r.rolsuper AND o.relowner = r.oid AND o.relpersistence <> 't'
-                        ORDER BY 1
-                        LIMIT 5
-                    ) owned
-                ), '') AS owned_examples,
+                owned.owned_objects,
+                owned.owned_examples,
                 array_to_string(ARRAY(
                     SELECT verb
                     FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) AS verb
@@ -627,6 +614,30 @@ pub async fn check_serving_posture(serving: &PgPool) -> Result<(), ServingRoleEr
          CROSS JOIN pg_class c
          LEFT JOIN pg_class migrations
              ON migrations.oid = to_regclass('public._sqlx_migrations')
+         CROSS JOIN LATERAL (
+             SELECT count(*) AS owned_objects,
+                    coalesce(array_to_string(
+                        (array_agg(objects.name ORDER BY objects.name))[1:5], ', '
+                    ), '') AS owned_examples
+             FROM (
+                 SELECT 'relation ' || o.relname AS name
+                 FROM pg_class o
+                 WHERE o.relowner = r.oid AND o.relpersistence <> 't'
+                 UNION ALL
+                 SELECT 'function ' || p.proname
+                 FROM pg_proc p
+                 WHERE p.proowner = r.oid
+                 UNION ALL
+                 SELECT 'schema ' || n.nspname
+                 FROM pg_namespace n
+                 WHERE n.nspowner = r.oid
+                 UNION ALL
+                 SELECT 'type ' || t.typname
+                 FROM pg_type t
+                 WHERE t.typowner = r.oid AND t.typrelid = 0 AND t.typcategory <> 'A'
+             ) objects
+             WHERE NOT r.rolsuper
+         ) owned
          WHERE r.rolname = current_user AND c.oid = 'audit_events'::regclass",
     )
     .fetch_one(serving)
@@ -665,10 +676,10 @@ impl ServingRolePosture {
         if !self.memberships.is_empty() {
             found.push(format!("it is a member of {}", self.memberships));
         }
-        if self.owned_relations > 0 {
+        if self.owned_objects > 0 {
             found.push(format!(
-                "it owns {} relation(s), among them {}",
-                self.owned_relations, self.owned_examples
+                "it owns {} object(s), among them {}",
+                self.owned_objects, self.owned_examples
             ));
         }
         if !self.audit_writes.is_empty() {
