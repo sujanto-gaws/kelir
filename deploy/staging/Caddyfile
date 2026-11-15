@@ -51,7 +51,37 @@
 		# address Caddy saw — because no upstream is trusted (see the global
 		# block). The backend is configured with KELIR_TRUSTED_PROXY_HOPS=1 to
 		# match: one hop, this one.
-		reverse_proxy backend:8080
+		#
+		# **Every backend the name answers to gets every other request
+		# (#854).** `backend` resolves to one address per instance, so the
+		# shipped single-instance stack and one scaled with `scale: n` read the
+		# same file. The bare `backend:8080` upstream before it did not spread: each new
+		# connection landed where the name resolved and the split stuck to
+		# Caddy's pool, so serial traffic all reached one instance. `dynamic a`
+		# re-reads the name every 10 s, and round robin hands requests out in
+		# turn, which reads even in CI's `Caddy spreads two backends` job.
+		#
+		# **No active health check: Caddy does not run one on a dynamic
+		# upstream.** What stands in for it is the dial. The backend binds its
+		# port only after migrating and bootstrapping, and stops accepting on
+		# SIGTERM, so one that is starting or stopping refuses the connection.
+		# A refused dial is retried on the next instance for up to 5 s, which
+		# is safe for any method because nothing was sent, and it marks that
+		# instance down for 30 s while Caddy holds it. A stopped container
+		# also leaves the name at the next refresh. A backend that is
+		# listening but failing is not taken out: with one instance, that
+		# would turn its 5xx into the whole site's.
+		reverse_proxy {
+			dynamic a {
+				name backend
+				port 8080
+				refresh 10s
+			}
+			lb_policy round_robin
+			lb_try_duration 5s
+			lb_try_interval 250ms
+			fail_duration 30s
+		}
 	}
 
 	# Everything else is the single-page app. try_files sends unknown paths to

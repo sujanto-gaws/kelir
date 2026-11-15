@@ -7,13 +7,11 @@ import { test } from 'node:test'
 
 import {
   bootstrapOf,
-  bothMoved,
   countOf,
   isEven,
   levelCount,
   lockWaitMs,
   splitFailures,
-  spreadCaddyfile,
 } from './two-backends.mjs'
 
 test('each bootstrap line reads as its own outcome, and "created" is not the deferred one', () => {
@@ -63,30 +61,15 @@ test('every `two` step passes the refusals before it touches anything', () => {
   }
 })
 
-test('the derived Caddyfile changes the one upstream of the shipped file, and nothing else', () => {
+// The split itself is CI's `Caddy spreads two backends`; this names its cause.
+test('the shipped Caddyfile has one upstream, a dynamic one in round robin (#854)', () => {
   const shipped = readFileSync(new URL('../deploy/staging/Caddyfile', import.meta.url), 'utf8')
-  const derived = spreadCaddyfile(shipped)
 
-  assert.notEqual(derived, shipped)
-  assert.match(derived, /^\t\treverse_proxy \{\r?\n\t\t\tdynamic a backend 8080\r?\n\t\t\tlb_policy round_robin\r?\n\t\t\}\r?$/m)
-  assert.equal(
-    derived.replace(/reverse_proxy \{[\s\S]*?\n\t\t\}/, 'reverse_proxy backend:8080'),
-    shipped,
-  )
-})
-
-test('a Caddyfile where the upstream is not exactly one line is refused', () => {
-  assert.throws(() => spreadCaddyfile('reverse_proxy elsewhere:8080\n'), /found 0/)
-  assert.throws(
-    () => spreadCaddyfile('reverse_proxy backend:8080\n\treverse_proxy backend:8080\n'),
-    /found 2/,
-  )
-})
-
-test('the spread step holds only when both instances moved', () => {
-  assert.equal(bothMoved([8, 8]), true)
-  assert.equal(bothMoved([0, 16]), false)
-  assert.equal(bothMoved([16, 0]), false)
+  assert.equal(countOf(shipped, 'reverse_proxy'), countOf(shipped, 'reverse_proxy {'))
+  assert.equal(countOf(shipped, 'reverse_proxy {'), 1)
+  assert.match(shipped, /^\t\t\tdynamic a \{\r?\n\t\t\t\tname backend\r?\n\t\t\t\tport 8080\r?$/m)
+  assert.match(shipped, /^\t\t\tlb_policy round_robin\r?$/m)
+  assert.doesNotMatch(shipped, /reverse_proxy backend:8080/)
 })
 
 // #854's readings through the shipped Caddyfile, and what round robin should read.

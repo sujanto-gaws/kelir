@@ -6,7 +6,6 @@
 //   node run.mjs two count       each instance's count so far
 //   node run.mjs two cross       AC3's checks and AC5's two sentences, each with a control
 //   node run.mjs two e2e         the browser suite against this stack
-//   node run.mjs two spread      smoke through a Caddy derived to spread, then Caddy put back
 //   node run.mjs two document    one document, so smoke has a row to open
 //   node run.mjs two split <file> even|one-sided   the split through that Caddyfile, asserted
 //   node run.mjs two errors      a real ERROR on each instance, the control on every zero
@@ -939,28 +938,8 @@ async function e2e(ctx, args) {
 }
 
 // ---------------------------------------------------------------------------
-// Smoke through a proxy that spreads, and the control on "0 ERROR"
+// Caddy on a given file, the split through it, and the control on "0 ERROR"
 // ---------------------------------------------------------------------------
-
-/**
- * The shipped Caddyfile with its one upstream changed. Derived at each run, so
- * there is no second copy to drift, and it refuses a file where that is not
- * exactly one place.
- */
-export function spreadCaddyfile(shipped) {
-  const found = [...shipped.matchAll(/^([\t ]*)reverse_proxy backend:8080(\r?)$/gm)]
-
-  if (found.length !== 1) {
-    throw new Error(`expected one "reverse_proxy backend:8080", found ${found.length}`)
-  }
-
-  const [line, indent, ending] = found[0]
-  const block = ['reverse_proxy {', '\tdynamic a backend 8080', '\tlb_policy round_robin', '}']
-
-  return shipped.replace(line, block.map((text) => `${indent}${text}${ending}`).join('\n'))
-}
-
-export const bothMoved = (moved) => moved.every((count) => count > 0)
 
 const caddy = (ctx) => `${ctx.config.project}-caddy-1`
 const caddyfileInUse = (ctx) => docker(['exec', caddy(ctx), 'cat', '/etc/caddy/Caddyfile']).stdout
@@ -1004,71 +983,6 @@ async function recreateCaddy(ctx, ...overlay) {
   )
 }
 
-/**
- * #777's smoke, unchanged and by its own command, through a Caddy recreated from
- * a derived file, then Caddy put back. Exits non-zero unless both instances moved.
- *
- * `two spread control` is the same step on the shipped file, for comparison. It
- * usually exits 0, because the shipped file spreads smoke by chance: each new
- * upstream connection lands where the name resolves, and the split then sticks to
- * the pool. So both moving is necessary here and not sufficient: what round robin
- * adds is an even split. `KELIR_LOAD_BASE_URL` at one backend forces the red exit.
- */
-async function spread(ctx, [mode]) {
-  const directory = ctx.stack().runDirectory
-  const shippedFile = join(HERE, '..', 'deploy/staging/Caddyfile')
-  const shipped = readFileSync(shippedFile, 'utf8')
-  const derived = mode === 'control' ? shipped : spreadCaddyfile(shipped)
-  const derivedFile = join(directory, 'Caddyfile.derived')
-  const overlay = caddyOverlay(directory, derivedFile, derived, 'derived')
-  const stamp = Date.now()
-
-  const { stdout: diff } = spawnSync('git', ['diff', '--no-index', '--no-color', shippedFile, derivedFile], {
-    encoding: 'utf8',
-    timeout: 30_000,
-  })
-
-  writeFileSync(join(directory, `Caddyfile.derived-${stamp}.diff`), diff)
-
-  const result = { at: new Date().toISOString(), mode: mode ?? 'derived' }
-
-  try {
-    await recreateCaddy(ctx, '-f', overlay)
-    result.derivedInUse = caddyfileInUse(ctx) === derived
-
-    const before = served(ctx)
-    const smoke = spawnSync(process.execPath, [join(HERE, 'run.mjs'), 'smoke'], {
-      encoding: 'utf8',
-      timeout: 180_000,
-    })
-
-    writeFileSync(join(directory, `spread-smoke-${stamp}.log`), `${smoke.stdout}${smoke.stderr}`)
-    result.smokeExit = smoke.status
-    result.smokeFailed = smoke.stdout.match(/http_req_failed\.*: (.*)/)?.[1] ?? null
-    result.before = before
-    result.after = served(ctx)
-    result.moved = change(result.after, before)
-  } finally {
-    await recreateCaddy(ctx)
-  }
-
-  const { accessToken: token } = (await login(ctx, 1, 'load-user-003', ctx.stack().password)).data
-
-  result.shippedBackInUse = caddyfileInUse(ctx) === shipped
-  result.oneAtATime = await throughCaddy(ctx, token, 300, 1)
-
-  const pass =
-    result.derivedInUse &&
-    result.smokeExit === 0 &&
-    bothMoved(result.moved) &&
-    result.shippedBackInUse &&
-    result.oneAtATime.counted.includes(0)
-
-  console.log(JSON.stringify({ ...result, pass }, null, 2))
-  writeFileSync(join(directory, `spread-${stamp}.json`), JSON.stringify({ ...result, pass, diff }, null, 2))
-  process.exitCode = pass ? 0 : 1
-}
-
 // ---------------------------------------------------------------------------
 // The split through a Caddyfile as it is, asserted (#854)
 // ---------------------------------------------------------------------------
@@ -1078,7 +992,7 @@ async function spread(ctx, [mode]) {
  * 5 %, so 135 to 165 of 300.
  *
  * Round robin hands each request to the next upstream, so a serial run and a
- * concurrent one alike should split exactly, and #854's `spread` runs did: smoke
+ * concurrent one alike should split exactly, and #854's runs on it did: smoke
  * read [8,8] in 8 of 8. The margin is for the `dynamic` upstream's lookup of
  * `backend` being refreshed mid-run and answered in another order, which can
  * hand one instance two requests in a row. Every reading #854 took through the
@@ -1233,7 +1147,6 @@ export async function twoBackends(step, args, ctx) {
     traffic,
     cross,
     e2e,
-    spread,
     document: oneDocument,
     split,
     errors,
