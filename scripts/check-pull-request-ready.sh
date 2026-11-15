@@ -3,8 +3,9 @@
 # Refuses a pull request whose body opens by saying it is not ready (#696,
 # decision D-112).
 #
-# A feature row's pull request carries this as its first line until its
-# `test-engineer` campaign section is written:
+# A construction row's pull request carries this as its first line until
+# every gate its plan names has run, the `test-engineer` campaign among them
+# (Git Workflow §4, restated 2026-11-15 by #964; it said the campaign only):
 #
 #     **Not ready: <gate> is still running. Do not merge yet.**
 #
@@ -116,8 +117,8 @@ if [[ "${normalised}" =~ ${PATTERN} ]]; then
   echo "  FAIL  the first line says the pull request is not ready ('${BASH_REMATCH[2]}')"
   echo
   echo "The body's first line marks this pull request as not ready to merge."
-  echo "Remove that line once the gate it names has finished and its section is"
-  echo "in the body; see docs/standards/05. Git Workflow.md §4."
+  echo "Remove that line once every gate the plan names for the row has run;"
+  echo "see docs/standards/05. Git Workflow.md §4."
   echo "Edit the body and this job will re-run. Re-running the job from the"
   echo "Actions page does not: it reads the body as it was when the run began."
   exit 1
