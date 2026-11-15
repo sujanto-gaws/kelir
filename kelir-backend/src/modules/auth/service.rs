@@ -49,6 +49,9 @@ pub fn is_locked_out(locked_until: Option<DateTime<Utc>>) -> bool {
 /// The audit reason of a sign-in the lockout refused, without a password check.
 const LOCKED_OUT: &str = "account is locked out after repeated failures";
 
+/// The audit reason of a sign-in whose password was written while it ran.
+const PASSWORD_CHANGED: &str = "the password changed during the sign-in";
+
 /// The audit reason of a sign-in whose user was deleted while it ran.
 const DELETED_DURING_SIGN_IN: &str = "the user was deleted during the sign-in";
 
@@ -190,6 +193,13 @@ pub async fn sign_in(
     // the lock, however many arrive at once. A password that verifies clears
     // the count below (`record_successful_login`).
     //
+    // The count matches only the hash read above, the one verified below, so
+    // a password write never leaves this attempt counted and there is nothing
+    // to give back (ADR-0048, #855's closing gate). A write that commits before
+    // the count leaves a hash it does not match, and the sign-in is refused
+    // here, uncounted. One that commits after it resets the counter, this
+    // attempt's count with the rest, and the comparison below refuses.
+    //
     // The statement holds the row for itself only and commits before the
     // transaction below opens, so ADR-0048's order is unchanged: the user's row
     // before any token's, and nothing held across the hash.
@@ -197,16 +207,21 @@ pub async fn sign_in(
         &state.pool,
         tenant_id,
         credentials.id,
+        &credentials.password_hash,
         MAX_FAILED_LOGINS,
         LOCKOUT_MINUTES,
     )
     .await?
     else {
-        // Locked since the read above, by another attempt of the burst, or
-        // deleted. The password is not checked.
-        let reason = identity_repo::find_credentials_by_id(&state.pool, tenant_id, credentials.id)
-            .await?
-            .map_or(DELETED_DURING_SIGN_IN, |_| LOCKED_OUT);
+        // Since the read above: deleted, the password written, or locked by
+        // another attempt of the burst. The password is not checked.
+        let stored =
+            identity_repo::find_credentials_by_id(&state.pool, tenant_id, credentials.id).await?;
+        let reason = match stored {
+            None => DELETED_DURING_SIGN_IN,
+            Some(stored) if stored.password_hash != credentials.password_hash => PASSWORD_CHANGED,
+            Some(_) => LOCKED_OUT,
+        };
         return Err(refuse_sign_in(state, tenant_id, credentials.id, ip_address, reason).await);
     };
 
@@ -258,25 +273,18 @@ pub async fn sign_in(
     // a live row.
     let refused = match current.as_deref() {
         Some(hash) if hash == credentials.password_hash => None,
-        Some(_) => Some("the password changed during the sign-in"),
+        Some(_) => Some(PASSWORD_CHANGED),
         None => Some(DELETED_DURING_SIGN_IN),
     };
     if let Some(reason) = refused {
         transaction.rollback().await?;
 
         // Not counted towards a lockout: the password was right when it was
-        // checked, and nobody guessed anything. So the count taken before the
-        // check is given back. A deleted user's counter is left as it is.
-        if current.is_some() {
-            identity_repo::uncount_sign_in_attempt(
-                &state.pool,
-                tenant_id,
-                credentials.id,
-                &counted,
-                MAX_FAILED_LOGINS,
-            )
-            .await?;
-        }
+        // checked, and nobody guessed anything. The password write that
+        // changed the hash reset the counter after this attempt's count, so
+        // the count is already gone. **Nothing is given back**: a give-back
+        // here took one from failures counted since the write. A deleted
+        // user's counter is left as it is.
 
         return Err(refuse_sign_in(state, tenant_id, credentials.id, ip_address, reason).await);
     }

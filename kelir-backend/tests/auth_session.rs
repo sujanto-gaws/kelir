@@ -2879,15 +2879,15 @@ async fn a_password_set_by_an_administrator_during_a_sign_in_ends_its_token() {
 /// #788, the other order: a password write that commits while a sign-in is
 /// verifying the old password refuses the sign-in. The test writes the hash in
 /// a transaction of its own and holds it; the sign-in reads the old hash and
-/// waits on the user's row; the write commits; the sign-in verifies the old
-/// password against the hash it read, reads the new hash under the lock and is
-/// refused. Since #855 it waits where it counts its attempt, before the
-/// verify, rather than at the lock after it; the write still commits before
-/// the lock reads.
+/// waits on the user's row; the write commits; the sign-in is refused. Since
+/// #855 it waits where it counts its attempt, before the verify, and the count
+/// matches only the hash the sign-in read: it finds the new one, counts
+/// nothing, and refuses there without a verify. A write that lands after the
+/// count, so that the comparison under the lock refuses, is staged in
+/// `auth_lockout.rs`.
 ///
 /// Refused as a wrong password is, with an audit row that says why, and not
-/// counted towards a lockout: nobody guessed anything. The attempt counted
-/// before the verify is given back, and the failure count reads zero.
+/// counted towards a lockout: nobody guessed anything.
 #[tokio::test]
 async fn a_sign_in_that_verified_a_password_written_since_is_refused() {
     let app = Arc::new(TestApp::spawn().await);

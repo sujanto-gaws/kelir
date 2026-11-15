@@ -1271,8 +1271,11 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
         let app = Arc::clone(&app);
         tokio::spawn(async move { attempt(&app, peer(201), username, PASSWORD).await })
     };
+    // Restaged by the fix (#855): the sign-in gives nothing back, so there is
+    // no give-back to hold. It answers with the gate still closed, and a
+    // give-back of the shape the gate holds fails the test here.
     let deadline = tokio::time::Instant::now() + PATIENCE;
-    loop {
+    while !overtaken.is_finished() {
         let held: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity
              WHERE datname = current_database() AND wait_event_type = 'Lock'
@@ -1281,19 +1284,20 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
         .fetch_one(&app.pool)
         .await
         .expect("reads pg_stat_activity");
-        if held == 1 {
-            break;
-        }
-        assert!(
-            !overtaken.is_finished(),
-            "the overtaken sign-in answered without reaching the give-back"
-        );
+        assert_eq!(held, 0, "the overtaken sign-in gave its count back");
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the overtaken sign-in's give-back was never held"
+            "the overtaken sign-in never answered"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, overtaken)
+            .await
+            .expect("the overtaken sign-in answers")
+            .expect("its task completes"),
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(
         failure_count(&app, user_id).await,
         0,
@@ -1314,13 +1318,6 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
         .execute(&mut gate)
         .await
         .expect("opens the gate");
-    assert_eq!(
-        tokio::time::timeout(PATIENCE, overtaken)
-            .await
-            .expect("the overtaken sign-in answers")
-            .expect("its task completes"),
-        StatusCode::UNAUTHORIZED
-    );
     assert_eq!(refusals_for(&app, user_id, PASSWORD_CHANGED).await, 1);
     let after_give_back = failure_count(&app, user_id).await;
 
