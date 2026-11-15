@@ -28,7 +28,9 @@ mod common;
 use axum::http::StatusCode;
 use common::fixtures::{self, AUDIT_APPEND_ONLY_TRIGGER};
 use common::TestApp;
+use kelir_backend::db;
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// An application with audit rows behind it: the sign-in writes one and the
@@ -371,11 +373,15 @@ const RAISED_BY_THE_TRIGGER: &str = "P0001";
 /// Rolled back whichever way it went: a statement that lands is a red probe,
 /// and it must not leave the next case a different table.
 async fn as_the_serving_role(app: &TestApp, sql: &str) -> Option<(String, String)> {
-    let mut transaction = app
-        .serving_pool
+    as_role(&app.serving_pool, sql).await
+}
+
+/// [`as_the_serving_role`], on any role's pool.
+async fn as_role(pool: &PgPool, sql: &str) -> Option<(String, String)> {
+    let mut transaction = pool
         .begin()
         .await
-        .expect("the serving pool opens a transaction");
+        .expect("the role's pool opens a transaction");
 
     let outcome = sqlx::query(sql).execute(&mut *transaction).await;
     let _ = transaction.rollback().await;
@@ -414,6 +420,37 @@ async fn the_trigger(app: &TestApp) -> Vec<(String, String)> {
     .expect("the catalogue reads back")
 }
 
+/// The probe's three verbs, each as a statement that would change or remove
+/// a stored row.
+const THE_THREE_VERBS: [&str; 4] = [
+    "UPDATE audit_events SET reason = 'x'",
+    "UPDATE audit_events SET reason = 'x' WHERE false",
+    "DELETE FROM audit_events",
+    "TRUNCATE audit_events",
+];
+
+/// The probe itself: each of [`THE_THREE_VERBS`] that the serving role is
+/// **not** refused on privilege, with what happened instead. Empty is green.
+/// The test below and its red control both read this, so the control proves
+/// the probe and not a copy of it.
+async fn the_verbs_not_refused_on_privilege(app: &TestApp) -> Vec<String> {
+    let mut wrong = Vec::new();
+
+    for sql in THE_THREE_VERBS {
+        match as_the_serving_role(app, sql).await {
+            None => wrong.push(format!("landed: {sql}")),
+            Some((code, _)) if code == INSUFFICIENT_PRIVILEGE => {}
+            Some((code, message)) => {
+                wrong.push(format!(
+                    "refused, not on privilege ({code} {message}): {sql}"
+                ));
+            }
+        }
+    }
+
+    wrong
+}
+
 /// ADR-0051 §5, the first bullet. The three verbs are refused **on privilege**,
 /// before the trigger is reached: the probe asserts which of the two refused.
 #[tokio::test]
@@ -421,23 +458,69 @@ async fn the_serving_role_is_refused_the_three_verbs_on_privilege() {
     let app = an_app_with_audit_rows().await;
     let before = the_rows(&app).await;
 
-    for sql in [
-        "UPDATE audit_events SET reason = 'x'",
-        "UPDATE audit_events SET reason = 'x' WHERE false",
-        "DELETE FROM audit_events",
-        "TRUNCATE audit_events",
-    ] {
-        let (code, message) = as_the_serving_role(&app, sql)
-            .await
-            .unwrap_or_else(|| panic!("`{sql}` landed as the serving role"));
-
-        assert_eq!(
-            code, INSUFFICIENT_PRIVILEGE,
-            "`{sql}` was refused, but not on privilege: {message}"
-        );
-    }
+    let wrong = the_verbs_not_refused_on_privilege(&app).await;
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 
     assert_eq!(the_rows(&app).await, before, "a refused verb changed a row");
+}
+
+/// The probe above, **red with the grants widened** (plan 22 §7, row 2's
+/// gate; ADR-0051 §5's first *Red*). Each verb is granted back alone, to the
+/// role and then to `PUBLIC`, which the startup's narrowing does not revoke
+/// from: the probe reports exactly that verb's statements, and the posture
+/// check refuses the role. Revoked again, the probe is green, so each round
+/// starts from the table as provisioned.
+#[tokio::test]
+async fn the_privilege_probe_goes_red_with_the_grants_widened() {
+    let app = an_app_with_audit_rows().await;
+    let role = the_serving_role(&app).await;
+
+    assert!(
+        the_verbs_not_refused_on_privilege(&app).await.is_empty(),
+        "the probe is not green to begin with"
+    );
+
+    for grantee in [format!(r#""{role}""#), "PUBLIC".to_owned()] {
+        for verb in ["UPDATE", "DELETE", "TRUNCATE"] {
+            sqlx::query(&format!("GRANT {verb} ON audit_events TO {grantee}"))
+                .execute(&app.pool)
+                .await
+                .expect("the owner widens the grant");
+
+            let expected: Vec<String> = THE_THREE_VERBS
+                .iter()
+                .filter(|sql| sql.starts_with(verb))
+                .map(|sql| (*sql).to_owned())
+                .collect();
+            let reported: Vec<String> = the_verbs_not_refused_on_privilege(&app)
+                .await
+                .into_iter()
+                .filter_map(|wrong| wrong.rsplit_once(": ").map(|(_, sql)| sql.to_owned()))
+                .collect();
+            assert_eq!(
+                reported, expected,
+                "{verb} granted to {grantee}: the probe did not report it alone"
+            );
+
+            let refused = db::check_serving_posture(&app.serving_pool)
+                .await
+                .expect_err("the posture check passes a widened grant");
+            assert!(
+                refused.to_string().contains(verb),
+                "{verb} granted to {grantee}: the refusal does not name it: {refused}"
+            );
+
+            sqlx::query(&format!("REVOKE {verb} ON audit_events FROM {grantee}"))
+                .execute(&app.pool)
+                .await
+                .expect("the owner narrows the grant again");
+        }
+    }
+
+    assert!(
+        the_verbs_not_refused_on_privilege(&app).await.is_empty(),
+        "the probe is not green again with the grants revoked"
+    );
 }
 
 /// ADR-0051 §4, *either alone still holds*. With the three verbs granted back,
@@ -470,34 +553,13 @@ async fn with_the_verbs_granted_back_the_trigger_still_refuses_the_serving_role(
     }
 }
 
-/// ADR-0051 §5, the second bullet, and #833's campaign, which #842's comments
-/// read into its *Done when*. Each of these landed **as the owner** on PG17,
-/// several with the trigger still enabled. As the serving role every one is
-/// refused for want of ownership or of `CREATE`, and the trigger and the rows
-/// are as they were.
-///
-/// The parents for `INHERIT` and `ATTACH PARTITION` are the owner's, because
-/// the serving role cannot create one; a role that could would fail the
-/// `CREATE TABLE` case instead.
-#[tokio::test]
-async fn the_serving_role_cannot_change_the_trigger_its_function_or_its_table() {
-    let app = an_app_with_audit_rows().await;
-
-    for setup in [
-        "CREATE TABLE audit_events_parent (LIKE audit_events)",
-        "CREATE TABLE audit_events_parted (LIKE audit_events) PARTITION BY HASH (id)",
-    ] {
-        sqlx::query(setup)
-            .execute(&app.pool)
-            .await
-            .unwrap_or_else(|error| panic!("the owner's `{setup}`: {error}"));
-    }
-
-    let rows = the_rows(&app).await;
-    let trigger = the_trigger(&app).await;
+/// #833's campaign, every statement that landed as the owner on PG17, and
+/// the neighbours of each. **They need the parents
+/// [`the_campaign_parents`] makes.**
+fn the_campaign() -> Vec<String> {
     let name = AUDIT_APPEND_ONLY_TRIGGER;
 
-    let cases = [
+    vec![
         format!("ALTER TABLE audit_events DISABLE TRIGGER {name}"),
         "ALTER TABLE audit_events DISABLE TRIGGER ALL".to_owned(),
         format!("DROP TRIGGER {name} ON audit_events"),
@@ -517,12 +579,32 @@ async fn the_serving_role_cannot_change_the_trigger_its_function_or_its_table() 
         "ALTER TABLE audit_events OWNER TO CURRENT_USER".to_owned(),
         "DROP TABLE audit_events CASCADE".to_owned(),
         "SET session_replication_role = replica".to_owned(),
-    ];
+    ]
+}
 
+/// The owner's parents for the campaign's `INHERIT` and `ATTACH PARTITION`,
+/// because the serving role cannot create one; a role that could would fail
+/// the `CREATE TABLE` case instead.
+async fn the_campaign_parents(app: &TestApp) {
+    for setup in [
+        "CREATE TABLE audit_events_parent (LIKE audit_events)",
+        "CREATE TABLE audit_events_parted (LIKE audit_events) PARTITION BY HASH (id)",
+    ] {
+        sqlx::query(setup)
+            .execute(&app.pool)
+            .await
+            .unwrap_or_else(|error| panic!("the owner's `{setup}`: {error}"));
+    }
+}
+
+/// The probe for the campaign: each statement of [`the_campaign`] that
+/// `pool`'s role is **not** refused on privilege. Empty is green. Each runs in
+/// a transaction that is rolled back.
+async fn the_campaign_not_refused_on_privilege(pool: &PgPool) -> Vec<String> {
     let mut landed = Vec::new();
 
-    for sql in &cases {
-        match as_the_serving_role(&app, sql).await {
+    for sql in the_campaign() {
+        match as_role(pool, &sql).await {
             None => landed.push(format!("landed: {sql}")),
             Some((code, _)) if code == INSUFFICIENT_PRIVILEGE => {}
             Some((code, message)) => {
@@ -533,6 +615,28 @@ async fn the_serving_role_cannot_change_the_trigger_its_function_or_its_table() 
         }
     }
 
+    landed
+}
+
+/// ADR-0051 §5, the second bullet, and #833's campaign, which #842's comments
+/// read into its *Done when*. Each of these landed **as the owner** on PG17,
+/// several with the trigger still enabled. As the serving role every one is
+/// refused for want of ownership or of `CREATE`, and the trigger and the rows
+/// are as they were.
+///
+/// The parents for `INHERIT` and `ATTACH PARTITION` are the owner's, because
+/// the serving role cannot create one; a role that could would fail the
+/// `CREATE TABLE` case instead.
+#[tokio::test]
+async fn the_serving_role_cannot_change_the_trigger_its_function_or_its_table() {
+    let app = an_app_with_audit_rows().await;
+    the_campaign_parents(&app).await;
+
+    let rows = the_rows(&app).await;
+    let trigger = the_trigger(&app).await;
+
+    let landed = the_campaign_not_refused_on_privilege(&app.serving_pool).await;
+
     assert!(
         landed.is_empty(),
         "the serving role is not refused:\n{}",
@@ -540,6 +644,56 @@ async fn the_serving_role_cannot_change_the_trigger_its_function_or_its_table() 
     );
     assert_eq!(the_trigger(&app).await, trigger, "the trigger changed");
     assert_eq!(the_rows(&app).await, rows, "a stored row changed");
+}
+
+/// The campaign above, **red with the serving role made a member of the
+/// owner** (ADR-0051 §5's second *Red*). A scratch role, provisioned and
+/// narrowed as the serving role is, is green first; granted the owner, it
+/// inherits ownership, and the trigger is disabled, dropped and replaced
+/// through it. Every statement runs in a rolled-back transaction, so the
+/// trigger is as it was at the end.
+#[tokio::test]
+async fn the_campaign_goes_red_with_the_serving_role_a_member_of_the_owner() {
+    let app = an_app_with_audit_rows().await;
+    the_campaign_parents(&app).await;
+    let trigger = the_trigger(&app).await;
+
+    let owner: String = sqlx::query_scalar("SELECT quote_ident(current_user)")
+        .fetch_one(&app.pool)
+        .await
+        .expect("the owner names itself");
+    let scratch = app.scratch_serving_role().await;
+
+    let green = the_campaign_not_refused_on_privilege(&scratch.pool).await;
+    assert!(
+        green.is_empty(),
+        "not green to begin with:\n{}",
+        green.join("\n")
+    );
+
+    sqlx::query(&format!("GRANT {owner} TO {}", scratch.name))
+        .execute(&app.pool)
+        .await
+        .expect("the owner admits the scratch role");
+
+    let landed = the_campaign_not_refused_on_privilege(&scratch.pool).await;
+    let name = AUDIT_APPEND_ONLY_TRIGGER;
+
+    for sql in [
+        format!("landed: ALTER TABLE audit_events DISABLE TRIGGER {name}"),
+        format!("landed: DROP TRIGGER {name} ON audit_events"),
+        "landed: DROP FUNCTION audit_events_refuse_change() CASCADE".to_owned(),
+        "landed: ALTER TABLE audit_events DROP COLUMN reason".to_owned(),
+    ] {
+        assert!(
+            landed.contains(&sql),
+            "the campaign did not go red at `{sql}`:\n{}",
+            landed.join("\n")
+        );
+    }
+
+    scratch.drop_from(&app).await;
+    assert_eq!(the_trigger(&app).await, trigger, "the trigger changed");
 }
 
 /// One table's effective privileges, as the serving role holds them.

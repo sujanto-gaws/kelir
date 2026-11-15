@@ -1059,13 +1059,16 @@ pub const SERVING_ROLE_PASSWORD: &str = "kelir-test-app-password";
 
 /// `database_url`, signed in as [`SERVING_ROLE`].
 pub fn as_the_serving_role(database_url: &str) -> String {
+    signed_in_as(database_url, SERVING_ROLE)
+}
+
+/// `database_url`, signed in as `role` with [`SERVING_ROLE_PASSWORD`].
+fn signed_in_as(database_url: &str, role: &str) -> String {
     let mut url = url::Url::parse(database_url).unwrap_or_else(|error| {
         harness_failure("parse the database URL", &error.to_string(), database_url)
     });
 
-    if url.set_username(SERVING_ROLE).is_err()
-        || url.set_password(Some(SERVING_ROLE_PASSWORD)).is_err()
-    {
+    if url.set_username(role).is_err() || url.set_password(Some(SERVING_ROLE_PASSWORD)).is_err() {
         harness_failure(
             "sign the database URL in as the serving role",
             "the URL has no host to sign in to",
@@ -1074,6 +1077,98 @@ pub fn as_the_serving_role(database_url: &str) -> String {
     }
 
     url.into()
+}
+
+/// A serving role of one test's own (ADR-0051 §2, #842).
+///
+/// **For a test that gives a serving role what is granted per cluster**: a
+/// role attribute, a membership, a predefined role such as
+/// `pg_execute_server_program`. Granted to [`SERVING_ROLE`], which every test
+/// database shares, any of those would reach every test running beside it,
+/// and the harness's own posture check would refuse them. A grant on a table
+/// is per database and needs none of this.
+///
+/// Provisioned on the test's database as [`SERVING_ROLE`] is, with the grants
+/// a host's `GRANT … ON ALL TABLES` gives, and narrowed by the binary's own
+/// [`db::narrow_serving_role`]. **As made, it passes the posture check**: a
+/// test that sees it refused after one change has seen that change refused.
+pub struct ScratchServingRole {
+    /// The role's name, unique to the test.
+    pub name: String,
+    /// The test database's URL, signed in as the role.
+    pub url: String,
+    /// A small pool, signed in as the role.
+    pub pool: PgPool,
+}
+
+impl TestApp {
+    /// A [`ScratchServingRole`] on this application's database. The test
+    /// calls [`ScratchServingRole::drop_from`] when it is done; a test that
+    /// panics first leaves a role behind that owns nothing and reaches no
+    /// database, since its database is dropped.
+    pub async fn scratch_serving_role(&self) -> ScratchServingRole {
+        let simple = Uuid::new_v4().simple().to_string();
+        let name = format!("kelir_test_scratch_{}", &simple[..12]);
+
+        let statements = [
+            format!("CREATE ROLE {name} WITH LOGIN PASSWORD '{SERVING_ROLE_PASSWORD}'"),
+            format!(
+                r#"GRANT CONNECT ON DATABASE "{}" TO {name}"#,
+                self.database_name
+            ),
+            format!("GRANT USAGE ON SCHEMA public TO {name}"),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {name}"
+            ),
+            format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {name}"),
+        ];
+
+        for statement in &statements {
+            sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .unwrap_or_else(|error| {
+                    harness_failure(
+                        &format!("provision the scratch serving role {name}"),
+                        &error.to_string(),
+                        &self.state.config.database_url,
+                    )
+                });
+        }
+
+        let url = signed_in_as(&self.state.config.database_url, &name);
+        let pool = db::create_pool_with_max_connections(&url, 2).unwrap_or_else(|error| {
+            harness_failure(
+                "build the scratch serving role's pool",
+                &error.to_string(),
+                &url,
+            )
+        });
+
+        db::narrow_serving_role(&self.pool, &pool)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure("narrow the scratch serving role", &error.to_string(), &url)
+            });
+
+        ScratchServingRole { name, url, pool }
+    }
+}
+
+impl ScratchServingRole {
+    /// Closes the role's pool, and drops the role and whatever it was granted
+    /// or came to own, through the owner's pool. Best effort: a role left
+    /// behind is a role that reaches nothing.
+    pub async fn drop_from(self, app: &TestApp) {
+        self.pool.close().await;
+
+        for statement in [
+            format!("DROP OWNED BY {}", self.name),
+            format!("DROP ROLE IF EXISTS {}", self.name),
+        ] {
+            let _ = sqlx::query(&statement).execute(&app.pool).await;
+        }
+    }
 }
 
 /// Creates [`SERVING_ROLE`] if the cluster has none, and grants it this
