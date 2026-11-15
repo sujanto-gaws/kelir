@@ -6,14 +6,19 @@
 //! it. `0052_audit_events_append_only.sql` puts one statement-level trigger in
 //! the way.
 //!
-//! **What these tests hold is the application's connection**, because
-//! [`TestApp::pool`] is the connection the application serves on. They do not
-//! say the table is safe from its owner: the same pool can disable the trigger,
-//! which [`fixtures::write_past_the_audit_trigger`] does and [#842] addresses.
+//! **The trigger is held against the owner's pool**, [`TestApp::pool`], which
+//! keeps every privilege on the table, so those tests prove the trigger alone.
+//! The refusals are written out through `app.pool` on purpose: they are the
+//! only `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events` in this suite that
+//! do not go through [`fixtures::write_past_the_audit_trigger`], and none of
+//! them lands.
 //!
-//! The refusals are written out through `app.pool` on purpose. They are the only
-//! `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events` in this test suite that
-//! do not go through that helper, and none of them lands.
+//! **The serving role is held after them** ([#842], ADR-0051 §5), through
+//! [`TestApp::serving_pool`], the pool the router answers requests on. It is
+//! refused the three verbs on privilege, before the trigger, and every change
+//! to the trigger, its function or its table that #833's campaign landed as
+//! the owner. The owner can still disable the trigger, which is what the
+//! fixture does and what ADR-0051 §4 leaves to the owner's credential.
 //!
 //! [#833]: https://github.com/sujanto-gaws/kelir/issues/833
 //! [#842]: https://github.com/sujanto-gaws/kelir/issues/842

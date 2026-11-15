@@ -612,6 +612,7 @@ jobs:
         run: |
           cat > deploy/staging/.env <<'ENVFILE'
           KELIR_DB_PASSWORD=ci-only-database-password-6Qb2xR
+          KELIR_DB_APP_PASSWORD=ci-only-app-database-password-8Kp3vW
           KELIR_JWT_SECRET=ci-only-jwt-secret-Xr4Lm8Qp2ZvT6Ns1
           KELIR_MINIO_USER=ci-only-minio-user
           KELIR_MINIO_PASSWORD=ci-only-minio-password-9Hd3Bs
@@ -624,6 +625,28 @@ jobs:
           KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml
           KELIR_E2E_UPSTREAM_TOKEN=ci-only-upstream-token-7Wq2nV5c
           ENVFILE
+
+      - name: Provision the serving role
+        # ADR-0051 §2 and §4: the release compose file serves as kelir_app; the
+        # service container's POSTGRES_USER, kelir, owns the schema and migrates.
+        # The same statements as the provisioner's and Installation guide §5's.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: kelir
+          PGPASSWORD: ci-only-database-password-6Qb2xR
+          PGDATABASE: kelir
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -q <<'SQL'
+          CREATE ROLE kelir_app WITH LOGIN PASSWORD 'ci-only-app-database-password-8Kp3vW';
+          GRANT CONNECT ON DATABASE kelir TO kelir_app;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          GRANT USAGE ON SCHEMA public TO kelir_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kelir_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+              GRANT USAGE, SELECT ON SEQUENCES TO kelir_app;
+          SQL
 
       - name: Bring the release stack up
         # The version has to be the one the binary reports, because deploy.sh

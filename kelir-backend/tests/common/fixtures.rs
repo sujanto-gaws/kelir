@@ -33,10 +33,11 @@ pub const AUDIT_APPEND_ONLY_TRIGGER: &str = "trg_audit_events_append_only";
 /// back, and no other connection ever sees it off: `ALTER TABLE` holds a lock
 /// that keeps a concurrent writer waiting until the transaction ends.
 ///
-/// **This works only because the harness's pool owns the table**, which is the
-/// limit [#842] addresses. `session_replication_role` is no alternative: it
-/// needs a superuser, and a setting the application could flip would be no
-/// control at all.
+/// **`pool` is the owner's**, [`super::TestApp::pool`]: only the table's owner
+/// may disable its trigger, and since [#842] the role the application serves
+/// as is not the owner and is refused (ADR-0051). `session_replication_role`
+/// is no alternative: it needs a superuser, and a setting the application
+/// could flip would be no control at all.
 ///
 /// A failing write comes back as the `Err`, after an explicit rollback, so the
 /// transaction has ended before this returns.

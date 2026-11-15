@@ -20,6 +20,9 @@ set -euo pipefail
 
 KELIR_DB_NAME="${KELIR_DB_NAME:-kelir}"
 KELIR_DB_USER="${KELIR_DB_USER:-kelir}"
+# The role the backend serves as (ADR-0051): owns nothing, may not change
+# audit_events. KELIR_DB_USER owns the schema and only migrates.
+KELIR_DB_APP_USER="${KELIR_DB_APP_USER:-kelir_app}"
 KELIR_APP_DIR="${KELIR_APP_DIR:-/opt/kelir}"
 KELIR_BACKUP_DIR="${KELIR_BACKUP_DIR:-/var/backups/kelir}"
 KELIR_BACKUP_RETENTION_DAYS="${KELIR_BACKUP_RETENTION_DAYS:-14}"
@@ -109,6 +112,8 @@ fi
 
 # Only the loopback and Docker's private address pool may authenticate, and only
 # with scram-sha-256. Docker allocates compose networks from 172.16.0.0/12.
+# Two roles, each on its own marked line, so a host provisioned before ADR-0051
+# gains the serving role's line on a re-run.
 HBA_MARKER="# kelir: application containers over the docker bridge"
 if ! grep -qF "${HBA_MARKER}" "${PG_CONF_DIR}/pg_hba.conf"; then
     log "Allowing the Docker bridge in pg_hba.conf"
@@ -116,6 +121,17 @@ if ! grep -qF "${HBA_MARKER}" "${PG_CONF_DIR}/pg_hba.conf"; then
 
 ${HBA_MARKER}
 host    ${KELIR_DB_NAME}    ${KELIR_DB_USER}    172.16.0.0/12    scram-sha-256
+EOF
+    PG_NEEDS_RESTART=1
+fi
+
+HBA_APP_MARKER="# kelir: the serving role over the docker bridge (ADR-0051)"
+if ! grep -qF "${HBA_APP_MARKER}" "${PG_CONF_DIR}/pg_hba.conf"; then
+    log "Allowing the serving role in pg_hba.conf"
+    cat >> "${PG_CONF_DIR}/pg_hba.conf" <<EOF
+
+${HBA_APP_MARKER}
+host    ${KELIR_DB_NAME}    ${KELIR_DB_APP_USER}    172.16.0.0/12    scram-sha-256
 EOF
     PG_NEEDS_RESTART=1
 fi
@@ -134,20 +150,29 @@ fi
 ENV_FILE="${KELIR_APP_DIR}/.env"
 mkdir -p "${KELIR_APP_DIR}"
 
-if [[ -f "${ENV_FILE}" ]] && grep -qE '^KELIR_DB_PASSWORD=.+' "${ENV_FILE}"; then
-    DB_PASSWORD="$(grep -E '^KELIR_DB_PASSWORD=' "${ENV_FILE}" | head -1 | cut -d= -f2-)"
-    log "Using the database password already in ${ENV_FILE}"
-else
-    DB_PASSWORD="$(openssl rand -base64 36 | tr -d '\n/+=' | head -c 40)"
-    log "Generated a database password and recorded it in ${ENV_FILE}"
-    touch "${ENV_FILE}"
-    chmod 600 "${ENV_FILE}"
-    if grep -qE '^KELIR_DB_PASSWORD=' "${ENV_FILE}"; then
-        sed -i "s|^KELIR_DB_PASSWORD=.*|KELIR_DB_PASSWORD=${DB_PASSWORD}|" "${ENV_FILE}"
+# Reads a password from the env file, or generates one and records it there.
+# The log goes to stderr, because the value is this function's output.
+env_password() {
+    local key="$1" value
+    if [[ -f "${ENV_FILE}" ]] && grep -qE "^${key}=.+" "${ENV_FILE}"; then
+        value="$(grep -E "^${key}=" "${ENV_FILE}" | head -1 | cut -d= -f2-)"
+        log "Using ${key} already in ${ENV_FILE}" >&2
     else
-        printf 'KELIR_DB_PASSWORD=%s\n' "${DB_PASSWORD}" >> "${ENV_FILE}"
+        value="$(openssl rand -base64 36 | tr -d '\n/+=' | head -c 40)"
+        log "Generated ${key} and recorded it in ${ENV_FILE}" >&2
+        touch "${ENV_FILE}"
+        chmod 600 "${ENV_FILE}"
+        if grep -qE "^${key}=" "${ENV_FILE}"; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+        else
+            printf '%s=%s\n' "${key}" "${value}" >> "${ENV_FILE}"
+        fi
     fi
-fi
+    printf '%s' "${value}"
+}
+
+DB_PASSWORD="$(env_password KELIR_DB_PASSWORD)"
+DB_APP_PASSWORD="$(env_password KELIR_DB_APP_PASSWORD)"
 
 log "Ensuring the ${KELIR_DB_USER} role and ${KELIR_DB_NAME} database exist"
 
@@ -169,9 +194,50 @@ if [[ "${db_exists}" != "1" ]]; then
     sudo -u postgres createdb -O "${KELIR_DB_USER}" "${KELIR_DB_NAME}"
 fi
 
-# The application owns its schema: it creates every table through migrations.
+# The owner owns the schema: it creates every table through migrations.
 sudo -u postgres psql -q -d "${KELIR_DB_NAME}" -c \
     "GRANT ALL ON SCHEMA public TO ${KELIR_DB_USER}"
+
+# **The serving role** (ADR-0051 §2): LOGIN, not a superuser, owner of nothing,
+# member of no role, no CREATE on the database or on schema public. It reads
+# and writes every table but two, by grant now and by default privileges for
+# the tables later migrations create. The two REVOKEs are the backend's on
+# every start too; they are here so the host is right before the first one.
+# Idempotent, so a v0.9.0 host gains the role on a re-run (CHANGELOG.md).
+log "Ensuring the ${KELIR_DB_APP_USER} role, which the backend serves as"
+
+app_role_exists="$(sudo -u postgres psql -tAc \
+    "SELECT 1 FROM pg_roles WHERE rolname = '${KELIR_DB_APP_USER}'")"
+
+if [[ "${app_role_exists}" == "1" ]]; then
+    sudo -u postgres psql -q -c \
+        "ALTER ROLE ${KELIR_DB_APP_USER} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '${DB_APP_PASSWORD}'"
+else
+    sudo -u postgres psql -q -c \
+        "CREATE ROLE ${KELIR_DB_APP_USER} WITH LOGIN PASSWORD '${DB_APP_PASSWORD}'"
+fi
+
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -d "${KELIR_DB_NAME}" <<SQL
+GRANT CONNECT ON DATABASE ${KELIR_DB_NAME} TO ${KELIR_DB_APP_USER};
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO ${KELIR_DB_APP_USER};
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${KELIR_DB_APP_USER};
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${KELIR_DB_APP_USER};
+DO \$\$
+BEGIN
+    IF to_regclass('public.audit_events') IS NOT NULL THEN
+        REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM ${KELIR_DB_APP_USER};
+    END IF;
+    IF to_regclass('public._sqlx_migrations') IS NOT NULL THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON _sqlx_migrations FROM ${KELIR_DB_APP_USER};
+    END IF;
+END
+\$\$;
+ALTER DEFAULT PRIVILEGES FOR ROLE ${KELIR_DB_USER} IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${KELIR_DB_APP_USER};
+ALTER DEFAULT PRIVILEGES FOR ROLE ${KELIR_DB_USER} IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO ${KELIR_DB_APP_USER};
+SQL
 
 # ---------------------------------------------------------------------------
 # 5. Firewall
@@ -283,7 +349,7 @@ $(printf '\033[1;32m==> kelir-staging-01 provisioned\033[0m')
 
   Docker            $(docker --version)
   PostgreSQL        ${PG_VERSION}, listening for the docker bridge (${DOCKER_GATEWAY})
-  Database          ${KELIR_DB_NAME}, owned by ${KELIR_DB_USER}
+  Database          ${KELIR_DB_NAME}, owned by ${KELIR_DB_USER}, served as ${KELIR_DB_APP_USER}
   Application dir   ${KELIR_APP_DIR}
   Backups           ${KELIR_BACKUP_DIR}, daily 02:30 UTC, kept ${KELIR_BACKUP_RETENTION_DAYS} days,
                     the database and the object store, encrypted with age
@@ -293,7 +359,7 @@ Next:
 
   1. Copy deploy/staging/{docker-compose.staging.yml,Caddyfile,deploy.sh,.env.staging.example} to ${KELIR_APP_DIR}
   2. Fill in the remaining secrets in ${ENV_FILE}
-     (KELIR_DB_PASSWORD is already set; generate KELIR_JWT_SECRET, the MinIO
+     (KELIR_DB_PASSWORD and KELIR_DB_APP_PASSWORD are already set; generate KELIR_JWT_SECRET, the MinIO
      pair and KELIR_MINIO_KMS_SECRET_KEY, and add KELIR_BACKUP_AGE_RECIPIENTS
      from an identity made on another machine: Installation guide §6.3)
   3. Point staging.kelir.gawshub.com at this host, then:

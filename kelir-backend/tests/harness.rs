@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{fixtures, redact, with_database, TestApp};
+use common::{as_the_serving_role, fixtures, redact, with_database, TestApp};
 
 // ---------------------------------------------------------------------------
 // Connection-string handling (pure, no database)
@@ -52,6 +52,16 @@ fn leaves_a_connection_string_without_credentials_alone() {
     assert_eq!(
         redact("postgres://localhost:5432/kelir"),
         "postgres://localhost:5432/kelir"
+    );
+}
+
+#[test]
+fn signs_a_connection_string_in_as_the_serving_role() {
+    // The host, the database and the query stay; only the credentials change
+    // (ADR-0051 §2).
+    assert_eq!(
+        as_the_serving_role("postgres://u:p@localhost:5432/t?sslmode=disable"),
+        "postgres://kelir_test_app:kelir-test-app-password@localhost:5432/t?sslmode=disable"
     );
 }
 

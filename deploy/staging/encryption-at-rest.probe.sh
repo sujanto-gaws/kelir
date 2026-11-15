@@ -552,6 +552,7 @@ STUB
     good_env() {
         cat <<ENV
 KELIR_DB_PASSWORD=probe-database-password
+KELIR_DB_APP_PASSWORD=probe-app-database-password
 KELIR_JWT_SECRET=probe-jwt-secret-0123456789
 KELIR_MINIO_USER=probe-user
 KELIR_MINIO_PASSWORD=probe-minio-password
@@ -592,6 +593,8 @@ ENV
     check "a placeholder store key" refused_before_docker
     deploy_with "$(good_env | sed 's|^KELIR_MINIO_KMS_SECRET_KEY=.*|KELIR_MINIO_KMS_SECRET_KEY=kelir-development:w7GPk50m0UH2qkpB+MZbHBZD4Tcd0+nwJx3VzoopMkk=|')" "${BACKUP}" 1
     check "the published development store key" refused_before_docker
+    deploy_with "$(good_env | grep -v '^KELIR_DB_APP_PASSWORD=')" "${BACKUP}" 1
+    check "a .env without KELIR_DB_APP_PASSWORD, the serving role's (ADR-0051)" refused_before_docker
 
     echo "AC10 with no unit installed, it deploys without a backup and says so"
     deploy_with "$(good_env)" '' ''

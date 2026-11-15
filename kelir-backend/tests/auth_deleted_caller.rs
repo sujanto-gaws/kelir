@@ -713,7 +713,7 @@ async fn a_lookup_that_fails_is_a_500_and_neither_a_pass_nor_a_401() {
         forbidden.body
     );
 
-    app.pool.close().await;
+    app.serving_pool.close().await;
 
     let failed = app.get(USERS, Some(&held.access)).await;
     assert_eq!(

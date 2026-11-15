@@ -28,7 +28,18 @@ pub struct AppConfig {
     pub app_name: String,
     pub app_env: AppEnv,
     pub bind_address: String,
+    /// `KELIR_DATABASE_URL`: **the serving role's URL** (ADR-0051 §2), the
+    /// role every request, worker and the administrator bootstrap use. It owns
+    /// nothing and may not change `audit_events`.
     pub database_url: String,
+    /// `KELIR_DATABASE_MIGRATION_URL`: the schema owner's URL, which migrates
+    /// at startup through a pool of its own that is closed before the server
+    /// binds (ADR-0051 §2).
+    ///
+    /// **`None` is the development shape**: one URL migrates and serves, as
+    /// every release before `v1.0.0` did. `staging` and `production` refuse to
+    /// start without it, as they refuse a missing `KELIR_JWT_SECRET`.
+    pub database_migration_url: Option<String>,
     /// `KELIR_DATABASE_SSL_MODE` and `KELIR_DATABASE_SSL_ROOT_CERT` (#803),
     /// as given, or `None` when unset or blank. Checked where the pool is
     /// built (`db::connect_options`), which is the one place that knows the
@@ -575,7 +586,28 @@ impl AppConfig {
             // Never from the environment: see the fields.
             integration_allow_loopback: false,
             integration_dns_overrides: HashMap::new(),
+            // Last, so a refusal that names an older setting still comes first.
+            database_migration_url: database_migration_url(&get, app_env)?,
         })
+    }
+}
+
+/// `KELIR_DATABASE_MIGRATION_URL` (ADR-0051 §2).
+///
+/// **The single-URL shape is not a deployment's.** Where it is missing, the
+/// serving URL would have to migrate, and a role that migrates owns the schema,
+/// so `staging` and `production` refuse to start, naming the variable. A
+/// developer's machine and the test harness keep one URL when they want it.
+fn database_migration_url<F>(get: &F, app_env: AppEnv) -> Result<Option<String>, ConfigError>
+where
+    F: Fn(&'static str) -> Result<String, VarError>,
+{
+    let key = "KELIR_DATABASE_MIGRATION_URL";
+
+    match get(key).ok().filter(|value| !value.trim().is_empty()) {
+        Some(url) => Ok(Some(url)),
+        None if app_env.requires_real_secrets() => Err(ConfigError::Missing { key }),
+        None => Ok(None),
     }
 }
 
@@ -589,6 +621,7 @@ impl AppConfig {
             app_env: AppEnv::Test,
             bind_address: "127.0.0.1:0".to_owned(),
             database_url: "postgres://postgres:postgres@localhost:5432/kelir".to_owned(),
+            database_migration_url: None,
             database_ssl_mode: None,
             database_ssl_root_cert: None,
             jwt_secret: "test-secret".to_owned(),
@@ -942,6 +975,7 @@ mod tests {
             ("KELIR_APP_ENV", "production"),
             ("KELIR_STORAGE_ACCESS_KEY", "minioadmin"),
             ("KELIR_STORAGE_SECRET_KEY", "minioadmin"),
+            ("KELIR_DATABASE_MIGRATION_URL", OWNER_URL),
         ]))
         .expect("a value somebody set is a value somebody chose");
 
@@ -1004,6 +1038,7 @@ mod tests {
             ("KELIR_APP_ENV", "production"),
             ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
             ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
+            ("KELIR_DATABASE_MIGRATION_URL", OWNER_URL),
         ]))
         .expect("a non-placeholder secret is accepted");
 
@@ -1159,18 +1194,80 @@ mod tests {
             ("staging", AppEnv::Staging),
             ("production", AppEnv::Production),
         ] {
-            // **Staging and production need credentials to load at all**
-            // (#317), so this loop supplies them rather than testing four
-            // environments and asserting about two.
+            // **Staging and production need credentials and the owner's URL
+            // to load at all** (#317, ADR-0051), so this loop supplies them
+            // rather than testing four environments and asserting about two.
             let config = AppConfig::from_source(source(&[
                 ("KELIR_JWT_SECRET", "s3cret"),
                 ("KELIR_APP_ENV", raw),
                 ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
                 ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
+                ("KELIR_DATABASE_MIGRATION_URL", OWNER_URL),
             ]))
             .expect("documented environment parses");
 
             assert_eq!(config.app_env, expected, "for {raw}");
         }
+    }
+
+    /// The schema owner's URL, for the tests that load `staging` or
+    /// `production` and are about something else.
+    const OWNER_URL: &str = "postgres://kelir:owner-pw@db.internal:5432/kelir";
+
+    /// **One URL is the development shape** (ADR-0051 §2): unset, the serving
+    /// URL migrates as well, on a developer's machine and in the harness.
+    #[test]
+    fn one_url_is_enough_on_a_developers_machine() {
+        for env in ["development", "test"] {
+            let config = AppConfig::from_source(source(&[
+                ("KELIR_JWT_SECRET", "s3cret"),
+                ("KELIR_APP_ENV", env),
+            ]))
+            .unwrap_or_else(|error| panic!("{env} refused one URL: {error}"));
+
+            assert_eq!(config.database_migration_url, None, "for {env}");
+        }
+    }
+
+    /// **Staging and production refuse to start with one URL**, naming the
+    /// variable (ADR-0051 §2 and §5, the fourth bullet), as a missing
+    /// `KELIR_JWT_SECRET` is refused.
+    #[test]
+    fn refuses_to_start_without_the_owners_url_where_it_is_deployed() {
+        for env in ["staging", "production"] {
+            let error = AppConfig::from_source(source(&[
+                ("KELIR_JWT_SECRET", "a-real-secret-value"),
+                ("KELIR_APP_ENV", env),
+                ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
+                ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
+                ("KELIR_DATABASE_MIGRATION_URL", "  "),
+            ]))
+            .expect_err("one URL is not a deployment's shape");
+
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::Missing {
+                        key: "KELIR_DATABASE_MIGRATION_URL"
+                    }
+                ),
+                "{env}: {error}"
+            );
+            assert!(
+                error.to_string().contains("KELIR_DATABASE_MIGRATION_URL"),
+                "the refusal names the variable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_owners_url_where_it_is_set() {
+        let config = AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", "s3cret"),
+            ("KELIR_DATABASE_MIGRATION_URL", OWNER_URL),
+        ]))
+        .expect("loads");
+
+        assert_eq!(config.database_migration_url.as_deref(), Some(OWNER_URL));
     }
 }

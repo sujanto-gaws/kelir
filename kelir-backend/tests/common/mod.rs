@@ -103,11 +103,14 @@ pub const TEST_PEER: SocketAddr = SocketAddr::new(
 
 /// A running application over a private database.
 pub struct TestApp {
-    /// The pool the router uses. Exposed so tests can assert against the
-    /// database directly — what the API reports and what was actually stored
-    /// are different claims.
+    /// **The owner's pool**: the role that migrated the database and owns its
+    /// tables. Exposed so tests can arrange and assert against the database
+    /// directly — what the API reports and what was actually stored are
+    /// different claims — including what only an owner may do, such as a
+    /// test's own trigger or [`fixtures::write_past_the_audit_trigger`].
     pub pool: PgPool,
-    /// The pool the router serves on, as the serving role (ADR-0051, #842).
+    /// **The pool the router serves on**, as [`SERVING_ROLE`]: a role that
+    /// owns nothing and may not change `audit_events` (ADR-0051 §2, #842).
     pub serving_pool: PgPool,
     pub state: AppState,
     /// The database this instance owns, for diagnostics.
@@ -176,6 +179,10 @@ impl TestApp {
                 )
             });
 
+        // Before the migrations, so the default privileges grant every table
+        // they create, as the provisioner's do on a host.
+        provision_the_serving_role(&pool, &database_name, &database_url).await;
+
         // The real migration runner over the real migration directory: whatever
         // a developer's database has drifted to is irrelevant, this is the
         // committed schema.
@@ -187,10 +194,42 @@ impl TestApp {
             )
         });
 
-        let mut config = test_config(&database_url);
+        // **The router serves as the serving role**, as the binary does: the
+        // narrowing and the posture check below are the binary's own.
+        let serving_url = as_the_serving_role(&database_url);
+        let serving_pool =
+            db::create_pool_with_max_connections(&serving_url, TEST_POOL_MAX_CONNECTIONS)
+                .unwrap_or_else(|error| {
+                    harness_failure(
+                        "build the serving role's pool for the test database",
+                        &error.to_string(),
+                        &serving_url,
+                    )
+                });
+
+        db::narrow_serving_role(&pool, &serving_pool)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure(
+                    "narrow the serving role's privileges",
+                    &error.to_string(),
+                    &database_url,
+                )
+            });
+        db::check_serving_posture(&serving_pool)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure(
+                    "check the serving role's posture",
+                    &error.to_string(),
+                    &serving_url,
+                )
+            });
+
+        let mut config = test_config(&serving_url, &database_url);
         adjust(&mut config);
 
-        modules::auth::bootstrap::ensure_administrator(&pool, &config)
+        modules::auth::bootstrap::ensure_administrator(&serving_pool, &config)
             .await
             .unwrap_or_else(|error| {
                 harness_failure(
@@ -205,11 +244,11 @@ impl TestApp {
         // gets it. Fetching the token from `password_reset_tokens` instead
         // would prove the row was written and nothing about whether anybody
         // could have used it.
-        let state = AppState::with_mailer(pool.clone(), config, mailer);
+        let state = AppState::with_mailer(serving_pool.clone(), config, mailer);
 
         Self {
-            serving_pool: pool.clone(),
             pool,
+            serving_pool,
             state,
             database_name,
             maintenance_url,
@@ -901,12 +940,16 @@ fn capture_backend_logs() {
 ///
 /// Built here rather than reusing `AppConfig::test_default()`, which is
 /// `#[cfg(test)]` and so exists only inside the library's own unit tests.
-fn test_config(database_url: &str) -> AppConfig {
+fn test_config(serving_url: &str, owner_url: &str) -> AppConfig {
     AppConfig {
         app_name: "Kelir".to_owned(),
         app_env: AppEnv::Test,
         bind_address: "127.0.0.1:0".to_owned(),
-        database_url: database_url.to_owned(),
+        // The two URLs the binary would be given (ADR-0051 §2). The harness
+        // opens its pools itself, so the owner's is here for a test that
+        // reads it, such as one that starts the database as the binary does.
+        database_url: serving_url.to_owned(),
+        database_migration_url: Some(owner_url.to_owned()),
         // The pool above is built from the URL alone, as these leave it.
         database_ssl_mode: None,
         database_ssl_root_cert: None,
@@ -999,6 +1042,84 @@ pub fn server_url() -> String {
                 "<unset>",
             )
         })
+}
+
+/// The serving role every test database grants (ADR-0051 §2).
+///
+/// Roles are per cluster, so it is one role for every test database, created
+/// by the first test that needs it. **The server's role needs `CREATEROLE`**,
+/// or this role created beforehand with [`SERVING_ROLE_PASSWORD`]
+/// (Installation guide §3). CI's role is the service container's superuser.
+pub const SERVING_ROLE: &str = "kelir_test_app";
+
+/// Its password. The role reaches nothing but test databases.
+pub const SERVING_ROLE_PASSWORD: &str = "kelir-test-app-password";
+
+/// `database_url`, signed in as [`SERVING_ROLE`].
+pub fn as_the_serving_role(database_url: &str) -> String {
+    let mut url = url::Url::parse(database_url).unwrap_or_else(|error| {
+        harness_failure("parse the database URL", &error.to_string(), database_url)
+    });
+
+    if url.set_username(SERVING_ROLE).is_err()
+        || url.set_password(Some(SERVING_ROLE_PASSWORD)).is_err()
+    {
+        harness_failure(
+            "sign the database URL in as the serving role",
+            "the URL has no host to sign in to",
+            database_url,
+        );
+    }
+
+    url.into()
+}
+
+/// Creates [`SERVING_ROLE`] if the cluster has none, and grants it this
+/// database as the provisioner grants `kelir_app` a host's (ADR-0051 §2 and
+/// §4), through the owner's pool.
+///
+/// The narrowing is not here: it is the binary's, and the harness calls the
+/// binary's after migrating.
+async fn provision_the_serving_role(owner: &PgPool, database_name: &str, database_url: &str) {
+    // Tests start in parallel, in several processes, and two may race to
+    // create the role; the loser finds it made.
+    let create_the_role = format!(
+        "DO $$
+         BEGIN
+             CREATE ROLE {SERVING_ROLE} WITH LOGIN PASSWORD '{SERVING_ROLE_PASSWORD}';
+         EXCEPTION
+             WHEN duplicate_object OR unique_violation THEN NULL;
+         END
+         $$"
+    );
+
+    let statements = [
+        create_the_role,
+        format!(r#"GRANT CONNECT ON DATABASE "{database_name}" TO {SERVING_ROLE}"#),
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC".to_owned(),
+        format!("GRANT USAGE ON SCHEMA public TO {SERVING_ROLE}"),
+        format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {SERVING_ROLE}"
+        ),
+        format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                 GRANT USAGE, SELECT ON SEQUENCES TO {SERVING_ROLE}"
+        ),
+    ];
+
+    for statement in &statements {
+        sqlx::query(statement)
+            .execute(owner)
+            .await
+            .unwrap_or_else(|error| {
+                harness_failure(
+                    &format!("provision the serving role {SERVING_ROLE}"),
+                    &error.to_string(),
+                    database_url,
+                )
+            });
+    }
 }
 
 async fn create_database(maintenance_url: &str, database_name: &str) {
@@ -1212,6 +1333,8 @@ pub async fn deadlocks_once_settled(app: &TestApp) -> i64 {
     use std::time::Duration;
     use tokio::time::Instant;
 
+    // Both pools: the router's backends are the serving pool's.
+    app.serving_pool.close().await;
     app.pool.close().await;
 
     let server = std::env::var("DATABASE_URL")
