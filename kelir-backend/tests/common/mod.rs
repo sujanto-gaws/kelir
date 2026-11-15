@@ -111,6 +111,8 @@ pub struct TestApp {
     pub pool: PgPool,
     /// **The pool the router serves on**, as [`SERVING_ROLE`]: a role that
     /// owns nothing and may not change `audit_events` (ADR-0051 §2, #842).
+    /// **A test that starves the router of connections holds these**, not
+    /// [`TestApp::pool`]'s: the two pools are separate since #842.
     pub serving_pool: PgPool,
     pub state: AppState,
     /// The database this instance owns, for diagnostics.

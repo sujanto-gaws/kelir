@@ -2110,7 +2110,7 @@ async fn assigning_a_role_takes_one_connection_at_a_time() {
     let mut held = Vec::new();
     for _ in 1..common::TEST_POOL_MAX_CONNECTIONS {
         held.push(
-            app.pool
+            app.serving_pool
                 .acquire()
                 .await
                 .expect("the harness pool has a connection to hold"),

@@ -1865,7 +1865,7 @@ async fn a_pool_with_no_connection_to_give_fails_closed_and_refuses_bad_tokens_w
 
     let mut held = Vec::new();
     for _ in 0..common::TEST_POOL_MAX_CONNECTIONS {
-        held.push(app.pool.acquire().await.expect("a connection"));
+        held.push(app.serving_pool.acquire().await.expect("a connection"));
     }
 
     // Refused on the token alone, at once.
