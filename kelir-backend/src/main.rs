@@ -8,10 +8,12 @@
 
 use std::future::Future;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use kelir_backend::config::AppConfig;
 use kelir_backend::state::AppState;
 use kelir_backend::{db, health, modules, server};
+use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -43,9 +45,9 @@ fn init_tracing() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    // First, so a stop signal that arrives while the backend migrates or
-    // bootstraps is held for the stop rather than ending it there (#856).
-    let shutdown = shutdown_signal()?;
+    // First, so a stop signal is never met by the default disposition: before
+    // serving it ends startup, and after it drives the drain (#856).
+    let mut shutdown = Box::pin(shutdown_signal()?);
     let config = AppConfig::from_env()?;
 
     tracing::info!(
@@ -55,45 +57,79 @@ async fn run() -> anyhow::Result<()> {
         "starting kelir backend"
     );
 
-    // **Two roles** (ADR-0051 §2). The owner migrates, through
-    // KELIR_DATABASE_MIGRATION_URL and a pool of its own, narrows the serving
-    // role, and its pool is closed before this returns, so it is gone before
-    // the server binds. Everything below runs on the serving pool, as a role
-    // that owns no relation, function, schema or type and may not change
-    // `audit_events`; staging and production check that posture before going
-    // on.
-    //
-    // Migrations run at startup so a fresh compose stack is usable immediately.
-    // This is safe while deployments are single-instance; once several replicas
-    // start together, migration moves to a release step (release process §5,
-    // ADR-0051 §6).
-    let pool = db::prepare_serving_pool(&config).await?;
+    // **Two roles** (ADR-0051 §2): the serving pool, and the owner's, from
+    // KELIR_DATABASE_MIGRATION_URL when it is set. Opened here, connecting
+    // neither, so a stop during startup can close both.
+    let pools = db::StartupPools::open(&config)?;
 
-    // After migrations, so the seeded role exists; before serving, so the
-    // instance is never reachable without a way to sign in.
-    modules::auth::bootstrap::ensure_administrator(&pool, &config).await?;
+    // **A stop during startup ends startup** (#856). Migrating, bootstrapping
+    // and binding can each wait, on a database that does not answer above all,
+    // and a stop that waited for them would be Docker's kill ten seconds later.
+    // Dropping the startup is safe: a migration interrupted mid-transaction is
+    // rolled back by PostgreSQL, and nothing has been served.
+    let started = tokio::select! {
+        started = start(&pools, &config) => Some(started?),
+        () = &mut shutdown => None,
+    };
 
-    let bind_address = config.bind_address.clone();
-    let state = AppState::new(pool, config);
+    let Some(listener) = started else {
+        tracing::info!("stopped during startup");
 
-    let listener = tokio::net::TcpListener::bind(&bind_address).await?;
-    tracing::info!(address = %bind_address, "listening");
+        if tokio::time::timeout(POOL_CLOSE, pools.close())
+            .await
+            .is_err()
+        {
+            tracing::warn!("the database pools had not closed {POOL_CLOSE:?} into the stop");
+        }
+
+        return Ok(());
+    };
+
+    let state = AppState::new(pools.serving, config);
 
     server::serve(listener, state, shutdown).await?;
 
     Ok(())
 }
 
+/// How long a stop during startup waits for the pools to close.
+const POOL_CLOSE: Duration = Duration::from_secs(1);
+
+/// The startup that waits on something else: preparing the database, the
+/// bootstrap and the bind. Returns the bound listener.
+async fn start(pools: &db::StartupPools, config: &AppConfig) -> anyhow::Result<TcpListener> {
+    // The owner migrates and narrows the serving role, and its pool is closed
+    // before this goes on, so it is gone before the server binds. Everything
+    // below runs on the serving pool, as a role that owns no relation,
+    // function, schema or type and may not change `audit_events`; staging and
+    // production check that posture before going on.
+    //
+    // Migrations run at startup so a fresh compose stack is usable immediately.
+    // This is safe while deployments are single-instance; once several replicas
+    // start together, migration moves to a release step (release process §5,
+    // ADR-0051 §6).
+    pools.prepare(config).await?;
+
+    // After migrations, so the seeded role exists; before serving, so the
+    // instance is never reachable without a way to sign in.
+    modules::auth::bootstrap::ensure_administrator(&pools.serving, config).await?;
+
+    let listener = TcpListener::bind(&config.bind_address).await?;
+    tracing::info!(address = %config.bind_address, "listening");
+
+    Ok(listener)
+}
+
 /// Completes on SIGTERM, which `docker stop` sends, or on SIGINT, which Ctrl-C
 /// sends (#856).
 ///
 /// **Both are listened for from when this is called**, first thing in `run`,
-/// not from when the future is first polled: the binary is the container's PID 1, and PID 1
-/// ignores a signal it has no handler for, which is why `docker stop` used to
-/// wait out its ten seconds and kill. Installed up front, a SIGINT during
-/// startup is held for the stop rather than ending the process outright. A
-/// handler that cannot be installed fails startup rather than leaving a
-/// process that can only be killed.
+/// not from when the future is first polled: the binary is the container's
+/// PID 1, and PID 1 ignores a signal it has no handler for, which is why
+/// `docker stop` used to wait out its ten seconds and kill. `run` races its
+/// startup against this future, so a signal before serving ends the startup,
+/// and one after drives the drain. A handler that cannot be installed fails
+/// startup rather than leaving a process that can only be killed.
 ///
 /// The handlers stay installed after the first signal, so a second one during
 /// the stop is ignored rather than killing the drain.

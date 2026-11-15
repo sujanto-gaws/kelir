@@ -1181,9 +1181,12 @@ While the major version is `0`, the public API may change in any release.
   answered 503 `SHUTTING_DOWN` and a change it had not committed is
   rolled back, a reset mail still sending is not sent, and a worker's
   claimed rows return when their lease passes, as after a crash. A stop
-  that overran still exits 0. Before, the backend ignored SIGTERM, so
-  `docker stop` waited 10 seconds and killed it (`Exited (137)`), and
-  the requests and the reset mail in flight were lost.
+  that overran still exits 0. A stop that arrives while the backend is
+  still starting, for example while its migrations wait on a database
+  that does not answer, ends the startup at once, also with exit 0.
+  Before, the backend ignored SIGTERM, so `docker stop` waited 10
+  seconds and killed it (`Exited (137)`), and the requests and the reset
+  mail in flight were lost.
 
 - **Two backends send each notification email once**
   ([#853](https://github.com/sujanto-gaws/kelir/issues/853)). The

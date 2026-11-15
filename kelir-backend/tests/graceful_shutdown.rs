@@ -313,3 +313,117 @@ async fn a_request_in_flight_at_the_stop_completes_and_the_workers_stop() {
         "a worker went on working after serve returned"
     );
 }
+
+/// How long the binary's pool retries a refused connection before startup
+/// fails: `acquire_timeout` in `db::create_pool_with_tls`. The stop below has
+/// to land, and end the process, well inside it, or the exit is startup's
+/// failure rather than the stop's.
+#[cfg(unix)]
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// **A stop during startup ends startup**, with exit 0 (#856).
+///
+/// The binary is pointed at a loopback port nothing listens on, so its
+/// migrations wait on a pool retrying a refused connection. SIGTERM is sent
+/// once it has logged that it is starting, which is after its signal handlers
+/// are installed. It must exit 0 at once rather than wait for the database,
+/// and well before the retry gives up and startup fails with exit 1.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_during_startup_ends_it_with_exit_zero() {
+    use tokio::io::AsyncBufReadExt;
+
+    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a loopback port")
+        .local_addr()
+        .expect("the bound address")
+        .port();
+    let bind_address = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a loopback port")
+        .local_addr()
+        .expect("the bound address");
+
+    let started = Instant::now();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir-backend"))
+        .env("KELIR_APP_ENV", "test")
+        .env("KELIR_JWT_SECRET", common::JWT_SECRET)
+        .env(
+            "KELIR_DATABASE_URL",
+            format!("postgres://kelir:kelir@127.0.0.1:{closed_port}/kelir"),
+        )
+        .env("KELIR_BIND_ADDRESS", bind_address.to_string())
+        .env("KELIR_LOG", "info")
+        .env_remove("KELIR_DATABASE_SSL_MODE")
+        .env_remove("KELIR_DATABASE_SSL_ROOT_CERT")
+        .env_remove("KELIR_BOOTSTRAP_ADMIN_USERNAME")
+        .env_remove("KELIR_BOOTSTRAP_ADMIN_PASSWORD")
+        .env_remove("KELIR_BOOTSTRAP_ADMIN_EMAIL")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the kelir-backend binary starts");
+
+    let stdout = child.stdout.take().expect("the binary's log");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let starting = async {
+        while let Some(line) = lines.next_line().await.expect("the binary's log reads") {
+            if line.contains("starting kelir backend") {
+                return true;
+            }
+        }
+
+        false
+    };
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, starting).await,
+        Ok(true),
+        "the binary did not log that it was starting"
+    );
+
+    // Control: it is still starting, held by the database it cannot reach.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let early = child.try_wait().expect("the binary's status");
+    assert!(
+        early.is_none(),
+        "control: the binary ended before the stop, so it was not waiting on the database: \
+         {early:?}"
+    );
+
+    let pid = child.id().expect("the binary is running");
+    let signalled = Instant::now();
+    let killed = tokio::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .await
+        .expect("kill(1) runs");
+    assert!(killed.success(), "kill -TERM {pid} failed: {killed}");
+
+    let status = tokio::time::timeout(DOCKER_STOP_TIMEOUT, child.wait())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the binary was still starting {DOCKER_STOP_TIMEOUT:?} after SIGTERM, when \
+                 Docker kills"
+            )
+        })
+        .expect("the binary's exit status");
+    let took = signalled.elapsed();
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "SIGTERM during startup did not end it cleanly: {status}"
+    );
+    assert!(
+        took < Duration::from_secs(2),
+        "SIGTERM during startup took {took:?} to end it: the startup was waited for"
+    );
+    assert!(
+        started.elapsed() < ACQUIRE_TIMEOUT,
+        "control: the run took {:?}, past the pool's {ACQUIRE_TIMEOUT:?} retry, so the exit \
+         may not be the stop's",
+        started.elapsed()
+    );
+}
