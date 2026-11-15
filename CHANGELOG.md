@@ -11,6 +11,14 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **`{:?}` of the backend's configuration prints no secret**
+  ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
+  `AppConfig` derived `Debug`, so any debug print of it showed both database
+  URLs with their passwords, the signing secret, the object store's pair and
+  the bootstrap password. Its `Debug` now names every setting and prints
+  `<redacted>` for each secret, or `None` for an optional one left unset
+  (`config.rs`, `debug_prints_no_secret`). No log line printed it before;
+  nothing to rotate.
 - **The backend migrates as `kelir` and serves as `kelir_app`, a role that
   owns nothing, and the upgrade from `v0.9.0` needs database steps first**
   ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
@@ -67,7 +75,9 @@ While the major version is `0`, the public API may change in any release.
   runs as the owner.** `v0.9.0`'s binary migrates at startup, and as
   `kelir_app` its migrator is refused, for want of `CREATE` on schema
   `public` (`serving_role_campaign.rs`; CI's `N−1 rehearsal` job rehearses
-  the whole path on PostgreSQL 16 and 17). So before `./deploy.sh 0.9.0`,
+  the "any other host" SQL path below on PostgreSQL 16 and 17, rollback and
+  roll forward included, and passed with that outcome on both; the
+  provisioner's path is not run by it). So before `./deploy.sh 0.9.0`,
   point `KELIR_DATABASE_URL` in the compose file at the owner,
   `postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@...`, and put
   it back before rolling forward. **For as long as the rollback lasts,
