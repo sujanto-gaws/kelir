@@ -107,6 +107,8 @@ pub struct TestApp {
     /// database directly — what the API reports and what was actually stored
     /// are different claims.
     pub pool: PgPool,
+    /// The pool the router serves on, as the serving role (ADR-0051, #842).
+    pub serving_pool: PgPool,
     pub state: AppState,
     /// The database this instance owns, for diagnostics.
     pub database_name: String,
@@ -206,6 +208,7 @@ impl TestApp {
         let state = AppState::with_mailer(pool.clone(), config, mailer);
 
         Self {
+            serving_pool: pool.clone(),
             pool,
             state,
             database_name,

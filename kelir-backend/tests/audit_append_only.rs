@@ -342,3 +342,379 @@ async fn the_trigger_is_back_after_a_failing_write_past_it() {
 
     assert_refused(&app, "UPDATE audit_events SET reason = 'x'").await;
 }
+
+// ---------------------------------------------------------------------------
+// The serving role (ADR-0051 §5, #842)
+//
+// Everything above holds the trigger against the owner's pool, which keeps
+// every privilege, so it proves the trigger alone. What follows holds the
+// serving role, the one the router answers requests through: it may read and
+// append to `audit_events`, and nothing else, by privilege and by ownership.
+// Each of the two stops the three verbs on its own.
+// ---------------------------------------------------------------------------
+
+/// What PostgreSQL answers a statement the role holds no privilege or
+/// ownership for: `insufficient_privilege`.
+const INSUFFICIENT_PRIVILEGE: &str = "42501";
+
+/// What the trigger's `RAISE` answers: `raise_exception`.
+const RAISED_BY_THE_TRIGGER: &str = "P0001";
+
+/// Runs `sql` as the serving role in a transaction that is always rolled back,
+/// and returns the refusal's SQLSTATE and text, or `None` when it landed.
+///
+/// Rolled back whichever way it went: a statement that lands is a red probe,
+/// and it must not leave the next case a different table.
+async fn as_the_serving_role(app: &TestApp, sql: &str) -> Option<(String, String)> {
+    let mut transaction = app
+        .serving_pool
+        .begin()
+        .await
+        .expect("the serving pool opens a transaction");
+
+    let outcome = sqlx::query(sql).execute(&mut *transaction).await;
+    let _ = transaction.rollback().await;
+
+    match outcome {
+        Ok(_) => None,
+        Err(error) => {
+            let code = error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .map(|code| code.into_owned())
+                .unwrap_or_default();
+
+            Some((code, error.to_string()))
+        }
+    }
+}
+
+/// The serving role's name, as the serving pool reports it.
+async fn the_serving_role(app: &TestApp) -> String {
+    sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&app.serving_pool)
+        .await
+        .expect("the serving role names itself")
+}
+
+/// The trigger's row, which every case below must leave as it found it.
+async fn the_trigger(app: &TestApp) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT tgname::text, tgenabled::text
+         FROM pg_trigger
+         WHERE tgrelid = 'audit_events'::regclass AND NOT tgisinternal",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("the catalogue reads back")
+}
+
+/// ADR-0051 §5, the first bullet. The three verbs are refused **on privilege**,
+/// before the trigger is reached: the probe asserts which of the two refused.
+#[tokio::test]
+async fn the_serving_role_is_refused_the_three_verbs_on_privilege() {
+    let app = an_app_with_audit_rows().await;
+    let before = the_rows(&app).await;
+
+    for sql in [
+        "UPDATE audit_events SET reason = 'x'",
+        "UPDATE audit_events SET reason = 'x' WHERE false",
+        "DELETE FROM audit_events",
+        "TRUNCATE audit_events",
+    ] {
+        let (code, message) = as_the_serving_role(&app, sql)
+            .await
+            .unwrap_or_else(|| panic!("`{sql}` landed as the serving role"));
+
+        assert_eq!(
+            code, INSUFFICIENT_PRIVILEGE,
+            "`{sql}` was refused, but not on privilege: {message}"
+        );
+    }
+
+    assert_eq!(the_rows(&app).await, before, "a refused verb changed a row");
+}
+
+/// ADR-0051 §4, *either alone still holds*. With the three verbs granted back,
+/// the serving role reaches the trigger, and the trigger refuses it.
+#[tokio::test]
+async fn with_the_verbs_granted_back_the_trigger_still_refuses_the_serving_role() {
+    let app = an_app_with_audit_rows().await;
+    let role = the_serving_role(&app).await;
+
+    sqlx::query(&format!(
+        r#"GRANT UPDATE, DELETE, TRUNCATE ON audit_events TO "{role}""#
+    ))
+    .execute(&app.pool)
+    .await
+    .expect("the owner widens the grant");
+
+    for sql in [
+        "UPDATE audit_events SET reason = 'x'",
+        "DELETE FROM audit_events",
+        "TRUNCATE audit_events",
+    ] {
+        let (code, message) = as_the_serving_role(&app, sql)
+            .await
+            .unwrap_or_else(|| panic!("`{sql}` landed past the trigger"));
+
+        assert!(
+            code == RAISED_BY_THE_TRIGGER && message.contains("append-only"),
+            "`{sql}` was refused, but not by the trigger: {code} {message}"
+        );
+    }
+}
+
+/// ADR-0051 §5, the second bullet, and #833's campaign, which #842's comments
+/// read into its *Done when*. Each of these landed **as the owner** on PG17,
+/// several with the trigger still enabled. As the serving role every one is
+/// refused for want of ownership or of `CREATE`, and the trigger and the rows
+/// are as they were.
+///
+/// The parents for `INHERIT` and `ATTACH PARTITION` are the owner's, because
+/// the serving role cannot create one; a role that could would fail the
+/// `CREATE TABLE` case instead.
+#[tokio::test]
+async fn the_serving_role_cannot_change_the_trigger_its_function_or_its_table() {
+    let app = an_app_with_audit_rows().await;
+
+    for setup in [
+        "CREATE TABLE audit_events_parent (LIKE audit_events)",
+        "CREATE TABLE audit_events_parted (LIKE audit_events) PARTITION BY HASH (id)",
+    ] {
+        sqlx::query(setup)
+            .execute(&app.pool)
+            .await
+            .unwrap_or_else(|error| panic!("the owner's `{setup}`: {error}"));
+    }
+
+    let rows = the_rows(&app).await;
+    let trigger = the_trigger(&app).await;
+    let name = AUDIT_APPEND_ONLY_TRIGGER;
+
+    let cases = [
+        format!("ALTER TABLE audit_events DISABLE TRIGGER {name}"),
+        "ALTER TABLE audit_events DISABLE TRIGGER ALL".to_owned(),
+        format!("DROP TRIGGER {name} ON audit_events"),
+        format!("ALTER TABLE audit_events ENABLE REPLICA TRIGGER {name}"),
+        "CREATE OR REPLACE FUNCTION audit_events_refuse_change() RETURNS trigger
+         LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$"
+            .to_owned(),
+        "DROP FUNCTION audit_events_refuse_change() CASCADE".to_owned(),
+        "ALTER TABLE audit_events INHERIT audit_events_parent".to_owned(),
+        "ALTER TABLE audit_events_parted ATTACH PARTITION audit_events
+         FOR VALUES WITH (MODULUS 1, REMAINDER 0)"
+            .to_owned(),
+        "ALTER TABLE audit_events DROP COLUMN reason".to_owned(),
+        "ALTER TABLE audit_events RENAME TO audit_events_original".to_owned(),
+        "ALTER TABLE audit_events RENAME COLUMN reason TO reason_original".to_owned(),
+        "CREATE TABLE audit_events_lookalike (LIKE audit_events)".to_owned(),
+        "ALTER TABLE audit_events OWNER TO CURRENT_USER".to_owned(),
+        "DROP TABLE audit_events CASCADE".to_owned(),
+        "SET session_replication_role = replica".to_owned(),
+    ];
+
+    let mut landed = Vec::new();
+
+    for sql in &cases {
+        match as_the_serving_role(&app, sql).await {
+            None => landed.push(format!("landed: {sql}")),
+            Some((code, _)) if code == INSUFFICIENT_PRIVILEGE => {}
+            Some((code, message)) => {
+                landed.push(format!(
+                    "refused, not on privilege ({code} {message}): {sql}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        landed.is_empty(),
+        "the serving role is not refused:\n{}",
+        landed.join("\n")
+    );
+    assert_eq!(the_trigger(&app).await, trigger, "the trigger changed");
+    assert_eq!(the_rows(&app).await, rows, "a stored row changed");
+}
+
+/// One table's effective privileges, as the serving role holds them.
+#[derive(Debug, sqlx::FromRow)]
+struct TablePrivileges {
+    table_name: String,
+    can_select: bool,
+    can_insert: bool,
+    can_update: bool,
+    can_delete: bool,
+    can_truncate: bool,
+    can_reference: bool,
+    can_trigger: bool,
+}
+
+impl TablePrivileges {
+    /// The privileges held, named as `GRANT` names them, in a fixed order.
+    fn held(&self) -> Vec<&'static str> {
+        [
+            ("SELECT", self.can_select),
+            ("INSERT", self.can_insert),
+            ("UPDATE", self.can_update),
+            ("DELETE", self.can_delete),
+            ("TRUNCATE", self.can_truncate),
+            ("REFERENCES", self.can_reference),
+            ("TRIGGER", self.can_trigger),
+        ]
+        .into_iter()
+        .filter_map(|(privilege, granted)| granted.then_some(privilege))
+        .collect()
+    }
+}
+
+/// One sequence's effective privileges, as the serving role holds them.
+#[derive(sqlx::FromRow)]
+struct SequencePrivileges {
+    sequence_name: String,
+    can_use: bool,
+    can_select: bool,
+    can_update: bool,
+}
+
+/// ADR-0051 §5, the third bullet. Every table but the two is the serving
+/// role's to read and write, and no table gives it `TRUNCATE`, `REFERENCES` or
+/// `TRIGGER`. Read as effective privilege, so a grant through `PUBLIC` or a
+/// membership counts as well as a grant to the role.
+#[tokio::test]
+async fn the_serving_role_holds_exactly_its_grants_on_every_table() {
+    let app = TestApp::spawn().await;
+
+    let tables: Vec<TablePrivileges> = sqlx::query_as(
+        "SELECT c.relname::text AS table_name,
+                has_table_privilege(c.oid, 'SELECT') AS can_select,
+                has_table_privilege(c.oid, 'INSERT') AS can_insert,
+                has_table_privilege(c.oid, 'UPDATE') AS can_update,
+                has_table_privilege(c.oid, 'DELETE') AS can_delete,
+                has_table_privilege(c.oid, 'TRUNCATE') AS can_truncate,
+                has_table_privilege(c.oid, 'REFERENCES') AS can_reference,
+                has_table_privilege(c.oid, 'TRIGGER') AS can_trigger
+         FROM pg_class c
+         WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p')
+         ORDER BY 1",
+    )
+    .fetch_all(&app.serving_pool)
+    .await
+    .expect("the serving role reads its own privileges");
+    assert!(tables.len() > 2, "no tables, so this proves nothing");
+
+    let mut wrong = Vec::new();
+
+    for table in tables {
+        let held = table.held();
+        let expected: &[&str] = match table.table_name.as_str() {
+            "audit_events" => &["SELECT", "INSERT"],
+            "_sqlx_migrations" => &["SELECT"],
+            _ => &["SELECT", "INSERT", "UPDATE", "DELETE"],
+        };
+
+        if held != expected {
+            wrong.push(format!(
+                "{}: holds {held:?}, expected {expected:?}",
+                table.table_name
+            ));
+        }
+    }
+
+    let sequences: Vec<SequencePrivileges> = sqlx::query_as(
+        "SELECT c.relname::text AS sequence_name,
+                has_sequence_privilege(c.oid, 'USAGE') AS can_use,
+                has_sequence_privilege(c.oid, 'SELECT') AS can_select,
+                has_sequence_privilege(c.oid, 'UPDATE') AS can_update
+         FROM pg_class c
+         WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'S'
+         ORDER BY 1",
+    )
+    .fetch_all(&app.serving_pool)
+    .await
+    .expect("the serving role reads its sequence privileges");
+
+    for sequence in sequences {
+        if !(sequence.can_use && sequence.can_select) || sequence.can_update {
+            wrong.push(format!(
+                "sequence {}: USAGE {}, SELECT {}, UPDATE {}",
+                sequence.sequence_name, sequence.can_use, sequence.can_select, sequence.can_update
+            ));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// What the serving role is, beyond its grants. Every field is `false` for a
+/// role that may serve.
+#[derive(Debug, Default, PartialEq, sqlx::FromRow)]
+struct RolePosture {
+    superuser: bool,
+    member_of_the_owner: bool,
+    member_of_a_role: bool,
+    creates_in_public: bool,
+    creates_in_the_database: bool,
+    owns_an_object: bool,
+}
+
+/// ADR-0051 §2, the serving role itself: not a superuser, owner of nothing,
+/// member of no role, with no `CREATE` on the database or on schema `public`.
+#[tokio::test]
+async fn the_serving_role_owns_nothing_and_may_create_nothing() {
+    let app = TestApp::spawn().await;
+
+    let posture: RolePosture = sqlx::query_as(
+        "SELECT r.rolsuper AS superuser,
+                pg_has_role(current_user, c.relowner, 'MEMBER') AS member_of_the_owner,
+                EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid)
+                    AS member_of_a_role,
+                has_schema_privilege('public', 'CREATE') AS creates_in_public,
+                has_database_privilege(current_database(), 'CREATE') AS creates_in_the_database,
+                EXISTS (SELECT 1 FROM pg_class o WHERE o.relowner = r.oid)
+                    OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid)
+                    OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+                    OR EXISTS (
+                        SELECT 1 FROM pg_database d
+                        WHERE d.datname = current_database() AND d.datdba = r.oid
+                    ) AS owns_an_object
+         FROM pg_roles r, pg_class c
+         WHERE r.rolname = current_user AND c.oid = 'audit_events'::regclass",
+    )
+    .fetch_one(&app.serving_pool)
+    .await
+    .expect("the serving role reads its own posture");
+
+    assert_eq!(posture, RolePosture::default());
+}
+
+/// ADR-0051 §2, *future tables are granted by default privileges*: a table the
+/// owner creates later, as a later migration would, is the serving role's to
+/// read and write without anybody naming the role.
+#[tokio::test]
+async fn a_table_the_owner_creates_later_is_the_serving_roles_to_read_and_write() {
+    let app = TestApp::spawn().await;
+
+    sqlx::query("CREATE TABLE a_later_table (id integer PRIMARY KEY)")
+        .execute(&app.pool)
+        .await
+        .expect("the owner creates a table");
+
+    let table: TablePrivileges = sqlx::query_as(
+        "SELECT c.relname::text AS table_name,
+                has_table_privilege(c.oid, 'SELECT') AS can_select,
+                has_table_privilege(c.oid, 'INSERT') AS can_insert,
+                has_table_privilege(c.oid, 'UPDATE') AS can_update,
+                has_table_privilege(c.oid, 'DELETE') AS can_delete,
+                has_table_privilege(c.oid, 'TRUNCATE') AS can_truncate,
+                has_table_privilege(c.oid, 'REFERENCES') AS can_reference,
+                has_table_privilege(c.oid, 'TRIGGER') AS can_trigger
+         FROM pg_class c
+         WHERE c.oid = 'a_later_table'::regclass",
+    )
+    .fetch_one(&app.serving_pool)
+    .await
+    .expect("the serving role reads its privileges");
+
+    assert_eq!(table.held(), ["SELECT", "INSERT", "UPDATE", "DELETE"]);
+}
