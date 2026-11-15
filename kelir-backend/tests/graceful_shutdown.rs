@@ -315,19 +315,21 @@ async fn a_request_in_flight_at_the_stop_completes_and_the_workers_stop() {
 }
 
 /// How long the binary's pool retries a refused connection before startup
-/// fails: `acquire_timeout` in `db::create_pool_with_tls`. The stop below has
-/// to land, and end the process, well inside it, or the exit is startup's
-/// failure rather than the stop's.
+/// fails: `acquire_timeout` in `db::lazy_pool`, for both pools. The stop
+/// below has to land, and end the process, well inside it, or the exit is
+/// startup's failure rather than the stop's.
 #[cfg(unix)]
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// **A stop during startup ends startup**, with exit 0 (#856).
 ///
-/// The binary is pointed at a loopback port nothing listens on, so its
-/// migrations wait on a pool retrying a refused connection. SIGTERM is sent
-/// once it has logged that it is starting, which is after its signal handlers
-/// are installed. It must exit 0 at once rather than wait for the database,
-/// and well before the retry gives up and startup fails with exit 1.
+/// The binary is given both URLs, as a deployment is (ADR-0051 §2), each at a
+/// loopback port nothing listens on, so its migrations wait on the owner's
+/// pool retrying a refused connection, and the stop closes both pools.
+/// SIGTERM is sent once it has logged that it is starting, which is after its
+/// signal handlers are installed. It must exit 0 at once rather than wait for
+/// the database, and well before the retry gives up and startup fails with
+/// exit 1.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stop_during_startup_ends_it_with_exit_zero() {
@@ -349,6 +351,10 @@ async fn a_stop_during_startup_ends_it_with_exit_zero() {
         .env("KELIR_JWT_SECRET", common::JWT_SECRET)
         .env(
             "KELIR_DATABASE_URL",
+            format!("postgres://kelir_app:kelir@127.0.0.1:{closed_port}/kelir"),
+        )
+        .env(
+            "KELIR_DATABASE_MIGRATION_URL",
             format!("postgres://kelir:kelir@127.0.0.1:{closed_port}/kelir"),
         )
         .env("KELIR_BIND_ADDRESS", bind_address.to_string())

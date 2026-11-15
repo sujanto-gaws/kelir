@@ -445,7 +445,7 @@ async fn a_pass_the_deadline_overtakes_is_abandoned_and_its_leased_rows_come_bac
 
     // The next process, while the lease runs: it takes nothing.
     let next = AppState::with_mailer(
-        app.pool.clone(),
+        app.serving_pool.clone(),
         (*app.state.config).clone(),
         Mailer::captured(),
     );
@@ -743,8 +743,9 @@ struct Binary {
 /// Starts the binary `main.rs` builds, configured through its environment as a
 /// container is, and returns once it accepts connections.
 ///
-/// The database is the test's own, already migrated and bootstrapped, so the
-/// binary's migrations and bootstrap find nothing to do. The bootstrap and TLS
+/// The database is the test's own, already migrated, narrowed and
+/// bootstrapped, so the binary's migrations, narrowing and bootstrap find
+/// nothing to do. The bootstrap and TLS
 /// variables a developer's shell might carry are removed. Its log goes to the
 /// test's output at `warn`, so a failure here shows why.
 #[cfg(unix)]
@@ -753,12 +754,16 @@ async fn start_binary(app: &TestApp) -> Binary {
         .expect("a loopback port")
         .local_addr()
         .expect("the bound address");
-    let database_url = common::with_database(&common::server_url(), &app.database_name);
+    // The two URLs a deployment gives it (ADR-0051 §2): the owner migrates and
+    // narrows, and the binary serves as the harness's serving role.
+    let owner_url = common::with_database(&common::server_url(), &app.database_name);
+    let serving_url = common::as_the_serving_role(&owner_url);
 
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_kelir-backend"))
         .env("KELIR_APP_ENV", "test")
         .env("KELIR_JWT_SECRET", common::JWT_SECRET)
-        .env("KELIR_DATABASE_URL", &database_url)
+        .env("KELIR_DATABASE_URL", &serving_url)
+        .env("KELIR_DATABASE_MIGRATION_URL", &owner_url)
         .env("KELIR_BIND_ADDRESS", address.to_string())
         .env("KELIR_NOTIFICATION_POLL_SECONDS", "1")
         .env("KELIR_CLAMAV_POLL_SECONDS", "1")
