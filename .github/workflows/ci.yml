@@ -723,13 +723,13 @@ jobs:
           # The previous release is built from its tag.
           fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Check out the previous release
         run: git worktree add --detach "${RUNNER_TEMP}/previous" v0.9.0
 
       - name: Build this tree's backend
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: kelir-backend
           file: deploy/docker/backend.Dockerfile
@@ -740,7 +740,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=n1-current,ignore-error=true
 
       - name: Build the previous release's backend
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ${{ runner.temp }}/previous/kelir-backend
           file: ${{ runner.temp }}/previous/deploy/docker/backend.Dockerfile

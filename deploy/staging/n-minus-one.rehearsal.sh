@@ -63,9 +63,11 @@ PREVIOUS_IMAGE="${KELIR_REHEARSAL_PREVIOUS_IMAGE:-}"
 BUILT_IMAGES=()
 WORK="$(mktemp -d)"
 
-OWNER_PASSWORD="rehearsal-owner-password"
-APP_PASSWORD="rehearsal-app-password"
-ADMIN_PASSWORD="rehearsal-administrator-password"
+# Throwaway values for containers this script creates and removes; not a
+# secret of any deployment. `gitleaks:allow` keeps a secret scan off them.
+OWNER_PASSWORD="rehearsal-owner-password" # gitleaks:allow
+APP_PASSWORD="rehearsal-app-password" # gitleaks:allow
+ADMIN_PASSWORD="rehearsal-administrator-password" # gitleaks:allow
 OWNER_URL="postgres://kelir:${OWNER_PASSWORD}@postgres:5432/kelir"
 APP_URL="postgres://kelir_app:${APP_PASSWORD}@postgres:5432/kelir"
 
@@ -173,9 +175,9 @@ pass "step 1: a v0.9.0 host's owner and database"
 
 common_env=(
     -e KELIR_APP_ENV=staging
-    -e KELIR_JWT_SECRET=rehearsal-jwt-secret-0123456789abcdef
+    -e KELIR_JWT_SECRET=rehearsal-jwt-secret-0123456789abcdef # gitleaks:allow
     -e KELIR_STORAGE_ACCESS_KEY=rehearsal-access-key
-    -e KELIR_STORAGE_SECRET_KEY=rehearsal-secret-key
+    -e KELIR_STORAGE_SECRET_KEY=rehearsal-secret-key # gitleaks:allow
     -e KELIR_BOOTSTRAP_ADMIN_USERNAME=admin
     -e "KELIR_BOOTSTRAP_ADMIN_PASSWORD=${ADMIN_PASSWORD}"
     -e KELIR_BOOTSTRAP_ADMIN_EMAIL=admin@localhost
