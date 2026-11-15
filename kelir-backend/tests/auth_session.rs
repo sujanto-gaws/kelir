@@ -3067,7 +3067,7 @@ async fn a_sign_in_whose_user_is_deleted_during_its_verify_is_refused_and_says_w
 ///
 /// It fails if the lock reads a deleted user (the sign-in answers 200 and
 /// stores a token), if the refusal audits another reason, or if the count is
-/// given back for a deleted user, which the sign-in documents it leaves.
+/// changed for a deleted user, which the sign-in documents it leaves.
 #[tokio::test]
 async fn a_sign_in_whose_user_is_deleted_after_its_count_is_refused_at_the_lock() {
     let app = Arc::new(TestApp::spawn().await);

@@ -1171,32 +1171,32 @@ async fn a_deactivated_accounts_sign_ins_are_refused_uncounted_and_never_lock() 
     );
 }
 
-/// The statement-level gate the give-back waits on: it holds the
-/// `uncount_sign_in_attempt` statement before it touches any row, so other
-/// sign-ins count meanwhile.
-const UNCOUNT_GATE: i64 = 8_550;
+/// A tripwire's advisory key: a statement that decrements the failure count,
+/// as a give-back would, waits on it, so a give-back reintroduced in that
+/// shape is seen held.
+const GIVE_BACK_GATE: i64 = 8_550;
 
-/// **Exposes a defect in the fix (#855, the closing gate).**
-/// `uncount_sign_in_attempt` says it "cannot widen the bound", because every
-/// password write resets the count. The reset is what widens it: the attempt
-/// that is given back was counted *before* the write, the write erased that
-/// count, and the give-back then takes one from failures counted *after* the
-/// write. So after a password write overtakes a right-password sign-in, an
-/// attacker is checked six times before the lock.
+/// #855's closing gate, a regression guard: a password write that overtakes a
+/// right-password sign-in returns no guess to an attacker.
 ///
-/// Staged in two steps, both triggers on `users`:
+/// The sign-in's count is erased by the write, which resets the counter. A
+/// sign-in refused because the password changed is not counted, and that
+/// holds without a give-back. A give-back here took one from the failures
+/// counted against the new password, and let an attacker check six passwords
+/// before the lock; the fix gives nothing back.
+///
+/// Staged with two triggers on `users`:
 /// - when the sign-in's count raises the counter, the same statement writes
 ///   the password as `set_password_hash` does (a new hash, the count and lock
-///   reset): a write committed after the count and before the lock;
-/// - a statement-level trigger holds the give-back before it touches the row,
-///   while three wrong guesses, against the new password, are counted.
+///   reset): a write committed after the count and before the lock, so the
+///   comparison under the lock refuses;
+/// - a statement-level tripwire holds any statement that decrements the count,
+///   and the test fails if one is ever held.
 ///
-/// The give-back then leaves two, not three, and the attacker's run checks a
-/// sixth password before the lock. Expected red until the give-back takes
-/// only what the attempt's own count left (for example, by giving back
-/// nothing once the password has changed, since the write already reset it).
+/// Three wrong guesses against the new password then leave the count at
+/// three, and the attacker's run checks five passwords in all before the lock.
 #[tokio::test]
-async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_attacker() {
+async fn a_password_write_overtaking_a_sign_in_returns_no_guess_to_an_attacker() {
     let app = Arc::new(TestApp::spawn().await);
     let username = "user.given.back";
     let user_id = create_user(&app, username).await;
@@ -1239,11 +1239,11 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
     execute(
         &app,
         &format!(
-            "CREATE FUNCTION test_hold_uncount() RETURNS trigger
+            "CREATE FUNCTION test_hold_give_back() RETURNS trigger
              LANGUAGE plpgsql AS $$
              BEGIN
                  IF current_query() LIKE '%GREATEST(failed_login_count - 1%' THEN
-                     PERFORM pg_advisory_xact_lock_shared({UNCOUNT_GATE});
+                     PERFORM pg_advisory_xact_lock_shared({GIVE_BACK_GATE});
                  END IF;
                  RETURN NULL;
              END
@@ -1253,8 +1253,8 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
     .await;
     execute(
         &app,
-        "CREATE TRIGGER test_hold_uncount BEFORE UPDATE ON users
-         FOR EACH STATEMENT EXECUTE FUNCTION test_hold_uncount()",
+        "CREATE TRIGGER test_hold_give_back BEFORE UPDATE ON users
+         FOR EACH STATEMENT EXECUTE FUNCTION test_hold_give_back()",
     )
     .await;
 
@@ -1262,7 +1262,7 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
         .await
         .expect("the gate's connection");
     sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(UNCOUNT_GATE)
+        .bind(GIVE_BACK_GATE)
         .execute(&mut gate)
         .await
         .expect("closes the gate");
@@ -1271,9 +1271,9 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
         let app = Arc::clone(&app);
         tokio::spawn(async move { attempt(&app, peer(201), username, PASSWORD).await })
     };
-    // Restaged by the fix (#855): the sign-in gives nothing back, so there is
-    // no give-back to hold. It answers with the gate still closed, and a
-    // give-back of the shape the gate holds fails the test here.
+    // The sign-in gives nothing back, so it answers with the tripwire still
+    // closed. A statement that decrements the count is held by it, and fails
+    // the test here.
     let deadline = tokio::time::Instant::now() + PATIENCE;
     while !overtaken.is_finished() {
         let held: i64 = sqlx::query_scalar(
@@ -1284,7 +1284,7 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
         .fetch_one(&app.pool)
         .await
         .expect("reads pg_stat_activity");
-        assert_eq!(held, 0, "the overtaken sign-in gave its count back");
+        assert_eq!(held, 0, "a count was given back");
         assert!(
             tokio::time::Instant::now() < deadline,
             "the overtaken sign-in never answered"
@@ -1314,12 +1314,12 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
     assert_eq!(failure_count(&app, user_id).await, 3);
 
     sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(UNCOUNT_GATE)
+        .bind(GIVE_BACK_GATE)
         .execute(&mut gate)
         .await
         .expect("opens the gate");
     assert_eq!(refusals_for(&app, user_id, PASSWORD_CHANGED).await, 1);
-    let after_give_back = failure_count(&app, user_id).await;
+    let after_the_guesses = failure_count(&app, user_id).await;
 
     // The attacker guesses on until the lock refuses one.
     let mut guess = 0;
@@ -1334,10 +1334,10 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
     let checked_since_the_write = refusals_for(&app, user_id, INCORRECT_PASSWORD).await;
 
     assert_eq!(
-        (after_give_back, checked_since_the_write),
+        (after_the_guesses, checked_since_the_write),
         (3, 5),
-        "the give-back took a failure counted after the password write: the count \
-         read {after_give_back} for three guesses, and {checked_since_the_write} \
+        "a count was given back, or the count was not reset by the write: the count \
+         read {after_the_guesses} for three guesses, and {checked_since_the_write} \
          passwords were checked against the new one before the lock; NFR-SEC-008 allows 5"
     );
 }

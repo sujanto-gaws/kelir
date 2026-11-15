@@ -114,23 +114,36 @@ pub async fn find_credentials_by_id(
     .await
 }
 
+/// Records a successful sign-in: stamps `last_login_at` and clears the
+/// failed-login count and the lock. Returns whether the row matched.
+///
+/// **Only while the stored hash is still `password_hash`, the one the sign-in
+/// verified** (#855's closing gate). The reset runs on the pool after the
+/// sign-in's transaction commits, so a password write can land between the two.
+/// That write resets the count itself, and failures counted after it are
+/// guesses against the new password: a reset that matched no hash erased them,
+/// and an attacker was checked more than five times against the new password
+/// before the lock. When the hash has changed, the statement matches nothing
+/// and changes nothing, `last_login_at` included.
 pub async fn record_successful_login(
     executor: impl PgExecutor<'_>,
     tenant_id: Uuid,
     user_id: Uuid,
-) -> Result<(), sqlx::Error> {
+    password_hash: &str,
+) -> Result<bool, sqlx::Error> {
     sqlx::query!(
         r#"
         UPDATE users
         SET last_login_at = now(), failed_login_count = 0, locked_until = NULL, updated_at = now()
-        WHERE tenant_id = $1 AND id = $2
+        WHERE tenant_id = $1 AND id = $2 AND password_hash = $3
         "#,
         tenant_id,
-        user_id
+        user_id,
+        password_hash
     )
     .execute(executor)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected() == 1)
 }
 
 /// What counting a sign-in attempt left behind.
@@ -184,7 +197,8 @@ impl CountedAttempt {
 /// write, and gave an attacker a sixth check.
 ///
 /// A sign-in whose password then verifies is cleared by
-/// [`record_successful_login`], which resets the counter and the lock. An
+/// [`record_successful_login`], which resets the counter and the lock while
+/// the hash it verified is still stored. An
 /// attempt that never answers, or that verified and then failed on a server
 /// error, stays counted as the failure it was assumed to be, and its lock
 /// expires like any other.
@@ -1518,9 +1532,11 @@ mod tests {
             .expect("the statement runs")
             .expect("counted");
 
-        record_successful_login(&mut *tx, other_tenant_id, user_id)
-            .await
-            .expect("the statement runs, but must match nothing");
+        assert!(
+            !record_successful_login(&mut *tx, other_tenant_id, user_id, HASH)
+                .await
+                .expect("the statement runs, but must match nothing")
+        );
 
         assert_eq!(
             failure_count(&mut tx, user_id).await,
@@ -1528,11 +1544,52 @@ mod tests {
             "another tenant must not be able to clear the counter"
         );
 
-        record_successful_login(&mut *tx, tenant_id, user_id)
+        assert!(record_successful_login(&mut *tx, tenant_id, user_id, HASH)
             .await
-            .expect("cleared");
+            .expect("cleared"));
 
         assert_eq!(failure_count(&mut tx, user_id).await, 0);
+    }
+
+    /// #855's closing gate: a success reset for a hash written over since
+    /// leaves the count and the lock as they are, since they now count
+    /// guesses against the new password.
+    #[tokio::test]
+    async fn a_successful_login_on_a_hash_written_since_leaves_the_count() {
+        let Some(mut tx) = transaction().await else {
+            return;
+        };
+
+        let (tenant_id, user_id) = given_user(&mut tx, "SUCCESS-REHASHED").await;
+
+        count_sign_in_attempt(&mut *tx, tenant_id, user_id, HASH, 1, 15)
+            .await
+            .expect("the statement runs")
+            .expect("counted and locked");
+        let locked = lockout(&mut tx, user_id).await;
+        assert!(locked.is_some());
+
+        assert!(
+            !record_successful_login(&mut *tx, tenant_id, user_id, "a-hash-written-over")
+                .await
+                .expect("the statement runs, but must match nothing")
+        );
+        assert_eq!(
+            (
+                failure_count(&mut tx, user_id).await,
+                lockout(&mut tx, user_id).await
+            ),
+            (0, locked),
+            "a reset for another hash must leave the lock on"
+        );
+
+        let last_login: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT last_login_at FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("user exists");
+        assert_eq!(last_login, None, "nothing about the row changes");
     }
 
     async fn set_lockout(transaction: &mut sqlx::PgConnection, user_id: Uuid, value: &str) {

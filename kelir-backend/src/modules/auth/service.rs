@@ -191,7 +191,8 @@ pub async fn sign_in(
     // one after another, through any number of backends, and the one that
     // reaches the threshold locks: at most five passwords are checked before
     // the lock, however many arrive at once. A password that verifies clears
-    // the count below (`record_successful_login`).
+    // the count below (`record_successful_login`), while its hash is still the
+    // one stored.
     //
     // The count matches only the hash read above, the one verified below, so
     // a password write never leaves this attempt counted and there is nothing
@@ -293,7 +294,26 @@ pub async fn sign_in(
 
     transaction.commit().await?;
 
-    identity_repo::record_successful_login(&state.pool, tenant_id, credentials.id).await?;
+    // The reset clears only the count of the hash verified above (#855). A
+    // password write that committed since has reset the count itself, and what
+    // it holds now are guesses against the new password, which this sign-in
+    // must not erase. **The sign-in still succeeds**: its password was right
+    // when it was checked, its token was stored under the user's row with that
+    // hash still current (ADR-0048), and the write's revoke has since ended
+    // that token. Refusing now would answer 401 for a session already stored.
+    if !identity_repo::record_successful_login(
+        &state.pool,
+        tenant_id,
+        credentials.id,
+        &credentials.password_hash,
+    )
+    .await?
+    {
+        tracing::info!(
+            user_id = %credentials.id,
+            "sign-in succeeded on a password written over since; its count was left as it is"
+        );
+    }
 
     // FR-AUTH-008: successful sign-in is an audited event.
     audit::record_or_warn(

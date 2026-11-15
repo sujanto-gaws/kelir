@@ -1197,7 +1197,9 @@ While the major version is `0`, the public API may change in any release.
   ([ADR-0048](docs/architectures/adr/0048.%20The%20User's%20Row%20Before%20Any%20Refresh%20Token,%20and%20a%20Password%20Write%20Revokes%20in%20Its%20Own%20Transaction.md)):
   its count matches only the hash it read, so a write before the count
   leaves nothing counted, and a write after it resets the counter. No count
-  is ever given back.
+  is ever given back. A successful sign-in clears the count only while the
+  password it verified is still stored, so a write that lands just before
+  that clear leaves the failures counted against the new password in place.
   One consequence: while five sign-ins of one account are in flight or have
   failed, the next is refused as locked out, even with the right password.
   The lock ends after fifteen minutes, or as soon as one of those sign-ins

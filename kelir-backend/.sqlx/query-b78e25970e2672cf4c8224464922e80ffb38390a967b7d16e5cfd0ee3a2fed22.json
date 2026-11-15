@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE users\n        SET last_login_at = now(), failed_login_count = 0, locked_until = NULL, updated_at = now()\n        WHERE tenant_id = $1 AND id = $2 AND password_hash = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b78e25970e2672cf4c8224464922e80ffb38390a967b7d16e5cfd0ee3a2fed22"
+}
