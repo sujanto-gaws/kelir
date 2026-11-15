@@ -19,11 +19,16 @@
 //! | The failure path marking the notification `SENT` | *a failed delivery is recorded and the notification is not lost*; *a deactivated recipient is not emailed and the attempt says why* |
 //!
 //! The second one is why this file has a test that calls `mark_delivered`
-//! directly. The mutation first went green: `pending_deliveries` filters on
-//! `PENDING`, so no *pass* re-reads a delivered row and the predicate looked
-//! covered when nothing was covering it. The race it actually guards is two
-//! workers sharing one batch, and only a caller arriving like the second one
-//! reddens it.
+//! directly. The mutation first went green: the pass's read (now
+//! `claim_deliveries`) filters on `PENDING`, so no *pass* re-reads a delivered
+//! row and the predicate looked covered when nothing was covering it. The race
+//! it actually guards is a sender arriving late with a batch it already held,
+//! and only a caller arriving like that reddens it.
+//!
+//! **Two senders over one batch are `notification_claim.rs`'s** ([#853]): the
+//! claim and its lease, staged in two senders with a control.
+//!
+//! [#853]: https://github.com/sujanto-gaws/kelir/issues/853
 //!
 //! [#257]: https://github.com/sujanto-gaws/kelir/issues/257
 
@@ -411,15 +416,16 @@ async fn a_second_pass_does_not_send_the_same_notification_twice() {
     assert_eq!(status_of(&app, id).await, "SENT");
 }
 
-/// **Two workers holding one batch send one email twice and change one row
-/// once**, because `mark_delivered` writes only over `PENDING`.
+/// **A delivered notification is not settled a second time**, because
+/// `mark_delivered` writes only over `PENDING`.
 ///
-/// The pass above cannot show this: it re-reads `pending_deliveries`, which
-/// filters on `PENDING` itself, so the second pass never sees the row. The race
-/// this guards is two processes that read the *same* batch before either wrote —
-/// so the second writer is called directly, as it would arrive, and finds
-/// nothing of its own to move. It is `record_scan_result`'s guarantee one module
-/// over, for the same reason.
+/// The pass above cannot show this: its claim filters on `PENDING` itself, so
+/// the second pass never sees the row. The writer this guards arrives late
+/// with a batch it already held, so it is called directly, as it would arrive,
+/// **carrying the very lease the delivery settled under**: the lease matches,
+/// so only the status predicate stands between it and the row. It is
+/// `record_scan_result`'s guarantee one module over, for the same reason. The
+/// lease's own fence is `notification_claim.rs`'s.
 #[tokio::test]
 async fn a_delivery_already_recorded_is_not_overwritten_by_a_second_worker() {
     let app = TestApp::spawn().await;
@@ -436,11 +442,19 @@ async fn a_delivery_already_recorded_is_not_overwritten_by_a_second_worker() {
     app.deliver_notifications().await;
     assert_eq!(status_of(&app, id).await, "SENT");
 
-    // The second worker, arriving with the batch it read before the first wrote.
+    let lease: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT lease_expires_at FROM notifications WHERE id = $1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("the lease the delivery settled under");
+
+    // A late writer, arriving with the claim the delivery already settled.
     let moved = kelir_backend::modules::notification::repository::mark_delivered(
         &app.pool,
         fixtures::SYSTEM_TENANT_ID,
         id,
+        lease,
         "FAILED",
     )
     .await

@@ -9,6 +9,7 @@
 //!
 //! [#251]: https://github.com/sujanto-gaws/kelir/issues/251
 
+use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
@@ -262,7 +263,8 @@ pub async fn mark_all_read<'e, E: PgExecutor<'e>>(
 // The email channel (FR-NTF-004; #257)
 // ---------------------------------------------------------------------------
 
-/// One notification waiting to be delivered somewhere other than the centre.
+/// One notification a sender has claimed, to deliver somewhere other than the
+/// centre.
 pub struct PendingDelivery {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -277,9 +279,41 @@ pub struct PendingDelivery {
     /// written and this pass. The worker records that as a failed attempt
     /// rather than retrying it for ever.
     pub recipient_email: Option<String>,
+    /// The lease this claim set — `lease_expires_at` as the claim wrote it.
+    ///
+    /// **It is the claim's fencing token**, as `outbox::repository::Claimed`'s
+    /// is. [`mark_delivered`] matches on it, so a sender that outlived its
+    /// lease and was overtaken by a second claim cannot settle the row the
+    /// second claimant now holds.
+    pub lease: DateTime<Utc>,
 }
 
-/// The notifications nobody has tried to deliver yet.
+/// Claims up to `limit` notifications nobody has delivered, oldest first,
+/// under a lease ([#853]).
+///
+/// # The claim is the outbox's
+///
+/// `outbox::repository::claim`'s shape (ADR-0041 §2), applied to this table:
+/// one `UPDATE` that writes the lease over the rows a `FOR UPDATE SKIP LOCKED`
+/// subquery picked. **Two senders — two replicas of this process — take
+/// different rows**: a row another sender is claiming is skipped rather than
+/// waited for, and a row another sender has claimed carries a lease that has
+/// not passed, so it is not due.
+///
+/// **Due** is `PENDING` with no lease, or with a lease that has passed. The
+/// second is what a sender that crashed mid-batch leaves behind, and it is
+/// claimed again rather than lost. A crash between a send and its settle costs
+/// a second email: at-least-once, and the one duplicate left.
+///
+/// **The lock is this table's alone.** The subquery reads `notifications` and
+/// nothing else, and the recipient's address is joined after the `UPDATE`, in
+/// a plain read: a claim takes no lock on `users`, so it never waits on or
+/// holds up a sign-in or a user edit.
+///
+/// **Before #853 this was an unclaimed read of `PENDING`**, and its comment
+/// said two workers would *send one notification twice, which costs an
+/// email*. On two backends that was nearly every email ([#853]'s
+/// measurements), not an occasional one.
 ///
 /// # It reads across every tenant, deliberately
 ///
@@ -294,32 +328,47 @@ pub struct PendingDelivery {
 /// Every row carries its own `tenant_id`, and the writes below take it back as a
 /// predicate, so the write is scoped even though the read is not.
 ///
-/// **`PENDING` is the whole claim.** Two workers reading one batch send one
-/// notification twice, which costs an email and changes no row twice —
-/// `mark_delivered` writes only over `PENDING`, exactly as `record_scan_result`
-/// writes only over its own.
-pub async fn pending_deliveries(
+/// [#853]: https://github.com/sujanto-gaws/kelir/issues/853
+pub async fn claim_deliveries(
     pool: &PgPool,
     limit: i64,
+    lease_seconds: f64,
 ) -> Result<Vec<PendingDelivery>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
-        SELECT n.id, n.tenant_id, n.notification_type, n.title, n.body,
-               u.email AS "recipient_email?"
-        FROM notifications n
+        WITH claimed AS (
+            UPDATE notifications n
+            SET lease_expires_at = now() + make_interval(secs => $2)
+            FROM (
+                SELECT id
+                FROM notifications
+                WHERE status = 'PENDING' AND deleted_at IS NULL
+                  AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+                ORDER BY created_at, id
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            ) due
+            WHERE n.id = due.id
+            RETURNING n.id, n.tenant_id, n.recipient_user_id, n.notification_type, n.title,
+                      n.body, n.created_at, n.lease_expires_at
+        )
+        SELECT c.id AS "id!", c.tenant_id AS "tenant_id!",
+               c.notification_type AS "notification_type!", c.title AS "title!",
+               c.body AS "body!", u.email AS "recipient_email?",
+               c.lease_expires_at AS "lease!"
+        FROM claimed c
         -- **A deactivated recipient has no address for this purpose.**
         -- `users.email` is `NOT NULL`, so the only way this join misses is a
         -- person removed between the notification being written and this pass —
         -- and mailing somebody the product has deactivated is the one delivery
         -- worth not attempting. The notification itself stays where it is.
         LEFT JOIN users u
-               ON u.id = n.recipient_user_id AND u.tenant_id = n.tenant_id
+               ON u.id = c.recipient_user_id AND u.tenant_id = c.tenant_id
               AND u.deleted_at IS NULL
-        WHERE n.status = 'PENDING' AND n.deleted_at IS NULL
-        ORDER BY n.created_at
-        LIMIT $1
+        ORDER BY c.created_at, c.id
         "#,
-        limit
+        limit,
+        lease_seconds,
     )
     .fetch_all(pool)
     .await?;
@@ -333,6 +382,7 @@ pub async fn pending_deliveries(
             title: row.title,
             body: row.body,
             recipient_email: row.recipient_email,
+            lease: row.lease,
         })
         .collect())
 }
@@ -430,19 +480,30 @@ pub async fn record_attempt(
     Ok(())
 }
 
-/// Moves a notification out of `PENDING`, **and only out of `PENDING`**.
+/// Moves a notification out of `PENDING`, **and only a row this claim still
+/// holds**.
 ///
-/// The predicate is what makes a duplicated pass harmless: a second worker that
-/// sent the same email finds no row to move and writes nothing twice. It is
-/// `record_scan_result`'s guarantee, one module over, for the same reason.
+/// # Fenced on the lease, not only on the status
+///
+/// `status = 'PENDING'` alone is what this matched before [#853], and it kept
+/// a duplicated pass from writing a row twice. It is not enough once a lease
+/// can pass: a sender that outlived its lease finds the row `PENDING` still —
+/// because a second sender re-claimed it and is delivering it now — and would
+/// settle the second sender's delivery out from under it. The lease is
+/// different for every claim, so it tells the two apart, as
+/// `outbox::repository::settle`'s does. **`0` means a newer claim owns this
+/// row**, or it is settled already, and the caller writes nothing more.
 ///
 /// **`read_at` is untouched.** Delivery is not reading, and a notification the
 /// recipient has already opened in the centre must not become unread because an
 /// email went out afterwards.
+///
+/// [#853]: https://github.com/sujanto-gaws/kelir/issues/853
 pub async fn mark_delivered(
     pool: &PgPool,
     tenant_id: Uuid,
     id: Uuid,
+    lease: DateTime<Utc>,
     status: &str,
 ) -> Result<u64, sqlx::Error> {
     let affected = sqlx::query!(
@@ -455,10 +516,12 @@ pub async fn mark_delivered(
             sent_at = CASE WHEN $3::text = 'SENT' THEN now() ELSE sent_at END,
             updated_at = now()
         WHERE tenant_id = $1 AND id = $2 AND status = 'PENDING' AND deleted_at IS NULL
+          AND lease_expires_at = $4
         "#,
         tenant_id,
         id,
-        status
+        status,
+        lease
     )
     .execute(pool)
     .await?
