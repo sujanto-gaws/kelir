@@ -525,7 +525,8 @@ impl fmt::Display for ServingRoleError {
             Self::Overprivileged { role, found } => write!(
                 f,
                 "KELIR_DATABASE_URL connects as `{role}`, which may not serve: {}. It must be \
-                 a role that owns nothing and may not change audit_events, with the owner's \
+                 a role that owns no relation, function, schema or type and may not change \
+                 audit_events, with the owner's \
                  URL in KELIR_DATABASE_MIGRATION_URL (ADR-0051)",
                 found.join("; ")
             ),

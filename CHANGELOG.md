@@ -26,9 +26,10 @@ While the major version is `0`, the public API may change in any release.
   `KELIR_DATABASE_MIGRATION_URL` is the owner's, which migrates at startup
   through a pool closed before the server binds. `staging` and `production`
   refuse to start without it, and refuse a serving role that is a superuser,
-  belongs to any role, owns a relation, function, schema or type, may change `audit_events` or
-  `_sqlx_migrations` (a column grant or a grant to `PUBLIC` included), may
-  create in schema `public` or the database, or holds `CREATEROLE`. The
+  belongs to any role, owns a relation, function, schema or type, may change
+  `audit_events` or `_sqlx_migrations` (a column grant or a grant to `PUBLIC`
+  included), may create in schema `public` or the database, or holds
+  `CREATEROLE`. The
   release compose file needs a new `.env` value, `KELIR_DB_APP_PASSWORD`,
   and `deploy.sh` refuses a `.env` without it. Take a backup first. On the
   staging-shape host the provisioner does the database half, run from the
@@ -75,7 +76,7 @@ While the major version is `0`, the public API may change in any release.
   runs as the owner.** `v0.9.0`'s binary migrates at startup, and as
   `kelir_app` its migrator is refused, for want of `CREATE` on schema
   `public` (`serving_role_campaign.rs`; CI's `N−1 rehearsal` job rehearses
-  the "any other host" SQL path below on PostgreSQL 16 and 17, rollback and
+  the "any other host" SQL path above on PostgreSQL 16 and 17, rollback and
   roll forward included, and passed with that outcome on both; the
   provisioner's path is not run by it). So before `./deploy.sh 0.9.0`,
   point `KELIR_DATABASE_URL` in the compose file at the owner,
