@@ -23,7 +23,11 @@ use crate::utils::cidr::{self, Cidr};
 /// `development` and `test` — staging and production refuse to start on them
 /// ([#317](https://github.com/sujanto-gaws/kelir/issues/317)). Everything else
 /// falls back to a development-friendly value everywhere.
-#[derive(Debug, Clone)]
+///
+/// **Its `Debug` prints no secret** (see the impl below): both database URLs
+/// carry a password, and the owner's stays in this struct for the process's
+/// life (ADR-0051 §4).
+#[derive(Clone)]
 pub struct AppConfig {
     pub app_name: String,
     pub app_env: AppEnv,
@@ -388,6 +392,63 @@ impl fmt::Display for AppEnv {
             Self::Production => "production",
         };
         f.write_str(name)
+    }
+}
+
+/// What `Debug` prints in place of a secret.
+const REDACTED: &str = "<redacted>";
+
+/// **Names every setting and prints no secret.** A derived `Debug` printed
+/// both database URLs with their passwords, the signing secret, the store's
+/// pair and the bootstrap password into any `{:?}` of the configuration. A
+/// secret that is set reads `<redacted>`; an optional one that is not reads
+/// `None`, so the output still says which are configured.
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let set = |value: &Option<String>| value.as_ref().map(|_| REDACTED);
+
+        f.debug_struct("AppConfig")
+            .field("app_name", &self.app_name)
+            .field("app_env", &self.app_env)
+            .field("bind_address", &self.bind_address)
+            .field("database_url", &REDACTED)
+            .field("database_migration_url", &set(&self.database_migration_url))
+            .field("database_ssl_mode", &self.database_ssl_mode)
+            .field("database_ssl_root_cert", &self.database_ssl_root_cert)
+            .field("jwt_secret", &REDACTED)
+            .field("storage_driver", &self.storage_driver)
+            .field("storage_endpoint", &self.storage_endpoint)
+            .field("storage_bucket", &self.storage_bucket)
+            .field("storage_access_key", &REDACTED)
+            .field("storage_secret_key", &REDACTED)
+            .field("storage_region", &self.storage_region)
+            .field("storage_max_upload_bytes", &self.storage_max_upload_bytes)
+            .field(
+                "storage_allowed_mime_types",
+                &self.storage_allowed_mime_types,
+            )
+            .field("clamav_host", &self.clamav_host)
+            .field("clamav_port", &self.clamav_port)
+            .field("clamav_poll_seconds", &self.clamav_poll_seconds)
+            .field("notification_poll_seconds", &self.notification_poll_seconds)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("mail_from", &self.mail_from)
+            .field("frontend_url", &self.frontend_url)
+            .field("multi_tenant", &self.multi_tenant)
+            .field("default_tenant_code", &self.default_tenant_code)
+            .field(
+                "bootstrap_admin",
+                &self.bootstrap_admin.as_ref().map(|admin| &admin.username),
+            )
+            .field("trusted_proxy_hops", &self.trusted_proxy_hops)
+            .field("integration_allowed_cidrs", &self.integration_allowed_cidrs)
+            .field(
+                "integration_allow_loopback",
+                &self.integration_allow_loopback,
+            )
+            .field("integration_dns_overrides", &self.integration_dns_overrides)
+            .finish()
     }
 }
 
@@ -1258,6 +1319,37 @@ mod tests {
                 "the refusal names the variable: {error}"
             );
         }
+    }
+
+    /// **`{:?}` of the configuration prints no secret** (ADR-0051 §4): the
+    /// owner's URL stays in the struct for the process's life.
+    #[test]
+    fn debug_prints_no_secret() {
+        let mut config = AppConfig::test_default();
+        config.database_url = "postgres://kelir_app:serving-pw@db:5432/kelir".to_owned();
+        config.database_migration_url = Some("postgres://kelir:owner-pw@db:5432/kelir".to_owned());
+        config.jwt_secret = "signing-secret".to_owned();
+        config.storage_access_key = "store-access".to_owned();
+        config.storage_secret_key = "store-secret".to_owned();
+        config.bootstrap_admin = Some(BootstrapAdmin {
+            username: "admin".to_owned(),
+            email: "admin@localhost".to_owned(),
+            password: "bootstrap-pw".to_owned(),
+        });
+
+        let printed = format!("{config:?}");
+
+        for secret in [
+            "serving-pw",
+            "owner-pw",
+            "signing-secret",
+            "store-access",
+            "store-secret",
+            "bootstrap-pw",
+        ] {
+            assert!(!printed.contains(secret), "{secret} is printed: {printed}");
+        }
+        assert!(printed.contains("database_migration_url: Some(\"<redacted>\")"));
     }
 
     #[test]
