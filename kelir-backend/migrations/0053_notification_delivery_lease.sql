@@ -5,8 +5,10 @@
 -- `PENDING` with no claim, so two senders polling one database read one batch
 -- and both mailed it; `mark_delivered`'s `status = 'PENDING'` kept the row from
 -- being written twice and did nothing for the mailbox. The sender now claims
--- its batch as `outbox::repository::claim` does (ADR-0041 §2): `FOR UPDATE SKIP
--- LOCKED` over the due rows, and a lease written in the same statement.
+-- its batch as `outbox::repository::claim` does: `FOR UPDATE SKIP LOCKED` over
+-- the due rows, as that function's own query reads, and a lease written in the
+-- same statement, as ADR-0041 §2 and Database Schema §12.8 describe the
+-- outbox's.
 --
 -- **The lease is a column, and `status` keeps its four values.** The outbox
 -- holds its lease in `next_attempt_at` beside a `PROCESSING` status; this table
