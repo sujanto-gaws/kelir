@@ -1107,8 +1107,9 @@ impl TestApp {
     /// panics first leaves a role behind that owns nothing and reaches no
     /// database, since its database is dropped.
     pub async fn scratch_serving_role(&self) -> ScratchServingRole {
-        let simple = Uuid::new_v4().simple().to_string();
-        let name = format!("kelir_test_scratch_{}", &simple[..12]);
+        // The whole id: a v7's leading digits are its timestamp, shared by
+        // tests that start together. 51 characters, with room for a suffix.
+        let name = format!("kelir_test_scratch_{}", Uuid::now_v7().simple());
 
         let statements = [
             format!("CREATE ROLE {name} WITH LOGIN PASSWORD '{SERVING_ROLE_PASSWORD}'"),
