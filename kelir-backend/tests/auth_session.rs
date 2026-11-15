@@ -3054,6 +3054,93 @@ async fn a_sign_in_whose_user_is_deleted_during_its_verify_is_refused_and_says_w
     );
 }
 
+/// #855's closing gate: the sign-in's lock still refuses a user deleted after
+/// the attempt was counted. Since #855 the test above is refused at the count,
+/// so it no longer reaches the lock's own miss; this one does.
+///
+/// **Staged with a trigger** on `users`: when the sign-in's count raises the
+/// user's `failed_login_count`, the same statement marks the user deleted. The
+/// count matched a live row and returned it, so the sign-in goes on to verify
+/// the right password and reaches the lock, which reads only a live user and
+/// finds none. That is a delete committed after the count and before the
+/// lock, the window the verify spans, without depending on its timing.
+///
+/// It fails if the lock reads a deleted user (the sign-in answers 200 and
+/// stores a token), if the refusal audits another reason, or if the count is
+/// given back for a deleted user, which the sign-in documents it leaves.
+#[tokio::test]
+async fn a_sign_in_whose_user_is_deleted_after_its_count_is_refused_at_the_lock() {
+    let app = Arc::new(TestApp::spawn().await);
+    let user_id = user(&app, "deleted.after.count").await;
+
+    execute(
+        &app,
+        &format!(
+            "CREATE FUNCTION test_delete_on_count() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF NEW.id = '{user_id}'
+                    AND NEW.failed_login_count > OLD.failed_login_count THEN
+                     NEW.deleted_at := now();
+                 END IF;
+                 RETURN NEW;
+             END
+             $$"
+        ),
+    )
+    .await;
+    execute(
+        &app,
+        "CREATE TRIGGER test_delete_on_count BEFORE UPDATE ON users
+         FOR EACH ROW EXECUTE FUNCTION test_delete_on_count()",
+    )
+    .await;
+
+    let signed_in = app
+        .post(
+            "/api/v1/auth/login",
+            None,
+            json!({ "username": "deleted.after.count", "password": PASSWORD }),
+        )
+        .await;
+
+    assert_eq!(
+        signed_in.status,
+        StatusCode::UNAUTHORIZED,
+        "a user deleted before the lock signed in: {}",
+        signed_in.body
+    );
+    assert_eq!(live_refresh_tokens(&app, user_id).await, 0);
+
+    let (failures, deleted): (i32, bool) = sqlx::query_as(
+        "SELECT failed_login_count, deleted_at IS NOT NULL FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads the user");
+    assert_eq!(
+        (failures, deleted),
+        (1, true),
+        "the count must have matched the live user (so the refusal is the lock's), \
+         and a deleted user's count is left as it is"
+    );
+
+    let reasons: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT reason FROM audit_events
+         WHERE object_id = $1 AND event_type = 'Security.SignInFailed'",
+    )
+    .bind(user_id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("reads the audit rows");
+    assert_eq!(
+        reasons,
+        [Some("the user was deleted during the sign-in".to_owned())],
+        "refused at the lock, for the deletion, and not as a wrong password"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0048, the closing gate's additions (test-engineer, 2026-10-27)
 //

@@ -465,14 +465,33 @@ async fn burst_held_at_the_row(
     backends: &[Arc<Backend>; 2],
     username: &str,
 ) -> Vec<JoinHandle<StatusCode>> {
+    sized_burst_held_at_the_row(
+        app,
+        backends,
+        username,
+        WRONG_PASSWORD,
+        [GUESSES_PER_BACKEND; 2],
+    )
+    .await
+}
+
+/// [`burst_held_at_the_row`] with the password every attempt sends and the
+/// attempts each backend sends chosen by the caller, each within its pool.
+async fn sized_burst_held_at_the_row(
+    app: &TestApp,
+    backends: &[Arc<Backend>; 2],
+    username: &str,
+    password: &'static str,
+    per_backend: [u8; 2],
+) -> Vec<JoinHandle<StatusCode>> {
     let mut guesses = Vec::new();
-    for (index, backend) in (0u8..).zip(backends) {
-        for guess in 0..GUESSES_PER_BACKEND {
+    for ((index, backend), sends) in (0u8..).zip(backends).zip(per_backend) {
+        for guess in 0..sends {
             let backend = Arc::clone(backend);
             let username = username.to_owned();
             guesses.push(tokio::spawn(async move {
                 backend
-                    .attempt(guesser(index, guess), &username, WRONG_PASSWORD)
+                    .attempt(guesser(index, guess), &username, password)
                     .await
             }));
         }
@@ -646,4 +665,682 @@ async fn a_burst_of_guesses_through_two_backends_checks_no_more_than_five_passwo
     for backend in &backends {
         backend.close().await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The closing gate's additions (#855, test-engineer, 2026-11-15)
+//
+// The tests above prove the burst bound with wrong passwords only. The fix
+// counts every attempt before its check, so a *right* password is now
+// counted, and may lock, while it is checked: these prove what that does to
+// the account's owner, that a success gives the count back, the edges of the
+// bound, and the paths that refuse without counting.
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_NOT_ACTIVE: &str = "account is not active";
+const PASSWORD_CHANGED: &str = "the password changed during the sign-in";
+
+/// The account's `failed_login_count`, as stored.
+async fn failure_count(app: &TestApp, user_id: Uuid) -> i32 {
+    sqlx::query_scalar("SELECT failed_login_count FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("reads failed_login_count")
+}
+
+/// Whether the account is locked out now, by the stored `locked_until`. An
+/// expired lock is left in the row until a success clears it, so `is_some`
+/// is not the question.
+async fn locked_now(app: &TestApp, user_id: Uuid) -> bool {
+    stored_lockout(app, user_id)
+        .await
+        .is_some_and(|until| until > Utc::now())
+}
+
+/// The account's `Security.SignInFailed` rows with `reason`.
+async fn refusals_for(app: &TestApp, user_id: Uuid, reason: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events
+         WHERE object_id = $1 AND event_type = 'Security.SignInFailed' AND reason = $2",
+    )
+    .bind(user_id)
+    .bind(reason)
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads the audit rows")
+}
+
+async fn execute(app: &TestApp, statement: &str) {
+    sqlx::query(statement)
+        .execute(&app.pool)
+        .await
+        .unwrap_or_else(|error| panic!("{statement}: {error}"));
+}
+
+/// The advisory key [`TokenGate`] waits on; the issue's number.
+const TOKEN_GATE: i64 = 855;
+
+/// A `BEFORE INSERT` trigger on `refresh_tokens` that waits on [`TOKEN_GATE`],
+/// as `auth_session.rs`'s `InsertGate` does: a sign-in whose password verified
+/// is held at its token's insert, after its count and its check, before it
+/// clears the count.
+struct TokenGate {
+    connection: PgConnection,
+}
+
+impl TokenGate {
+    async fn close(app: &TestApp) -> Self {
+        execute(
+            app,
+            &format!(
+                "CREATE FUNCTION test_hold_token_insert() RETURNS trigger
+                 LANGUAGE plpgsql AS $$
+                 BEGIN
+                     PERFORM pg_advisory_xact_lock_shared({TOKEN_GATE});
+                     RETURN NEW;
+                 END
+                 $$"
+            ),
+        )
+        .await;
+        execute(
+            app,
+            "CREATE TRIGGER test_hold_token_insert BEFORE INSERT ON refresh_tokens
+             FOR EACH ROW EXECUTE FUNCTION test_hold_token_insert()",
+        )
+        .await;
+
+        let mut connection = PgConnection::connect_with(&app.pool.connect_options())
+            .await
+            .expect("the gate's connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(TOKEN_GATE)
+            .execute(&mut connection)
+            .await
+            .expect("closes the gate");
+
+        TokenGate { connection }
+    }
+
+    async fn open(mut self) {
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(TOKEN_GATE)
+            .execute(&mut self.connection)
+            .await
+            .expect("opens the gate");
+        self.connection
+            .close()
+            .await
+            .expect("closes the gate's connection");
+    }
+}
+
+/// How many token inserts wait at the [`TokenGate`] now.
+async fn tokens_held(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'
+           AND query ~ '^\\s*INSERT INTO refresh_tokens'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("reads pg_stat_activity")
+}
+
+/// Plan 22 row 3, G2: the right password sent as the fifth attempt, after
+/// four failures, signs in. It is counted before its check, so it is the
+/// attempt that puts the lock on, which the test sees while it is held at its
+/// token's insert; its success then clears the lock and the count, and a
+/// fresh run of five failures is needed to lock again.
+///
+/// Fails if the fifth attempt is refused for the lock it put on itself, if a
+/// success leaves the lock or the count behind, or if the count is taken
+/// after the check again (the lock would not be on while it is held).
+#[tokio::test]
+async fn the_right_password_as_the_fifth_attempt_signs_in_and_clears_the_lock_it_put_on() {
+    let app = Arc::new(TestApp::spawn().await);
+    let username = "user.fifth.right";
+    let user_id = create_user(&app, username).await;
+
+    for _ in 0..4 {
+        assert_eq!(
+            attempt(&app, peer(151), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(failure_count(&app, user_id).await, 4);
+
+    let gate = TokenGate::close(&app).await;
+    let fifth = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { attempt(&app, peer(152), username, PASSWORD).await })
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while tokens_held(&app).await < 1 {
+        assert!(
+            !fifth.is_finished(),
+            "the fifth attempt answered without reaching its token's insert"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fifth attempt never reached its token's insert"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        locked_now(&app, user_id).await,
+        "the fifth attempt is counted before its check, so it put the lock on"
+    );
+    assert_eq!(failure_count(&app, user_id).await, 0);
+
+    gate.open().await;
+    let answered = tokio::time::timeout(PATIENCE, fifth)
+        .await
+        .expect("the fifth attempt answers once the gate opens")
+        .expect("the attempt's task completes");
+    assert_eq!(
+        answered,
+        StatusCode::OK,
+        "the right password on the fifth attempt must sign in"
+    );
+    assert_eq!(
+        (
+            stored_lockout(&app, user_id).await,
+            failure_count(&app, user_id).await
+        ),
+        (None, 0),
+        "the success clears the lock it put on, and the count"
+    );
+    assert_eq!(
+        (
+            refusals_for(&app, user_id, INCORRECT_PASSWORD).await,
+            refusals_for(&app, user_id, LOCKED_OUT).await
+        ),
+        (4, 0)
+    );
+
+    // The count starts again from the success: four more failures do not
+    // lock, and the fifth does.
+    for _ in 0..4 {
+        assert_eq!(
+            attempt(&app, peer(153), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert!(
+        !locked_now(&app, user_id).await,
+        "four failures after a success must not lock: the success reset the count"
+    );
+    assert_eq!(
+        attempt(&app, peer(153), username, WRONG_PASSWORD).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(locked_now(&app, user_id).await);
+}
+
+/// Plan 22 row 3, G1, both halves of the CHANGELOG's "until one of them
+/// succeeds". After four failures, four sign-ins with the *right* password
+/// are in flight at once, through two backends, held at the account's row
+/// before any is counted. The first counted puts the lock on; the other three
+/// find it at their count, not at the read before it (the read saw the
+/// account unlocked: they were waiting on the row), and are refused as
+/// locked out without a check. While the locking sign-in is held at its
+/// token's insert, a fifth right password is refused too. Once it succeeds,
+/// the lock is gone and the right password signs in through either backend.
+#[tokio::test]
+async fn right_passwords_in_flight_at_the_fifth_count_are_refused_until_the_locking_one_succeeds() {
+    let app = TestApp::spawn().await;
+    let username = "user.inflight.right";
+    let user_id = create_user(&app, username).await;
+    let backends = [Backend::beside(&app), Backend::beside(&app)];
+
+    for _ in 0..4 {
+        assert_eq!(
+            attempt(&app, peer(161), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    let tokens = TokenGate::close(&app).await;
+    let row = RowGate::close(&app, user_id).await;
+    let mut sign_ins =
+        sized_burst_held_at_the_row(&app, &backends, username, PASSWORD, [2, 2]).await;
+    assert!(
+        !locked_now(&app, user_id).await,
+        "every sign-in passed the read before the count while the account was unlocked"
+    );
+    row.open().await;
+
+    // Three answer, one is held at its token's insert.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let answered = sign_ins.iter().filter(|s| s.is_finished()).count();
+        let held = tokens_held(&app).await;
+        assert!(
+            answered < sign_ins.len(),
+            "every sign-in answered while the token gate was closed"
+        );
+        if answered == sign_ins.len() - 1 && held == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{answered} sign-ins answered and {held} held at the token's insert; \
+             expected 3 and 1"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let held_at = sign_ins
+        .iter()
+        .position(|s| !s.is_finished())
+        .expect("one sign-in is held");
+    let locking = sign_ins.remove(held_at);
+    let refused = answers(sign_ins).await;
+    assert_eq!(
+        refused,
+        [StatusCode::UNAUTHORIZED; 3],
+        "the right password in flight must be refused once another attempt's count locked"
+    );
+    assert_eq!(
+        (
+            refusals_for(&app, user_id, INCORRECT_PASSWORD).await,
+            refusals_for(&app, user_id, LOCKED_OUT).await
+        ),
+        (4, 3),
+        "refused by the lock at the count, with no password checked"
+    );
+    assert!(locked_now(&app, user_id).await);
+
+    assert_eq!(
+        backends[1].attempt(peer(165), username, PASSWORD).await,
+        StatusCode::UNAUTHORIZED,
+        "while the locking sign-in is still in flight, the right password is refused"
+    );
+
+    tokens.open().await;
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, locking)
+            .await
+            .expect("the locking sign-in answers once the gate opens")
+            .expect("its task completes"),
+        StatusCode::OK,
+        "the sign-in that put the lock on verified the right password and signs in"
+    );
+    assert_eq!(
+        (
+            stored_lockout(&app, user_id).await,
+            failure_count(&app, user_id).await
+        ),
+        (None, 0),
+        "its success lifts the lock"
+    );
+    for (index, backend) in (0u8..).zip(&backends) {
+        assert_eq!(
+            backend.attempt(peer(166 + index), username, PASSWORD).await,
+            StatusCode::OK,
+            "once one succeeded, the right password signs in through backend {index}"
+        );
+    }
+    assert_eq!(refusals_for(&app, user_id, INCORRECT_PASSWORD).await, 4);
+
+    for backend in &backends {
+        backend.close().await;
+    }
+}
+
+/// A burst of exactly five wrong guesses, the threshold: every one is
+/// checked, none is refused by the lock, and the fifth counted locks for
+/// fifteen minutes. Fails if the bound is off by one in either direction.
+#[tokio::test]
+async fn a_burst_of_exactly_five_guesses_checks_five_passwords_and_locks() {
+    let app = TestApp::spawn().await;
+    let username = "user.burst.five";
+    let user_id = create_user(&app, username).await;
+    let backends = [Backend::beside(&app), Backend::beside(&app)];
+
+    let gate = RowGate::close(&app, user_id).await;
+    let guesses =
+        sized_burst_held_at_the_row(&app, &backends, username, WRONG_PASSWORD, [3, 2]).await;
+    gate.open().await;
+
+    let statuses = answers(guesses).await;
+    assert_eq!(statuses, [StatusCode::UNAUTHORIZED; 5]);
+    assert_eq!(
+        refusals(&app, user_id).await,
+        (5, 0),
+        "five guesses at once check five passwords, and the lock refuses none"
+    );
+
+    let locked_until = stored_lockout(&app, user_id)
+        .await
+        .expect("the fifth counted locks");
+    let remaining = locked_until - Utc::now();
+    assert!(
+        remaining > Duration::minutes(14) && remaining <= Duration::minutes(15),
+        "the lockout should last fifteen minutes, ends in {remaining}"
+    );
+    assert_eq!(failure_count(&app, user_id).await, 0);
+
+    for backend in &backends {
+        backend.close().await;
+    }
+}
+
+/// Failures before a burst count against it: after two, a burst of eight
+/// checks three passwords, and the lock refuses the other five.
+#[tokio::test]
+async fn a_burst_after_two_failures_checks_only_three_more_passwords() {
+    let app = TestApp::spawn().await;
+    let username = "user.burst.after.two";
+    let user_id = create_user(&app, username).await;
+    let backends = [Backend::beside(&app), Backend::beside(&app)];
+
+    for _ in 0..2 {
+        assert_eq!(
+            attempt(&app, peer(171), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    let gate = RowGate::close(&app, user_id).await;
+    let guesses = burst_held_at_the_row(&app, &backends, username).await;
+    gate.open().await;
+
+    let statuses = answers(guesses).await;
+    assert_eq!(statuses, [StatusCode::UNAUTHORIZED; 8]);
+    assert_eq!(
+        refusals(&app, user_id).await,
+        (5, 5),
+        "two failures and a burst of eight: five passwords checked in all"
+    );
+    assert!(locked_now(&app, user_id).await);
+
+    for backend in &backends {
+        backend.close().await;
+    }
+}
+
+/// Guesses refused by a lock in force are not counted, and a lock that
+/// expires leaves a count of zero: after it, four failures do not lock and
+/// the fifth does. Fails if a refused guess counts, or if the count left at
+/// the lock carries over (one failure after expiry would lock again).
+#[tokio::test]
+async fn guesses_during_a_lockout_are_not_counted_and_five_fresh_failures_lock_again() {
+    let app = TestApp::spawn().await;
+    let username = "user.relock";
+    let user_id = lock_out(&app, username, peer(181)).await;
+
+    for _ in 0..3 {
+        assert_eq!(
+            attempt(&app, peer(182), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        (
+            refusals(&app, user_id).await,
+            failure_count(&app, user_id).await
+        ),
+        ((5, 3), 0),
+        "guesses refused by the lock check no password and count nothing"
+    );
+
+    expire_lockout(&app, user_id).await;
+
+    for failure in 1..=4 {
+        assert_eq!(
+            attempt(&app, peer(183), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            !locked_now(&app, user_id).await,
+            "failure {failure} after the lock expired locked the account again"
+        );
+    }
+    assert_eq!(failure_count(&app, user_id).await, 4);
+
+    assert_eq!(
+        attempt(&app, peer(183), username, WRONG_PASSWORD).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let locked_until = stored_lockout(&app, user_id)
+        .await
+        .expect("the fifth fresh failure locks");
+    let remaining = locked_until - Utc::now();
+    assert!(
+        remaining > Duration::minutes(14) && remaining <= Duration::minutes(15),
+        "a fresh lockout of fifteen minutes, ends in {remaining}"
+    );
+    assert_eq!(refusals(&app, user_id).await, (10, 3));
+}
+
+/// A deactivated account is refused before its attempt is counted: its
+/// sign-ins, right or wrong, check no password, count nothing and never lock,
+/// and each is audited as not active. Reactivated, it signs in at once.
+#[tokio::test]
+async fn a_deactivated_accounts_sign_ins_are_refused_uncounted_and_never_lock() {
+    let app = TestApp::spawn().await;
+    let username = "user.deactivated";
+    let user_id = create_user(&app, username).await;
+    execute(
+        &app,
+        &format!("UPDATE users SET status = 'INACTIVE' WHERE id = '{user_id}'"),
+    )
+    .await;
+
+    for _ in 0..6 {
+        assert_eq!(
+            attempt(&app, peer(191), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        attempt(&app, peer(192), username, PASSWORD).await,
+        StatusCode::UNAUTHORIZED,
+        "a deactivated account must refuse the right password"
+    );
+
+    assert_eq!(
+        (
+            failure_count(&app, user_id).await,
+            stored_lockout(&app, user_id).await
+        ),
+        (0, None),
+        "a deactivated account's sign-ins are not counted"
+    );
+    assert_eq!(
+        (
+            refusals_for(&app, user_id, ACCOUNT_NOT_ACTIVE).await,
+            refusals(&app, user_id).await
+        ),
+        (7, (0, 0)),
+        "each refusal says the account is not active, and none checked a password"
+    );
+
+    execute(
+        &app,
+        &format!("UPDATE users SET status = 'ACTIVE' WHERE id = '{user_id}'"),
+    )
+    .await;
+    assert_eq!(
+        attempt(&app, peer(193), username, PASSWORD).await,
+        StatusCode::OK
+    );
+}
+
+/// The statement-level gate the give-back waits on: it holds the
+/// `uncount_sign_in_attempt` statement before it touches any row, so other
+/// sign-ins count meanwhile.
+const UNCOUNT_GATE: i64 = 8_550;
+
+/// **Exposes a defect in the fix (#855, the closing gate).**
+/// `uncount_sign_in_attempt` says it "cannot widen the bound", because every
+/// password write resets the count. The reset is what widens it: the attempt
+/// that is given back was counted *before* the write, the write erased that
+/// count, and the give-back then takes one from failures counted *after* the
+/// write. So after a password write overtakes a right-password sign-in, an
+/// attacker is checked six times before the lock.
+///
+/// Staged in two steps, both triggers on `users`:
+/// - when the sign-in's count raises the counter, the same statement writes
+///   the password as `set_password_hash` does (a new hash, the count and lock
+///   reset): a write committed after the count and before the lock;
+/// - a statement-level trigger holds the give-back before it touches the row,
+///   while three wrong guesses, against the new password, are counted.
+///
+/// The give-back then leaves two, not three, and the attacker's run checks a
+/// sixth password before the lock. Expected red until the give-back takes
+/// only what the attempt's own count left (for example, by giving back
+/// nothing once the password has changed, since the write already reset it).
+#[tokio::test]
+async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_attacker() {
+    let app = Arc::new(TestApp::spawn().await);
+    let username = "user.given.back";
+    let user_id = create_user(&app, username).await;
+    let new_password = "the-password-written-during-the-verify";
+    let donor = fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "user.hash.donor",
+        "user.hash.donor@kelir.test",
+        new_password,
+        &[],
+    )
+    .await;
+
+    execute(
+        &app,
+        &format!(
+            "CREATE FUNCTION test_write_on_count() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             DECLARE written text := (SELECT password_hash FROM users WHERE id = '{donor}');
+             BEGIN
+                 IF NEW.id = '{user_id}' AND OLD.password_hash IS DISTINCT FROM written
+                    AND NEW.failed_login_count > OLD.failed_login_count THEN
+                     NEW.password_hash := written;
+                     NEW.failed_login_count := 0;
+                     NEW.locked_until := NULL;
+                 END IF;
+                 RETURN NEW;
+             END
+             $$"
+        ),
+    )
+    .await;
+    execute(
+        &app,
+        "CREATE TRIGGER test_write_on_count BEFORE UPDATE ON users
+         FOR EACH ROW EXECUTE FUNCTION test_write_on_count()",
+    )
+    .await;
+    execute(
+        &app,
+        &format!(
+            "CREATE FUNCTION test_hold_uncount() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF current_query() LIKE '%GREATEST(failed_login_count - 1%' THEN
+                     PERFORM pg_advisory_xact_lock_shared({UNCOUNT_GATE});
+                 END IF;
+                 RETURN NULL;
+             END
+             $$"
+        ),
+    )
+    .await;
+    execute(
+        &app,
+        "CREATE TRIGGER test_hold_uncount BEFORE UPDATE ON users
+         FOR EACH STATEMENT EXECUTE FUNCTION test_hold_uncount()",
+    )
+    .await;
+
+    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the gate's connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(UNCOUNT_GATE)
+        .execute(&mut gate)
+        .await
+        .expect("closes the gate");
+
+    let overtaken = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { attempt(&app, peer(201), username, PASSWORD).await })
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let held: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'
+               AND query LIKE '%GREATEST(failed_login_count - 1%'",
+        )
+        .fetch_one(&app.pool)
+        .await
+        .expect("reads pg_stat_activity");
+        if held == 1 {
+            break;
+        }
+        assert!(
+            !overtaken.is_finished(),
+            "the overtaken sign-in answered without reaching the give-back"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the overtaken sign-in's give-back was never held"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        failure_count(&app, user_id).await,
+        0,
+        "the write reset the count the overtaken sign-in took"
+    );
+
+    // Three wrong guesses against the new password, counted after the write.
+    for guess in 0..3 {
+        assert_eq!(
+            attempt(&app, peer(202 + guess), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(failure_count(&app, user_id).await, 3);
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(UNCOUNT_GATE)
+        .execute(&mut gate)
+        .await
+        .expect("opens the gate");
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, overtaken)
+            .await
+            .expect("the overtaken sign-in answers")
+            .expect("its task completes"),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(refusals_for(&app, user_id, PASSWORD_CHANGED).await, 1);
+    let after_give_back = failure_count(&app, user_id).await;
+
+    // The attacker guesses on until the lock refuses one.
+    let mut guess = 0;
+    while refusals_for(&app, user_id, LOCKED_OUT).await == 0 {
+        assert!(guess < 10, "ten more guesses and no lock");
+        assert_eq!(
+            attempt(&app, peer(210 + guess), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+        guess += 1;
+    }
+    let checked_since_the_write = refusals_for(&app, user_id, INCORRECT_PASSWORD).await;
+
+    assert_eq!(
+        (after_give_back, checked_since_the_write),
+        (3, 5),
+        "the give-back took a failure counted after the password write: the count \
+         read {after_give_back} for three guesses, and {checked_since_the_write} \
+         passwords were checked against the new one before the lock; NFR-SEC-008 allows 5"
+    );
 }
