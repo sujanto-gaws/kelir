@@ -3,6 +3,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::config::AppConfig;
+use crate::detached::DetachedTasks;
 use crate::mail::Mailer;
 use crate::middleware::rate_limit::RateLimiter;
 use crate::modules::attachment::storage::ObjectStorage;
@@ -30,6 +31,16 @@ pub struct AppState {
     /// instance the handler sends through, and so the SMTP connection pool is
     /// shared rather than reopened per reset.
     pub mailer: Mailer,
+    /// The work a request hands to the runtime and does not wait for: today
+    /// the reset mail ([`Mailer::send_detached`]).
+    ///
+    /// Tracked rather than spawned loose so a stop can wait for it ([#856]):
+    /// `server::serve` closes this once the last request has been answered,
+    /// waits for what is left up to the stop's deadline, and abandons the
+    /// rest.
+    ///
+    /// [#856]: https://github.com/sujanto-gaws/kelir/issues/856
+    pub detached: DetachedTasks,
 }
 
 impl AppState {
@@ -60,6 +71,7 @@ impl AppState {
             rate_limiter: Arc::new(RateLimiter::new()),
             mailer,
             storage,
+            detached: DetachedTasks::new(),
         }
     }
 }

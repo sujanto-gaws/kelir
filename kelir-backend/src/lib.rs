@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod db;
+pub mod detached;
 pub mod error;
 pub mod extract;
 pub mod health;
@@ -21,5 +22,6 @@ pub mod middleware;
 pub mod modules;
 pub mod response;
 pub mod router;
+pub mod server;
 pub mod state;
 pub mod utils;

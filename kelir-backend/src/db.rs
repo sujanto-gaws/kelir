@@ -749,55 +749,99 @@ impl std::error::Error for DatabaseStartupError {
 }
 
 /// Readies the database and returns the pool the server serves on
-/// (ADR-0051 §2).
+/// (ADR-0051 §2): [`StartupPools::open`], then [`StartupPools::prepare`].
 ///
-/// - **With `KELIR_DATABASE_MIGRATION_URL`**, the owner's pool migrates and
-///   then narrows the serving role, and **is closed before this returns**, so
-///   it is gone before the server binds.
-/// - **Without it**, the development shape, the serving URL migrates, as every
-///   release before `v1.0.0` did. Configuration refuses this shape in
-///   `staging` and `production`.
-/// - **In `staging` and `production`** the serving role's posture is checked
-///   last, on the serving pool, whichever shape got here.
+/// `main.rs` runs the two halves itself, so that a stop during startup can
+/// close the pools the second half was using (#856); this is the same
+/// sequence for a caller with no stop to race.
 pub async fn prepare_serving_pool(config: &AppConfig) -> Result<PgPool, DatabaseStartupError> {
-    let tls = DatabaseTlsSettings::from(config);
+    let pools = StartupPools::open(config)?;
+    pools.prepare(config).await?;
 
-    // A non-local database without TLS is refused here when the configuration
-    // alone says so, and at the first connection when the server does.
-    let serving = create_pool_with_tls(&config.database_url, tls)
-        .map_err(DatabaseStartupError::ServingPool)?;
-
-    match config.database_migration_url.as_deref() {
-        Some(migration_url) => {
-            let owner = create_migration_pool(migration_url, tls)
-                .map_err(DatabaseStartupError::MigrationPool)?;
-
-            let prepared = migrate_and_narrow(&owner, &serving).await;
-            owner.close().await;
-            prepared?;
-        }
-        None => {
-            run_migrations(&serving)
-                .await
-                .map_err(DatabaseStartupError::Migration)?;
-            tracing::info!("database migrations applied through the one URL");
-        }
-    }
-
-    if config.app_env.requires_real_secrets() {
-        check_serving_posture(&serving)
-            .await
-            .map_err(DatabaseStartupError::ServingRole)?;
-        tracing::info!(
-            "the serving role owns no relation, function, schema or type and may not change \
-             audit_events"
-        );
-    }
-
-    Ok(serving)
+    Ok(pools.serving)
 }
 
-/// [`prepare_serving_pool`]'s owner half: migrate, then narrow.
+/// The pools startup uses (ADR-0051 §2), opened before anything connects.
+pub struct StartupPools {
+    /// The pool the server serves on.
+    pub serving: PgPool,
+    /// The owner's, with `KELIR_DATABASE_MIGRATION_URL`. [`Self::prepare`]
+    /// closes it.
+    pub owner: Option<PgPool>,
+}
+
+impl StartupPools {
+    /// Builds both pools. Neither connects yet, so this cannot wait on the
+    /// database.
+    ///
+    /// A non-local database without TLS is refused here when the configuration
+    /// alone says so, and at the first connection when the server does.
+    pub fn open(config: &AppConfig) -> Result<Self, DatabaseStartupError> {
+        let tls = DatabaseTlsSettings::from(config);
+
+        let serving = create_pool_with_tls(&config.database_url, tls)
+            .map_err(DatabaseStartupError::ServingPool)?;
+
+        let owner = config
+            .database_migration_url
+            .as_deref()
+            .map(|migration_url| create_migration_pool(migration_url, tls))
+            .transpose()
+            .map_err(DatabaseStartupError::MigrationPool)?;
+
+        Ok(Self { serving, owner })
+    }
+
+    /// Readies the database for serving.
+    ///
+    /// - **With `KELIR_DATABASE_MIGRATION_URL`**, the owner's pool migrates and
+    ///   then narrows the serving role, and **is closed before this returns**,
+    ///   so it is gone before the server binds.
+    /// - **Without it**, the development shape, the serving URL migrates, as
+    ///   every release before `v1.0.0` did. Configuration refuses this shape in
+    ///   `staging` and `production`.
+    /// - **In `staging` and `production`** the serving role's posture is
+    ///   checked last, on the serving pool, whichever shape got here.
+    pub async fn prepare(&self, config: &AppConfig) -> Result<(), DatabaseStartupError> {
+        match &self.owner {
+            Some(owner) => {
+                let prepared = migrate_and_narrow(owner, &self.serving).await;
+                owner.close().await;
+                prepared?;
+            }
+            None => {
+                run_migrations(&self.serving)
+                    .await
+                    .map_err(DatabaseStartupError::Migration)?;
+                tracing::info!("database migrations applied through the one URL");
+            }
+        }
+
+        if config.app_env.requires_real_secrets() {
+            check_serving_posture(&self.serving)
+                .await
+                .map_err(DatabaseStartupError::ServingRole)?;
+            tracing::info!(
+                "the serving role owns no relation, function, schema or type and may not \
+                 change audit_events"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Closes both pools: for a stop that ended [`Self::prepare`] part way
+    /// (#856). Closing a pool twice is harmless.
+    pub async fn close(&self) {
+        if let Some(owner) = &self.owner {
+            owner.close().await;
+        }
+
+        self.serving.close().await;
+    }
+}
+
+/// [`StartupPools::prepare`]'s owner half: migrate, then narrow.
 async fn migrate_and_narrow(owner: &PgPool, serving: &PgPool) -> Result<(), DatabaseStartupError> {
     run_migrations(owner)
         .await

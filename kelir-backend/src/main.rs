@@ -6,12 +6,14 @@
 //! Keeping it thin is what lets `tests/` drive exactly the router the binary
 //! serves rather than a reconstruction of it.
 
-use std::net::SocketAddr;
+use std::future::Future;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use kelir_backend::config::AppConfig;
 use kelir_backend::state::AppState;
-use kelir_backend::{db, health, modules, router};
+use kelir_backend::{db, health, modules, server};
+use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -43,6 +45,9 @@ fn init_tracing() {
 }
 
 async fn run() -> anyhow::Result<()> {
+    // First, so a stop signal is never met by the default disposition: before
+    // serving it ends startup, and after it drives the drain (#856).
+    let mut shutdown = Box::pin(shutdown_signal()?);
     let config = AppConfig::from_env()?;
 
     tracing::info!(
@@ -52,59 +57,110 @@ async fn run() -> anyhow::Result<()> {
         "starting kelir backend"
     );
 
-    // **Two roles** (ADR-0051 §2). The owner migrates, through
-    // KELIR_DATABASE_MIGRATION_URL and a pool of its own, narrows the serving
-    // role, and its pool is closed before this returns, so it is gone before
-    // the server binds. Everything below runs on the serving pool, as a role
-    // that owns no relation, function, schema or type and may not change
-    // `audit_events`; staging and production check that posture before going
-    // on.
+    // **Two roles** (ADR-0051 §2): the serving pool, and the owner's, from
+    // KELIR_DATABASE_MIGRATION_URL when it is set. Opened here, connecting
+    // neither, so a stop during startup can close both.
+    let pools = db::StartupPools::open(&config)?;
+
+    // **A stop during startup ends startup** (#856). Migrating, bootstrapping
+    // and binding can each wait, on a database that does not answer above all,
+    // and a stop that waited for them would be Docker's kill ten seconds later.
+    // Dropping the startup is safe: a migration interrupted mid-transaction is
+    // rolled back by PostgreSQL, and nothing has been served.
+    let started = tokio::select! {
+        started = start(&pools, &config) => Some(started?),
+        () = &mut shutdown => None,
+    };
+
+    let Some(listener) = started else {
+        tracing::info!("stopped during startup");
+
+        if tokio::time::timeout(POOL_CLOSE, pools.close())
+            .await
+            .is_err()
+        {
+            tracing::warn!("the database pools had not closed {POOL_CLOSE:?} into the stop");
+        }
+
+        return Ok(());
+    };
+
+    let state = AppState::new(pools.serving, config);
+
+    server::serve(listener, state, shutdown).await?;
+
+    Ok(())
+}
+
+/// How long a stop during startup waits for the pools to close.
+const POOL_CLOSE: Duration = Duration::from_secs(1);
+
+/// The startup that waits on something else: preparing the database, the
+/// bootstrap and the bind. Returns the bound listener.
+async fn start(pools: &db::StartupPools, config: &AppConfig) -> anyhow::Result<TcpListener> {
+    // The owner migrates and narrows the serving role, and its pool is closed
+    // before this goes on, so it is gone before the server binds. Everything
+    // below runs on the serving pool, as a role that owns no relation,
+    // function, schema or type and may not change `audit_events`; staging and
+    // production check that posture before going on.
     //
     // Migrations run at startup so a fresh compose stack is usable immediately.
     // This is safe while deployments are single-instance; once several replicas
     // start together, migration moves to a release step (release process §5,
     // ADR-0051 §6).
-    let pool = db::prepare_serving_pool(&config).await?;
+    pools.prepare(config).await?;
 
     // After migrations, so the seeded role exists; before serving, so the
     // instance is never reachable without a way to sign in.
-    modules::auth::bootstrap::ensure_administrator(&pool, &config).await?;
+    modules::auth::bootstrap::ensure_administrator(&pools.serving, config).await?;
 
-    let bind_address = config.bind_address.clone();
-    let state = AppState::new(pool, config);
+    let listener = TcpListener::bind(&config.bind_address).await?;
+    tracing::info!(address = %config.bind_address, "listening");
 
-    // **The scanner runs beside the server, not inside a request** (FR-ATT-001,
-    // coding standard §2.4). An upload returns as soon as the bytes are stored,
-    // with `virus_scan_status = PENDING`; this loop answers afterwards and the
-    // download refuses until it has. It is spawned rather than awaited for the
-    // obvious reason and detached rather than tracked for a less obvious one:
-    // there is nothing to shut it down cleanly *for*. Its only durable state is
-    // a row it did not move, and a scan interrupted by a restart is picked up
-    // by the next process because the row is still `PENDING`.
-    tokio::spawn(modules::attachment::worker::run(state.clone()));
-    // The second worker, and the reason there are two rather than one loop with
-    // a match in it: they poll different tables at different rates and one is
-    // bound by a virus scanner while the other is bound by a mail relay.
-    tokio::spawn(modules::notification::worker::run(state.clone()));
-    // The third, over `outbox_events` (ADR-0041): what a committed transition
-    // left for its after-hooks. Detached for the scanner's reason — a delivery
-    // interrupted by a restart is a `PROCESSING` row whose lease expires, and
-    // the next process claims it again.
-    tokio::spawn(modules::outbox::worker::run(state.clone()));
+    Ok(listener)
+}
 
-    let app = router::create_router(state);
+/// Completes on SIGTERM, which `docker stop` sends, or on SIGINT, which Ctrl-C
+/// sends (#856).
+///
+/// **Both are listened for from when this is called**, first thing in `run`,
+/// not from when the future is first polled: the binary is the container's
+/// PID 1, and PID 1 ignores a signal it has no handler for, which is why
+/// `docker stop` used to wait out its ten seconds and kill. `run` races its
+/// startup against this future, so a signal before serving ends the startup,
+/// and one after drives the drain. A handler that cannot be installed fails
+/// startup rather than leaving a process that can only be killed.
+///
+/// The handlers stay installed after the first signal, so a second one during
+/// the stop is ignored rather than killing the drain.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
+    use tokio::signal::unix::{signal, SignalKind};
 
-    let listener = tokio::net::TcpListener::bind(&bind_address).await?;
-    tracing::info!(address = %bind_address, "listening");
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
 
-    // With connect info, so the socket peer address reaches the handlers. It is
-    // the only address a caller cannot forge, and both the rate limiter and the
-    // audit trail are keyed on it (see `middleware::client_address`).
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => tracing::info!("SIGTERM received"),
+            _ = interrupt.recv() => tracing::info!("SIGINT received"),
+        }
+    })
+}
 
-    Ok(())
+/// Completes on Ctrl-C. There is no SIGTERM off Unix, and a developer's
+/// machine stops on Ctrl-C.
+#[cfg(not(unix))]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
+    Ok(async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => tracing::info!("Ctrl-C received"),
+            // Not a stop: stopping on the error would stop a healthy process at
+            // once.
+            Err(error) => {
+                tracing::error!(%error, "could not listen for Ctrl-C");
+                std::future::pending::<()>().await;
+            }
+        }
+    })
 }

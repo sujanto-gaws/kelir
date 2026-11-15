@@ -42,6 +42,8 @@
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use super::domain::{Delivery, Settlement, LEASE, WORKFLOW_TRANSITIONED};
 use super::repository::{self as repo, Claimed};
 use crate::error::AppError;
@@ -58,19 +60,25 @@ const BATCH: i64 = 32;
 /// How long the loop sleeps between passes that found nothing to do.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Runs until the process ends.
+/// Runs until `stop` is cancelled.
 ///
 /// Spawned once at startup beside the scanner and the sender, and shaped like
 /// them: errors are logged and the loop continues. **A pass that found a full
 /// batch goes again at once**, so a backlog drains at the speed of delivery
 /// rather than at one batch per interval.
-pub async fn run(state: AppState) {
+///
+/// **A stop ends the loop between passes** ([#856]), the sender's rule. A
+/// pass the stop's deadline overtakes is dropped, and the events it claimed
+/// are `PROCESSING` rows whose lease returns them.
+///
+/// [#856]: https://github.com/sujanto-gaws/kelir/issues/856
+pub async fn run(state: AppState, stop: CancellationToken) {
     tracing::info!(
         interval = ?POLL_INTERVAL,
         "the outbox worker is watching for events to deliver"
     );
 
-    loop {
+    while !stop.is_cancelled() {
         let claimed = match pass(&state).await {
             Ok(claimed) => claimed,
             Err(error) => {
@@ -80,9 +88,14 @@ pub async fn run(state: AppState) {
         };
 
         if claimed < BATCH as usize {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::select! {
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = stop.cancelled() => {}
+            }
         }
     }
+
+    tracing::info!("the outbox worker has stopped");
 }
 
 /// One pass: claim what is due, up to [`BATCH`], and deliver each. Returns

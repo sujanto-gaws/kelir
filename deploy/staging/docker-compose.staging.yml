@@ -42,6 +42,10 @@ services:
 
   backend:
     image: kelir-backend:${KELIR_VERSION:?set KELIR_VERSION to the release being deployed}
+    # The backend's stop is bounded at 8 s (#856, `server::GRACE`), which
+    # assumes Docker's default 10 s before it kills. Pinned here so the
+    # assumption is stated rather than inherited.
+    stop_grace_period: 10s
     restart: unless-stopped
     environment:
       KELIR_APP_NAME: Kelir

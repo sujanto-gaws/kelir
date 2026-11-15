@@ -34,6 +34,7 @@ use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use crate::config::AppConfig;
+use crate::detached::DetachedTasks;
 
 /// One outbound message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,10 +201,21 @@ impl Mailer {
     /// and moving the reset onto it is a decision rather than a refactor: a
     /// reset that becomes a row would be a row whose absence says no account
     /// matched, which is the disclosure this whole flow is shaped to avoid.
-    pub fn send_detached(&self, mail: Mail) {
+    ///
+    /// **Detached from the request, not from the process** ([#856]). The send
+    /// is spawned on `tasks`, which is `AppState::detached`, and a stop waits
+    /// for it: `server::serve` closes it after the last request is answered
+    /// and waits for what it holds until the stop's deadline. A send still
+    /// running at the deadline is aborted, deliberately and logged,
+    /// because the alternative is Docker's kill a moment later; that is the
+    /// lost message the paragraph above names, now confined to a relay slower
+    /// than the stop's grace.
+    ///
+    /// [#856]: https://github.com/sujanto-gaws/kelir/issues/856
+    pub fn send_detached(&self, tasks: &DetachedTasks, mail: Mail) {
         let mailer = self.clone();
 
-        tokio::spawn(async move { mailer.send(mail).await });
+        tasks.spawn(async move { mailer.send(mail).await });
     }
 
     /// Sends, and never reports a failure to the caller.

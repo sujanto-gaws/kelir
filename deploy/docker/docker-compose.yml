@@ -21,6 +21,12 @@ services:
 
   backend:
     image: rust:1.89
+    # The backend's stop is bounded at 8 s (#856, `server::GRACE`), which
+    # assumes Docker's default 10 s before it kills. Pinned here so the
+    # assumption is stated rather than inherited. Here `sh -c "cargo run"` is
+    # PID 1 and cargo runs the binary as its child, so the signal may not
+    # reach it; the release image runs the binary as PID 1.
+    stop_grace_period: 10s
     working_dir: /app
     volumes:
       - ../../kelir-backend:/app

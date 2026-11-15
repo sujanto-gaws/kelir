@@ -36,6 +36,8 @@
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use super::repository as repo;
 use super::scanner::{self, ScanOutcome};
 use crate::state::AppState;
@@ -48,27 +50,38 @@ use crate::state::AppState;
 /// make one pass long.
 const BATCH: i64 = 8;
 
-/// Runs until the process ends.
+/// Runs until `stop` is cancelled.
 ///
 /// Spawned once at startup. Errors are logged and the loop continues: this is
 /// the component whose job is to keep working while the thing it talks to is
 /// down.
-pub async fn run(state: AppState) {
+///
+/// **A stop ends the loop between passes** ([#856]). A scan the stop's
+/// deadline overtakes is dropped and its row is still `PENDING`, which is the
+/// restart the module comment already describes.
+///
+/// [#856]: https://github.com/sujanto-gaws/kelir/issues/856
+pub async fn run(state: AppState, stop: CancellationToken) {
     let interval = Duration::from_secs(state.config.clamav_poll_seconds.max(1));
     let host = state.config.clamav_host.clone();
     let port = state.config.clamav_port;
 
     tracing::info!(%host, %port, ?interval, "the attachment scanner is watching for new files");
 
-    loop {
+    while !stop.is_cancelled() {
         if let Err(error) = pass(&state, &host, port).await {
             // A database that cannot be read is not this loop's to fix, and it
             // must not end the loop: the next pass may find it back.
             tracing::error!(%error, "the scan pass could not read its work");
         }
 
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            () = stop.cancelled() => {}
+        }
     }
+
+    tracing::info!("the attachment scanner has stopped");
 }
 
 /// One pass: everything waiting, up to [`BATCH`].

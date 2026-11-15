@@ -54,6 +54,8 @@
 
 use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
+
 use super::domain::{may_begin_send, LEASE};
 use super::repository as repo;
 use super::template::{self, Context};
@@ -67,12 +69,19 @@ use crate::state::AppState;
 /// that one pass cannot hold the loop for a minute against a slow relay.
 const BATCH: i64 = 32;
 
-/// Runs until the process ends.
+/// Runs until `stop` is cancelled.
 ///
 /// Spawned once at startup beside the scanner, and shaped like it: errors are
 /// logged and the loop continues, because the component whose job is to talk to
 /// something that can be down must survive it being down.
-pub async fn run(state: AppState) {
+///
+/// **A stop ends the loop between passes, not inside one** ([#856]). A pass
+/// under way finishes what it claimed unless the stop's deadline comes first,
+/// and then `server::serve` drops it: its unsettled rows stay `PENDING` under
+/// a lease that passes, which is the crash this module already survives.
+///
+/// [#856]: https://github.com/sujanto-gaws/kelir/issues/856
+pub async fn run(state: AppState, stop: CancellationToken) {
     let interval = Duration::from_secs(state.config.notification_poll_seconds.max(1));
 
     tracing::info!(
@@ -80,13 +89,18 @@ pub async fn run(state: AppState) {
         "the notification sender is watching for what to deliver"
     );
 
-    loop {
+    while !stop.is_cancelled() {
         if let Err(error) = pass(&state).await {
             tracing::error!(%error, "the delivery pass could not read its work");
         }
 
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            () = stop.cancelled() => {}
+        }
     }
+
+    tracing::info!("the notification sender has stopped");
 }
 
 /// One pass: claim what is waiting, up to [`BATCH`], and deliver it.

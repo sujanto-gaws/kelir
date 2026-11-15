@@ -8,7 +8,7 @@
 //! narrowing does not take back, and a superuser. The refusal of one URL in
 //! `staging` and `production` is `config.rs`'s, and is tested there.
 //!
-//! Each test drives `db::prepare_serving_pool`, the function `main.rs` calls,
+//! Each test drives `db::prepare_serving_pool`, the sequence `main.rs` runs,
 //! against a database the harness provisioned as a host is provisioned.
 //!
 //! [#842]: https://github.com/sujanto-gaws/kelir/issues/842
