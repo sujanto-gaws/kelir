@@ -2,6 +2,8 @@
 //!
 //! [#251]: https://github.com/sujanto-gaws/kelir/issues/251
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -96,4 +98,69 @@ pub struct Notification {
 #[serde(rename_all = "camelCase")]
 pub struct UnreadCount {
     pub unread: i64,
+}
+
+/// A sender's claim on a notification: how long it has before the row is
+/// claimed again ([#853]).
+///
+/// **Five minutes, the outbox's lease** (`outbox::domain::LEASE`), for the
+/// same two reasons. It is long enough that a batch is delivered well inside
+/// it: [`SEND_ALLOWANCE`] stops a pass from starting a send the lease could
+/// not see finish. And it is short enough that a sender that crashed holding
+/// a batch delays those emails by minutes, not by a restart somebody has to
+/// notice.
+///
+/// [#853]: https://github.com/sujanto-gaws/kelir/issues/853
+pub const LEASE: Duration = Duration::from_secs(5 * 60);
+
+/// How much of the lease must remain for a pass to start one more send.
+///
+/// **A send can outlast a lease, and that is the one way two senders could
+/// still both email a row**: the first's lease passes mid-send, a second
+/// claims the row, and both deliver. A pass therefore starts a send only while
+/// this much of its lease is left, and leaves the rest of its batch to pass
+/// back to the queue when the lease does.
+///
+/// **Two minutes**: twice the SMTP transport's per-command timeout (lettre's
+/// default, 60 s, which `Mailer::from_config` does not change), so a relay
+/// that stalls on one command times out inside the lease. A relay that stalls
+/// on several in one send can still outlast it; that send is the residual
+/// duplicate, and `0` from `mark_delivered` is how its sender learns of it.
+pub const SEND_ALLOWANCE: Duration = Duration::from_secs(2 * 60);
+
+/// Whether a pass that claimed its batch `elapsed` ago may start another send.
+///
+/// `elapsed` is measured from before the claim was issued, so it is never
+/// shorter than the time the database has counted against the lease.
+pub fn may_begin_send(elapsed: Duration) -> bool {
+    elapsed.saturating_add(SEND_ALLOWANCE) <= LEASE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_claim_may_send() {
+        assert!(may_begin_send(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_send_may_start_while_the_allowance_still_fits_in_the_lease() {
+        assert!(may_begin_send(LEASE - SEND_ALLOWANCE));
+    }
+
+    #[test]
+    fn a_send_may_not_start_once_the_allowance_no_longer_fits() {
+        assert!(!may_begin_send(
+            LEASE - SEND_ALLOWANCE + Duration::from_millis(1)
+        ));
+        assert!(!may_begin_send(LEASE));
+        assert!(!may_begin_send(LEASE * 2));
+    }
+
+    #[test]
+    fn an_elapsed_time_past_any_lease_does_not_overflow() {
+        assert!(!may_begin_send(Duration::MAX));
+    }
 }

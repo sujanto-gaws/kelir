@@ -39,10 +39,22 @@
 //! sender. This loop delivers what happened; it does not decide that something
 //! has *not* happened.
 //!
+//! # A claim, so two senders do not send one email twice
+//!
+//! **A pass claims its batch before it sends anything** ([#853]):
+//! `repository::claim_deliveries` writes a [`LEASE`] over the rows it takes,
+//! under `FOR UPDATE SKIP LOCKED`, as the outbox worker claims its events. A
+//! second sender — another replica of this process — finds those rows leased
+//! and takes others, or none. A sender that dies holding a batch leaves rows
+//! whose lease passes, and the next claim takes them again: a crash costs at
+//! most a second email for a row it had sent and not settled, and loses none.
+//!
 //! [#257]: https://github.com/sujanto-gaws/kelir/issues/257
+//! [#853]: https://github.com/sujanto-gaws/kelir/issues/853
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::domain::{may_begin_send, LEASE};
 use super::repository as repo;
 use super::template::{self, Context};
 use crate::mail::Mail;
@@ -77,16 +89,62 @@ pub async fn run(state: AppState) {
     }
 }
 
-/// One pass: everything waiting, up to [`BATCH`].
+/// One pass: claim what is waiting, up to [`BATCH`], and deliver it.
 ///
 /// **Public because it is the unit a test can drive**, which is
 /// `attachment::worker::pass`'s reason and the same seam: [`run`] is a loop with
 /// a sleep in it, and this is the same work with the waiting taken out.
+///
+/// **A pass stops starting sends before its lease runs out** (`may_begin_send`).
+/// What it claimed and did not reach stays `PENDING` under a lease that passes
+/// within [`super::domain::SEND_ALLOWANCE`], and the next claim, this sender's
+/// or another's, takes it then.
 pub async fn pass(state: &AppState) -> Result<(), sqlx::Error> {
-    let waiting = repo::pending_deliveries(&state.pool, BATCH).await?;
+    // Read before the claim is sent, so the lease the database counts can only
+    // have started later than this.
+    let claimed_at = Instant::now();
+    let claimed = repo::claim_deliveries(&state.pool, BATCH, LEASE.as_secs_f64()).await?;
 
-    for notification in waiting {
-        deliver_one(state, &notification).await?;
+    for notification in &claimed {
+        if !may_begin_send(claimed_at.elapsed()) {
+            tracing::warn!(
+                claimed = claimed.len(),
+                "the delivery pass ran short of its lease; the rest of its batch returns when it passes"
+            );
+
+            break;
+        }
+
+        deliver_one(state, notification).await?;
+    }
+
+    Ok(())
+}
+
+/// Settles a delivery, if this claim still holds the row.
+///
+/// `0` rows moved means a newer claim holds it — this sender outlived its lease
+/// — and that claim settles it. Logged, because it is the one way an email
+/// can still go out twice.
+async fn settle(
+    state: &AppState,
+    notification: &repo::PendingDelivery,
+    status: &str,
+) -> Result<(), sqlx::Error> {
+    let moved = repo::mark_delivered(
+        &state.pool,
+        notification.tenant_id,
+        notification.id,
+        notification.lease,
+        status,
+    )
+    .await?;
+
+    if moved == 0 {
+        tracing::warn!(
+            notification = %notification.id,
+            "a notification's claim was overtaken before it was settled; the newer claim settles it"
+        );
     }
 
     Ok(())
@@ -109,9 +167,7 @@ async fn deliver_one(
     // in-app — they are delivered by being written, so the row moves to `SENT`
     // with nothing logged, because there was no attempt to log.
     if channels.is_empty() {
-        repo::mark_delivered(&state.pool, notification.tenant_id, notification.id, "SENT").await?;
-
-        return Ok(());
+        return settle(state, notification, "SENT").await;
     }
 
     let mut every_attempt_worked = true;
@@ -160,9 +216,7 @@ async fn deliver_one(
         "FAILED"
     };
 
-    repo::mark_delivered(&state.pool, notification.tenant_id, notification.id, status).await?;
-
-    Ok(())
+    settle(state, notification, status).await
 }
 
 /// The email itself, rendered from the tenant's template or from the

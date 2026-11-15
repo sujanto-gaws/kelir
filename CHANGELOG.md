@@ -1083,6 +1083,21 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **Two backends send each notification email once**
+  ([#853](https://github.com/sujanto-gaws/kelir/issues/853)). The
+  notification sender now claims its batch with `FOR UPDATE SKIP LOCKED`
+  and a five-minute lease, as the outbox worker does, so a second backend
+  takes other notifications or none. Before, every backend read the same
+  `PENDING` rows and mailed them, and on two backends nearly every email
+  went out twice. A sender that stops holding a batch gives it up when the
+  lease passes, and the next sender delivers it; a sender stopped between
+  sending an email and recording it may still send that one email twice.
+  `0053_notification_delivery_lease.sql` adds the nullable
+  `notifications.lease_expires_at` and a partial index on pending
+  notifications; a binary of the previous release runs against it
+  unchanged. During a rolling upgrade, a previous-release backend beside a
+  new one still sends duplicates until it is replaced.
+
 - **`SECURITY.md` states its response times**
   ([#975](https://github.com/sujanto-gaws/kelir/issues/975)). A report is
   acknowledged within 3 business days, first assessed within 10 business
