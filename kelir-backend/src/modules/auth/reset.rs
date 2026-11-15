@@ -218,7 +218,7 @@ pub async fn request_reset(
         token.token
     );
 
-    state.mailer.send_detached(Mail {
+    let mail = Mail {
         to: email,
         subject: format!("Reset your {} password", state.config.app_name),
         body: format!(
@@ -231,7 +231,9 @@ pub async fn request_reset(
              this message.\n",
             state.config.app_name
         ),
-    });
+    };
+
+    state.mailer.send_detached(&state.detached, mail);
 
     // Audited as an event on the user, because it is one: somebody started a
     // credential change on that account. The token is not in the record — it is

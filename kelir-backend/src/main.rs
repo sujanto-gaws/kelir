@@ -6,6 +6,7 @@
 //! Keeping it thin is what lets `tests/` drive exactly the router the binary
 //! serves rather than a reconstruction of it.
 
+use std::future::Future;
 use std::process::ExitCode;
 
 use kelir_backend::config::AppConfig;
@@ -75,7 +76,43 @@ async fn run() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
     tracing::info!(address = %bind_address, "listening");
 
-    server::serve(listener, state, std::future::pending()).await?;
+    server::serve(listener, state, shutdown_signal()?).await?;
 
     Ok(())
+}
+
+/// Completes on SIGTERM, which `docker stop` sends, or on Ctrl-C (#856).
+///
+/// **SIGTERM is listened for from here, before serving**, not from when the
+/// future is first polled: the binary is the container's PID 1, and PID 1
+/// ignores a signal it has no handler for, which is why `docker stop` used to
+/// wait out its ten seconds and kill. A handler that cannot be installed fails
+/// startup rather than leaving a process that can only be killed.
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    Ok(async move {
+        #[cfg(unix)]
+        let terminated = async move {
+            terminate.recv().await;
+        };
+        // No SIGTERM off Unix; a developer's machine stops on Ctrl-C.
+        #[cfg(not(unix))]
+        let terminated = std::future::pending::<()>();
+
+        let interrupted = async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                // Not a stop: SIGTERM is still heard, and stopping on the error
+                // would stop a healthy process at once.
+                tracing::error!(%error, "could not listen for Ctrl-C");
+                std::future::pending::<()>().await;
+            }
+        };
+
+        tokio::select! {
+            () = terminated => tracing::info!("SIGTERM received"),
+            () = interrupted => tracing::info!("Ctrl-C received"),
+        }
+    })
 }

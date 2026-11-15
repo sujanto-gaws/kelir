@@ -100,6 +100,10 @@ sqlx = { version = "0.8", default-features = false, features = [
     "json",
 ] }
 tokio = { version = "1", features = ["full"] }
+# A stop that finishes its work (#856): `CancellationToken` tells the workers to
+# stop, and `rt`'s `TaskTracker` holds the sends a request hands off, so the
+# stop can wait for them. Already in the tree through `h2` and `reqwest`.
+tokio-util = { version = "0.7", features = ["rt"] }
 # CORS: the browser refuses cross-origin replies from the Vite dev server
 # without it, and the frontend and API are separate origins in every environment.
 # `set-header`: `Cache-Control: no-store` on every `/api/v1` response (#881,
