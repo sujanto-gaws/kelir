@@ -455,6 +455,119 @@ async fn both_deployments_refuse_a_serving_role_that_owns_a_table() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// **DEFECT, red until fixed.** ADR-0051's serving role *owns nothing*, and
+/// the posture check reads `pg_class` alone. A serving role that owns a
+/// function may replace its body under every caller; one that owns a schema
+/// may create in it, which is the `CREATE` the record withholds; one that
+/// owns a type may alter it under every column of it. Each deployment starts
+/// with any of them.
+#[tokio::test]
+async fn both_deployments_refuse_a_serving_role_that_owns_a_function_a_schema_or_a_type() {
+    let app = TestApp::spawn().await;
+    let mut wrong = Vec::new();
+
+    for (object, create, alter) in [
+        (
+            "a_function_the_serving_role_owns",
+            "CREATE FUNCTION a_function_the_serving_role_owns() RETURNS integer
+             LANGUAGE sql AS 'SELECT 1'",
+            "ALTER FUNCTION a_function_the_serving_role_owns() OWNER TO",
+        ),
+        (
+            "a_schema_the_serving_role_owns",
+            "CREATE SCHEMA a_schema_the_serving_role_owns",
+            "ALTER SCHEMA a_schema_the_serving_role_owns OWNER TO",
+        ),
+        (
+            "a_type_the_serving_role_owns",
+            "CREATE TYPE a_type_the_serving_role_owns AS ENUM ('one')",
+            "ALTER TYPE a_type_the_serving_role_owns OWNER TO",
+        ),
+    ] {
+        let scratch = app.scratch_serving_role().await;
+        as_the_owner(&app, create).await;
+        as_the_owner(&app, &format!("{alter} {}", scratch.name)).await;
+
+        for line in not_refused(&app, &scratch.url, object).await {
+            wrong.push(format!("{object}: {line}"));
+        }
+        // `DROP OWNED BY` takes the object with the role.
+        scratch.drop_from(&app).await;
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// ADR-0051 §2, Database Schema §1.5.1: a serving role that may create roles
+/// may create one that owns or holds what it may not, so `CREATEROLE` is
+/// refused in both deployments, named.
+#[tokio::test]
+async fn both_deployments_refuse_a_serving_role_that_may_create_roles() {
+    let app = TestApp::spawn().await;
+    let scratch = app.scratch_serving_role().await;
+
+    as_the_owner(&app, &format!("ALTER ROLE {} CREATEROLE", scratch.name)).await;
+
+    let wrong = not_refused(&app, &scratch.url, "CREATEROLE").await;
+    scratch.drop_from(&app).await;
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// ADR-0051 §2: no `CREATE` on the database, where a schema of the serving
+/// role's own would hold objects it owns. Refused in both deployments, named.
+#[tokio::test]
+async fn both_deployments_refuse_a_serving_role_that_may_create_in_the_database() {
+    let app = TestApp::spawn().await;
+    let scratch = app.scratch_serving_role().await;
+
+    as_the_owner(
+        &app,
+        &format!(
+            r#"GRANT CREATE ON DATABASE "{}" TO {}"#,
+            app.database_name, scratch.name
+        ),
+    )
+    .await;
+
+    let wrong = not_refused(&app, &scratch.url, "CREATE on the database").await;
+    scratch.drop_from(&app).await;
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The migrations table's writes **by column**: `has_table_privilege` counts
+/// no column grant, and the narrowing revokes from the serving role by name,
+/// so a column `INSERT` or `UPDATE` granted to `PUBLIC` reaches the posture
+/// check, which must read it. Each is granted, started against, and revoked.
+#[tokio::test]
+async fn both_deployments_refuse_a_column_write_on_the_migrations_table() {
+    let app = TestApp::spawn().await;
+    let serving_url = app.state.config.database_url.clone();
+    let mut wrong = Vec::new();
+
+    for privilege in [
+        "INSERT (version, description, success, checksum, execution_time)",
+        "UPDATE (success)",
+    ] {
+        as_the_owner(
+            &app,
+            &format!("GRANT {privilege} ON _sqlx_migrations TO PUBLIC"),
+        )
+        .await;
+
+        for line in not_refused(&app, &serving_url, "_sqlx_migrations").await {
+            wrong.push(format!("{privilege}: {line}"));
+        }
+
+        as_the_owner(
+            &app,
+            &format!("REVOKE {privilege} ON _sqlx_migrations FROM PUBLIC"),
+        )
+        .await;
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 // ---------------------------------------------------------------------------
 // The roads out of the database
 // ---------------------------------------------------------------------------
