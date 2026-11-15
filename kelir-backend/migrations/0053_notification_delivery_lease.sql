@@ -24,10 +24,17 @@
 -- mid-batch leaves behind, and the next claim takes it again.
 --
 -- **The index is the claim's**: its predicate is the claim's status and
--- liveness test, and its order is the claim's order, so a claim reads the head
--- of the queue rather than every notification ever sent. The lease test is the
--- claim's own, as `idx_outbox_events_pending` leaves `next_attempt_at` to its
--- claim.
+-- liveness test, and its order is the claim's order, so a claim walks the
+-- `PENDING` rows in order rather than every notification ever sent. It does not
+-- leave out a leased row: a row under a live lease is still `PENDING` and stays
+-- in the index, and the claim's own lease test skips it, as
+-- `idx_outbox_events_pending` leaves `next_attempt_at` to its claim.
+--
+-- **The index is a plain `CREATE INDEX`, and that was weighed.** It holds a
+-- SHARE lock on `notifications` for one scan, so writes to the table wait while
+-- it builds; that is accepted at this table's size. `CONCURRENTLY` would avoid
+-- the wait, but it cannot run inside a transaction and so needs a
+-- `-- no-transaction` migration, which no migration in this tree is.
 
 ALTER TABLE notifications ADD COLUMN lease_expires_at TIMESTAMPTZ;
 
