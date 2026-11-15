@@ -3,9 +3,10 @@ name: Pull-request ready
 # **Two rules on the pull-request body, each failing this check.**
 #
 # - **A body that opens by saying it is not ready** (#696, decision D-112). A
-#   feature row's pull request carries
+#   construction row's pull request carries
 #   `**Not ready: <gate> is still running. Do not merge yet.**` as its first
-#   line until its campaign section is written (Git Workflow §4), and three
+#   line until every gate its plan names has run (Git Workflow §4, since
+#   2026-11-15, #964; before, until its campaign section was written), and three
 #   Sprint 22 rows and #693 were merged while theirs said so. The rule itself,
 #   and why it reads only the first line, are in
 #   `scripts/check-pull-request-ready.sh`.
