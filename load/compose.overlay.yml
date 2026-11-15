@@ -35,12 +35,13 @@ services:
       POSTGRES_USER: kelir_load
       POSTGRES_PASSWORD: ${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}
       POSTGRES_DB: ${KELIR_LOAD_DATABASE:?set KELIR_LOAD_DATABASE}
+      # Read by `seed/serving-role.sh`, as the password it gives kelir_app.
+      KELIR_DB_APP_PASSWORD: ${KELIR_DB_APP_PASSWORD:?set KELIR_DB_APP_PASSWORD}
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U kelir_load -d "$$POSTGRES_DB"']
       interval: 2s
       timeout: 2s
       retries: 30
-      KELIR_DB_APP_PASSWORD: ${KELIR_DB_APP_PASSWORD:?set KELIR_DB_APP_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - type: bind

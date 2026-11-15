@@ -101,7 +101,11 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 1 << 30, ...options })
 
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.slice(0, 6).join(' ')}: ${result.stderr || result.error}`)
+    // With stderr inherited the command has already printed its reason, and
+    // `result.stderr` is null: name the exit instead of printing `undefined`.
+    const reason = result.stderr || result.error || `exited ${result.status ?? result.signal}`
+
+    throw new Error(`${command} ${args.slice(0, 6).join(' ')} …: ${reason}`)
   }
 
   return result.stdout
