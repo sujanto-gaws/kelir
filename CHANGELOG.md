@@ -1174,6 +1174,21 @@ While the major version is `0`, the public API may change in any release.
   unchanged. During a rolling upgrade, a previous-release backend beside a
   new one still sends duplicates until it is replaced.
 
+- **The lockout bounds a burst of guesses**
+  ([#855](https://github.com/sujanto-gaws/kelir/issues/855), NFR-SEC-008).
+  A sign-in now counts its attempt as a failure before it checks the
+  password, in one statement on the user's row, and a password that
+  verifies clears the count. So at most five passwords are checked before
+  the fifteen-minute lock, however many guesses arrive at once and through
+  however many backends. Before, every guess in flight read the account
+  unlocked and checked its password before any was counted, so a burst of
+  any size checked that many. A sign-in refused because the password
+  changed during it is still not counted
+  ([ADR-0048](docs/architectures/adr/0048.%20The%20User's%20Row%20Before%20Any%20Refresh%20Token,%20and%20a%20Password%20Write%20Revokes%20in%20Its%20Own%20Transaction.md)).
+  One consequence: once the sign-ins of one account being checked, with
+  the failures before them, reach five, the next is refused as locked out,
+  even with the right password, until one of them succeeds. No migration.
+
 - **`SECURITY.md` states its response times**
   ([#975](https://github.com/sujanto-gaws/kelir/issues/975)). A report is
   acknowledged within 3 business days, first assessed within 10 business

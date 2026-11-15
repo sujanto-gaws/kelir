@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE users\n        SET failed_login_count =\n                CASE WHEN $3::timestamptz IS NULL THEN GREATEST(failed_login_count - 1, 0)\n                     WHEN locked_until = $3 THEN $4 - 1\n                     ELSE failed_login_count END,\n            locked_until = CASE WHEN locked_until = $3 THEN NULL ELSE locked_until END,\n            updated_at = now()\n        WHERE tenant_id = $1 AND id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e93c4d3b48611c256a69a75fbce7e58423326c2d21e295941a80e50450e8b35"
+}

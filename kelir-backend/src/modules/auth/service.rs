@@ -46,6 +46,42 @@ pub fn is_locked_out(locked_until: Option<DateTime<Utc>>) -> bool {
     locked_until.is_some_and(|until| until > Utc::now())
 }
 
+/// The audit reason of a sign-in the lockout refused, without a password check.
+const LOCKED_OUT: &str = "account is locked out after repeated failures";
+
+/// The audit reason of a sign-in whose user was deleted while it ran.
+const DELETED_DURING_SIGN_IN: &str = "the user was deleted during the sign-in";
+
+/// Audits a sign-in of a known user refused for `reason`, and answers it as
+/// every refusal is answered: the reason is for an administrator, not the
+/// caller.
+async fn refuse_sign_in(
+    state: &AppState,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    ip_address: Option<&str>,
+    reason: &str,
+) -> AppError {
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id,
+            event_type: "Security.SignInFailed",
+            action: "LOGIN_FAILED",
+            object_type: ObjectType::User,
+            object_id: user_id,
+            actor_user_id: Some(user_id),
+            ip_address,
+            reason: Some(reason),
+            old_value: None,
+            new_value: None,
+        },
+    )
+    .await;
+
+    AppError::Unauthorized
+}
+
 /// Authenticates a username-or-email and password (FR-AUTH-001..003).
 ///
 /// Every failure returns the same `Unauthorized`. Distinguishing "no such user"
@@ -141,25 +177,38 @@ pub async fn sign_in(
     // them, and paying Argon2 on a request that cannot succeed would make the
     // lockout a way to spend the server's CPU rather than a way to protect it.
     if is_locked_out(credentials.locked_until) {
-        audit::record_or_warn(
-            &state.pool,
-            AuditEntry {
-                tenant_id,
-                event_type: "Security.SignInFailed",
-                action: "LOGIN_FAILED",
-                object_type: ObjectType::User,
-                object_id: credentials.id,
-                actor_user_id: Some(credentials.id),
-                ip_address,
-                reason: Some("account is locked out after repeated failures"),
-                old_value: None,
-                new_value: None,
-            },
-        )
-        .await;
-
-        return Err(AppError::Unauthorized);
+        return Err(refuse_sign_in(state, tenant_id, credentials.id, ip_address, LOCKED_OUT).await);
     }
+
+    // **The attempt is counted as a failure before its password is checked**
+    // (NFR-SEC-008, #855). The read above takes no lock, so every attempt of a
+    // burst passes it together; counted after the check, each then checked its
+    // password before any was counted, and a burst of any size was that many
+    // guesses. The count is one statement on the user's row, so attempts count
+    // one after another, through any number of backends, and the one that
+    // reaches the threshold locks: at most five passwords are checked before
+    // the lock, however many arrive at once. A password that verifies clears
+    // the count below (`record_successful_login`).
+    //
+    // The statement holds the row for itself only and commits before the
+    // transaction below opens, so ADR-0048's order is unchanged: the user's row
+    // before any token's, and nothing held across the hash.
+    let Some(counted) = identity_repo::count_sign_in_attempt(
+        &state.pool,
+        tenant_id,
+        credentials.id,
+        MAX_FAILED_LOGINS,
+        LOCKOUT_MINUTES,
+    )
+    .await?
+    else {
+        // Locked since the read above, by another attempt of the burst, or
+        // deleted. The password is not checked.
+        let reason = identity_repo::find_credentials_by_id(&state.pool, tenant_id, credentials.id)
+            .await?
+            .map_or(DELETED_DURING_SIGN_IN, |_| LOCKED_OUT);
+        return Err(refuse_sign_in(state, tenant_id, credentials.id, ip_address, reason).await);
+    };
 
     // Hashing is CPU-bound and deliberately slow; running it on the async
     // runtime would stall other requests (coding standard §2.4).
@@ -172,19 +221,8 @@ pub async fn sign_in(
         })?;
 
     if !verified {
-        // Counting the failure and locking on the fifth are one statement in the
-        // repository, so concurrent attempts cannot each see a count below the
-        // threshold and let all of them through.
-        let outcome = identity_repo::record_failed_login(
-            &state.pool,
-            tenant_id,
-            credentials.id,
-            MAX_FAILED_LOGINS,
-            LOCKOUT_MINUTES,
-        )
-        .await?;
-
-        if let Some(locked_until) = outcome.locked_until.filter(|until| *until > Utc::now()) {
+        // Already counted, above.
+        if let Some(locked_until) = counted.locked() {
             tracing::warn!(
                 user_id = %credentials.id,
                 %locked_until,
@@ -192,24 +230,14 @@ pub async fn sign_in(
             );
         }
 
-        audit::record_or_warn(
-            &state.pool,
-            AuditEntry {
-                tenant_id,
-                event_type: "Security.SignInFailed",
-                action: "LOGIN_FAILED",
-                object_type: ObjectType::User,
-                object_id: credentials.id,
-                actor_user_id: Some(credentials.id),
-                ip_address,
-                reason: Some("incorrect password"),
-                old_value: None,
-                new_value: None,
-            },
+        return Err(refuse_sign_in(
+            state,
+            tenant_id,
+            credentials.id,
+            ip_address,
+            "incorrect password",
         )
-        .await;
-
-        return Err(AppError::Unauthorized);
+        .await);
     }
 
     // **The token is stored under the user's row, and only while the hash
@@ -231,31 +259,26 @@ pub async fn sign_in(
     let refused = match current.as_deref() {
         Some(hash) if hash == credentials.password_hash => None,
         Some(_) => Some("the password changed during the sign-in"),
-        None => Some("the user was deleted during the sign-in"),
+        None => Some(DELETED_DURING_SIGN_IN),
     };
     if let Some(reason) = refused {
         transaction.rollback().await?;
 
         // Not counted towards a lockout: the password was right when it was
-        // checked, and nobody guessed anything.
-        audit::record_or_warn(
-            &state.pool,
-            AuditEntry {
+        // checked, and nobody guessed anything. So the count taken before the
+        // check is given back. A deleted user's counter is left as it is.
+        if current.is_some() {
+            identity_repo::uncount_sign_in_attempt(
+                &state.pool,
                 tenant_id,
-                event_type: "Security.SignInFailed",
-                action: "LOGIN_FAILED",
-                object_type: ObjectType::User,
-                object_id: credentials.id,
-                actor_user_id: Some(credentials.id),
-                ip_address,
-                reason: Some(reason),
-                old_value: None,
-                new_value: None,
-            },
-        )
-        .await;
+                credentials.id,
+                &counted,
+                MAX_FAILED_LOGINS,
+            )
+            .await?;
+        }
 
-        return Err(AppError::Unauthorized);
+        return Err(refuse_sign_in(state, tenant_id, credentials.id, ip_address, reason).await);
     }
 
     let issued = store_session(&mut *transaction, minted, None).await?;

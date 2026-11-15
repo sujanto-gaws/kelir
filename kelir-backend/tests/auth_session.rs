@@ -2878,12 +2878,16 @@ async fn a_password_set_by_an_administrator_during_a_sign_in_ends_its_token() {
 
 /// #788, the other order: a password write that commits while a sign-in is
 /// verifying the old password refuses the sign-in. The test writes the hash in
-/// a transaction of its own and holds it; the sign-in reads the old hash,
-/// verifies the old password, and waits on the user's row; the write commits;
-/// the sign-in reads the new hash under the lock and is refused.
+/// a transaction of its own and holds it; the sign-in reads the old hash and
+/// waits on the user's row; the write commits; the sign-in verifies the old
+/// password against the hash it read, reads the new hash under the lock and is
+/// refused. Since #855 it waits where it counts its attempt, before the
+/// verify, rather than at the lock after it; the write still commits before
+/// the lock reads.
 ///
 /// Refused as a wrong password is, with an audit row that says why, and not
-/// counted towards a lockout: nobody guessed anything.
+/// counted towards a lockout: nobody guessed anything. The attempt counted
+/// before the verify is given back, and the failure count reads zero.
 #[tokio::test]
 async fn a_sign_in_that_verified_a_password_written_since_is_refused() {
     let app = Arc::new(TestApp::spawn().await);
@@ -2972,6 +2976,10 @@ async fn a_sign_in_that_verified_a_password_written_since_is_refused() {
 /// while the sign-in verified its password is refused there, 401, with a
 /// reason that says so and not that the password changed. The test holds the
 /// delete's transaction open until the sign-in is seen waiting on the row.
+///
+/// Since #855 the sign-in waits where it counts its attempt, before the verify,
+/// and that count reads only a live user too: it is refused there, with the
+/// same reason, and its password is not checked.
 #[tokio::test]
 async fn a_sign_in_whose_user_is_deleted_during_its_verify_is_refused_and_says_why() {
     let app = Arc::new(TestApp::spawn().await);
