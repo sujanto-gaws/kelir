@@ -1341,3 +1341,145 @@ async fn a_sign_in_given_back_after_a_password_write_returns_no_guess_to_an_atta
          passwords were checked against the new one before the lock; NFR-SEC-008 allows 5"
     );
 }
+
+/// The advisory key [`a_late_success_reset_after_a_password_write_erases_no_guess`]
+/// holds a sign-in's success reset on.
+const SUCCESS_RESET_GATE: i64 = 8_551;
+
+/// #855's closing gate, second pass: a sign-in's success reset clears only the
+/// count of the hash it verified.
+///
+/// A right-password sign-in passes ADR-0048's comparison, stores its token and
+/// commits; its reset of the count and the lock (`record_successful_login`)
+/// runs after, on the pool. A password write that commits in between resets
+/// the count itself, and an attacker's failures are then counted against the
+/// new password. A reset that matched no hash erased them, and the attacker
+/// was checked more than five times against the new password before the lock.
+///
+/// Staged with a statement-level trigger on `users` that holds the success
+/// reset before it touches any row, so the write and four wrong guesses run
+/// while it waits. The write is an administrator's set-password, through the
+/// API. The administrator signs in before the trigger exists, since a sign-in
+/// of theirs would be held too.
+#[tokio::test]
+async fn a_late_success_reset_after_a_password_write_erases_no_guess() {
+    let app = Arc::new(TestApp::spawn().await);
+    let username = "user.late.reset";
+    let user_id = create_user(&app, username).await;
+    let admin = app.administrator_token().await;
+
+    execute(
+        &app,
+        &format!(
+            "CREATE FUNCTION test_hold_success_reset() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF current_query() LIKE '%last_login_at = now()%' THEN
+                     PERFORM pg_advisory_xact_lock_shared({SUCCESS_RESET_GATE});
+                 END IF;
+                 RETURN NULL;
+             END
+             $$"
+        ),
+    )
+    .await;
+    execute(
+        &app,
+        "CREATE TRIGGER test_hold_success_reset BEFORE UPDATE ON users
+         FOR EACH STATEMENT EXECUTE FUNCTION test_hold_success_reset()",
+    )
+    .await;
+
+    let mut gate = PgConnection::connect_with(&app.pool.connect_options())
+        .await
+        .expect("the gate's connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(SUCCESS_RESET_GATE)
+        .execute(&mut gate)
+        .await
+        .expect("closes the gate");
+
+    let signing_in = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { attempt(&app, peer(221), username, PASSWORD).await })
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let held: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'
+               AND query LIKE '%last_login_at = now()%'",
+        )
+        .fetch_one(&app.pool)
+        .await
+        .expect("reads pg_stat_activity");
+        if held == 1 {
+            break;
+        }
+        assert!(
+            !signing_in.is_finished(),
+            "the sign-in answered without reaching its success reset"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sign-in's success reset was never held"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // The write, committed after the sign-in's comparison and before its reset.
+    let new_password = "the-password-written-before-the-reset";
+    let written = app
+        .post(
+            &format!("/api/v1/identity/users/{user_id}/password"),
+            Some(&admin),
+            json!({ "password": new_password }),
+        )
+        .await;
+    assert_eq!(written.status, StatusCode::NO_CONTENT, "{}", written.body);
+
+    // Four wrong guesses against the new password, counted after the write.
+    for guess in 0..4 {
+        assert_eq!(
+            attempt(&app, peer(222 + guess), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(failure_count(&app, user_id).await, 4);
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SUCCESS_RESET_GATE)
+        .execute(&mut gate)
+        .await
+        .expect("opens the gate");
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, signing_in)
+            .await
+            .expect("the sign-in answers")
+            .expect("its task completes"),
+        StatusCode::OK,
+        "the password was right when the sign-in verified it"
+    );
+    let after_reset = failure_count(&app, user_id).await;
+
+    // The attacker guesses on until the lock refuses one.
+    let mut guess = 0;
+    while refusals_for(&app, user_id, LOCKED_OUT).await == 0 {
+        assert!(guess < 10, "ten more guesses and no lock");
+        assert_eq!(
+            attempt(&app, peer(230 + guess), username, WRONG_PASSWORD).await,
+            StatusCode::UNAUTHORIZED
+        );
+        guess += 1;
+    }
+    let checked_since_the_write = refusals_for(&app, user_id, INCORRECT_PASSWORD).await;
+
+    assert_eq!(
+        (after_reset, checked_since_the_write),
+        (4, 5),
+        "a success reset for the old password erased failures counted against the new \
+         one: the count read {after_reset} for four guesses, and \
+         {checked_since_the_write} passwords were checked against the new one before \
+         the lock; NFR-SEC-008 allows 5"
+    );
+}
