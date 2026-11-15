@@ -777,6 +777,108 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
+  caddy-spread:
+    name: Caddy spreads two backends
+    runs-on: ubuntu-latest
+    # #854, NFR-SCA-001: two backends behind the shipped Caddyfile get an even
+    # split. Plan 21 row 4's stack (`load/`, `node run.mjs two`), the release
+    # images with `scale: 2`, and `two split`, which reads the Caddyfile as it is
+    # in the tree, unchanged, and asserts each instance served within 5 % of
+    # half (`load/two-backends.mjs`, `EVEN_TOLERANCE`, says why 5 %).
+    #
+    # **The control is main's Caddyfile at 7a1cd53**, the last one before #854:
+    # a bare `reverse_proxy backend:8080`, under which serial traffic stays on
+    # one instance. It is read from that commit and not from main, so it stays a
+    # file that does not balance after this job's subject merges, and the job
+    # keeps proving the reading can tell the two apart. Each instance's count
+    # is its own log's, not Caddy's (`load/README.md`, *Two backends*).
+    # No secrets: `run.mjs` generates every one for the run.
+    timeout-minutes: 60
+    env:
+      KELIR_LOAD_IMAGE_TAG: load-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The control's Caddyfile is read from 7a1cd53.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: The harness's own tests
+        working-directory: load
+        run: node --test two-backends.test.mjs
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # Tagged as `run.mjs` names them, so it finds them and builds nothing.
+      - name: Build the backend
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: kelir-backend
+          file: deploy/docker/backend.Dockerfile
+          build-args: KELIR_BUILD_SHA=${{ github.sha }}
+          tags: kelir-backend:${{ env.KELIR_LOAD_IMAGE_TAG }}
+          load: true
+          cache-from: type=gha,scope=spread-backend
+          cache-to: type=gha,mode=max,scope=spread-backend,ignore-error=true
+
+      - name: Build the frontend, which is Caddy
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: kelir-frontend
+          file: deploy/docker/frontend.Dockerfile
+          build-args: KELIR_BUILD_SHA=${{ github.sha }}
+          tags: kelir-frontend:${{ env.KELIR_LOAD_IMAGE_TAG }}
+          load: true
+          cache-from: type=gha,scope=spread-frontend
+          cache-to: type=gha,mode=max,scope=spread-frontend,ignore-error=true
+
+      - name: Two backends up
+        id: up
+        working-directory: load
+        run: |
+          node run.mjs two up
+          # Smoke opens a document from the list, and a new stack has none.
+          node run.mjs two document
+
+      - name: The control, a Caddyfile that does not balance
+        id: control
+        working-directory: load
+        run: |
+          git show 7a1cd539990181f7b37a5ed19167c6964ebbc1e6:deploy/staging/Caddyfile > "${RUNNER_TEMP}/Caddyfile.before-854"
+          node run.mjs two split "${RUNNER_TEMP}/Caddyfile.before-854" one-sided
+
+      - name: The shipped Caddyfile spreads
+        # After a failed control too, so both splits are in the record.
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        working-directory: load
+        run: node run.mjs two split ../deploy/staging/Caddyfile even
+
+      - name: Stack logs
+        if: failure() && steps.up.outcome != 'skipped'
+        run: |
+          for container in $(docker ps -a --filter label=com.docker.compose.project=kelir-two-backends --format '{{.Names}}'); do
+            echo "::group::${container}"
+            docker logs --tail 150 "${container}" 2>&1
+            echo "::endgroup::"
+          done
+
+      - name: Keep both splits
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: caddy-spread
+          # `.run/` is the harness's run directory. Only the split records and
+          # smoke's output: `stack.env`, which holds the run's secrets, is not.
+          path: |
+            load/.run/*/split-*.json
+            load/.run/*/split-*-smoke-*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 90
+
   commit-messages:
     name: Commit messages
     runs-on: ubuntu-latest

@@ -196,6 +196,7 @@ function writeStackEnv(directory, extra = {}) {
     KELIR_HTTPS_PORT: config.httpsPort,
     KELIR_PUBLIC_URL: `http://127.0.0.1:${config.httpPort}`,
     KELIR_DB_PASSWORD: hex(24),
+    KELIR_DB_APP_PASSWORD: hex(24),
     KELIR_LOAD_DATABASE: config.database,
     KELIR_JWT_SECRET: secret(36),
     KELIR_MINIO_USER: `load-${hex(6)}`,

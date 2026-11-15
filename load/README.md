@@ -79,6 +79,9 @@ node run.mjs two count       # each instance's count so far
 node run.mjs two cross       # AC3's checks, the rate limit, the lockout and the mail count
 node run.mjs two spread      # smoke through a Caddy derived to spread, then Caddy put back
 node run.mjs two spread control  # the same on the shipped file, to compare: see below
+node run.mjs two document    # one document, as cross makes, so smoke has a row to open
+node run.mjs two split ../deploy/staging/Caddyfile even  # the split through that file, asserted
+node run.mjs two split <a file that does not balance> one-sided  # its control
 node run.mjs two errors      # a real ERROR on each instance: the control on every zero
 node run.mjs down
 ```
@@ -92,9 +95,11 @@ node run.mjs down
 - **clamd and mailpit are paused for 12 seconds**, in this project, to hold both workers on the same row.
 - **`spread` is not the shipped proxy.** The shipped Caddyfile does not balance ([#854](https://github.com/sujanto-gaws/kelir/issues/854)): each new upstream connection lands where the name resolves, and the split then sticks to Caddy's pool, so a pool that landed on one instance stays there. Smoke through it reaches both by chance. `spread` derives a Caddyfile from the shipped one at each run, with only `reverse_proxy backend:8080` changed, under `.run/`, records the diff, recreates Caddy alone, and exits non-zero unless smoke moved both instances' own counts. It then puts the shipped file back and reads serial traffic on one instance again.
 - **`two spread control` usually exits 0, and that is not a failed control.** It is the same step on the shipped file. Both moving is necessary and not sufficient; what round robin adds is an even split. `KELIR_LOAD_BASE_URL=http://kelir-two-backends-backend-2:8080 node run.mjs two spread` forces the red exit.
+- **`split` reads the file it is given, unchanged**, and is what CI's `Caddy spreads two backends` job runs (#854). It recreates Caddy cold on that file, sends 300 requests through it one at a time and 300 ten at a time, runs smoke, and puts the shipped file back. `even` fails unless each instance served within 5 % of half of each 300, 135 to 165, and smoke exited 0; `two-backends.mjs`'s `EVEN_TOLERANCE` says why 5 %. `one-sided` is the control: it fails unless the serial 300 all landed on one instance, as they did every time #854 read them through a file that does not balance. Both fail on a count that does not add up to what was sent.
+- **The roles are the release's** (ADR-0051, #984). `kelir_load` owns the schema and migrates; the backend serves as `kelir_app`, which `seed/serving-role.sh` makes on the volume's first start. `race` makes the database again each round without that script's default privileges.
 - **`errors` makes a user of its own with a stored hash that is not a PHC string.** A sign-in logs ERROR at `password.rs:34` and answers 401. It leaves one ERROR per sign-in in each log, so run it after anything that reads "0 ERROR".
 
-It writes `stack-verified.json`, `race.json`, `traffic-*.json`, `cross-*.json`, `spread-*.json`, `Caddyfile.derived-*.diff`, `errors-*.json` and `e2e-*.log` to the run's directory. The two backends share one kernel, so their clocks cannot differ here, and `token` says nothing about skew.
+It writes `stack-verified.json`, `race.json`, `traffic-*.json`, `cross-*.json`, `spread-*.json`, `Caddyfile.derived-*.diff`, `split-*.json`, `split-*-smoke-*.log`, `errors-*.json` and `e2e-*.log` to the run's directory. The two backends share one kernel, so their clocks cannot differ here, and `token` says nothing about skew.
 
 ## How to read the output
 

@@ -5,7 +5,16 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
-import { bootstrapOf, bothMoved, countOf, levelCount, lockWaitMs, spreadCaddyfile } from './two-backends.mjs'
+import {
+  bootstrapOf,
+  bothMoved,
+  countOf,
+  isEven,
+  levelCount,
+  lockWaitMs,
+  splitFailures,
+  spreadCaddyfile,
+} from './two-backends.mjs'
 
 test('each bootstrap line reads as its own outcome, and "created" is not the deferred one', () => {
   const says = (message) => bootstrapOf(`INFO bootstrap: ${message}`)
@@ -78,4 +87,45 @@ test('the spread step holds only when both instances moved', () => {
   assert.equal(bothMoved([8, 8]), true)
   assert.equal(bothMoved([0, 16]), false)
   assert.equal(bothMoved([16, 0]), false)
+})
+
+// #854's readings through the shipped Caddyfile, and what round robin should read.
+const reading = ([a, b]) => ({ sent: a + b, counted: [a, b] })
+const run = (serial, concurrent, rest = {}) => ({
+  inUse: true,
+  serial: reading(serial),
+  concurrent: reading(concurrent),
+  smokeExit: 0,
+  ...rest,
+})
+
+test('even is within 5 % of half, and every reading #854 took on the shipped file is not', () => {
+  assert.equal(isEven(reading([150, 150])), true)
+  assert.equal(isEven(reading([135, 165])), true)
+  assert.equal(isEven(reading([165, 135])), true)
+  assert.equal(isEven(reading([134, 166])), false)
+
+  for (const shipped of [[0, 300], [300, 0], [93, 207], [118, 182], [201, 99]]) {
+    assert.equal(isEven(reading(shipped)), false, `[${shipped}]`)
+  }
+})
+
+test('the even run fails on either reading, and passes only when both are even', () => {
+  assert.deepEqual(splitFailures('even', run([150, 150], [149, 151])), [])
+  assert.match(splitFailures('even', run([0, 300], [150, 150])).join('\n'), /^serial: \[0,300\] of 300 is not even/)
+  assert.match(splitFailures('even', run([150, 150], [118, 182])).join('\n'), /^ten at a time: \[118,182\]/)
+})
+
+test('the control holds only when serial traffic stayed on one instance', () => {
+  assert.deepEqual(splitFailures('one-sided', run([0, 300], [118, 182])), [])
+  assert.deepEqual(splitFailures('one-sided', run([300, 0], [150, 150])), [])
+  assert.match(splitFailures('one-sided', run([150, 150], [150, 150])).join('\n'), /reached both/)
+})
+
+test('a split is not read from a count that does not add up, a failed smoke or another file', () => {
+  const short = { sent: 300, counted: [150, 149] }
+
+  assert.match(splitFailures('even', { ...run([150, 150], [150, 150]), serial: short }).join('\n'), /counted 299 of 300/)
+  assert.match(splitFailures('even', run([150, 150], [150, 150], { smokeExit: 1 })).join('\n'), /smoke exited 1/)
+  assert.match(splitFailures('one-sided', run([0, 300], [0, 300], { inUse: false })).join('\n'), /not serving/)
 })

@@ -7,6 +7,8 @@
 //   node run.mjs two cross       AC3's checks and AC5's two sentences, each with a control
 //   node run.mjs two e2e         the browser suite against this stack
 //   node run.mjs two spread      smoke through a Caddy derived to spread, then Caddy put back
+//   node run.mjs two document    one document, so smoke has a row to open
+//   node run.mjs two split <file> even|one-sided   the split through that Caddyfile, asserted
 //   node run.mjs two errors      a real ERROR on each instance, the control on every zero
 //
 // `smoke` and `down` are `run.mjs`'s own, and the refusals in `guard.mjs` have
@@ -424,6 +426,14 @@ const newDocument = async (ctx, n, token, type) =>
     token,
     json: { documentTypeId: type, title: 'Row 4', formData: { amount: 100 } },
   })).data.id
+
+/** One document, as `cross` makes its first, so smoke has a row to open. */
+async function oneDocument(ctx) {
+  const { accessToken: token } = (await login(ctx, 2, 'admin', ctx.stack().env.KELIR_BOOTSTRAP_ADMIN_PASSWORD)).data
+  const id = await newDocument(ctx, 1, token, await arrange(ctx, token))
+
+  console.log(`document ${id}`)
+}
 
 const pdf = (marker) => Buffer.from(`%PDF-1.7\n% ${marker}\n1 0 obj\n<<>>\nendobj\n%%EOF\n`)
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
@@ -955,6 +965,26 @@ export const bothMoved = (moved) => moved.every((count) => count > 0)
 const caddy = (ctx) => `${ctx.config.project}-caddy-1`
 const caddyfileInUse = (ctx) => docker(['exec', caddy(ctx), 'cat', '/etc/caddy/Caddyfile']).stdout
 
+/** Writes `text` to `file` and an overlay that mounts it as Caddy's configuration. */
+function caddyOverlay(directory, file, text, label) {
+  const overlay = join(directory, `compose.${label}-caddy.yml`)
+
+  writeFileSync(file, text)
+  writeFileSync(
+    overlay,
+    `services:
+  caddy:
+    volumes:
+      - type: bind
+        source: ${file.replaceAll('\\', '/')}
+        target: /etc/caddy/Caddyfile
+        read_only: true
+`,
+  )
+
+  return overlay
+}
+
 /** Recreates Caddy alone, so the backends and their logs are not touched. */
 async function recreateCaddy(ctx, ...overlay) {
   const { status, stderr } = spawnSync(
@@ -990,21 +1020,8 @@ async function spread(ctx, [mode]) {
   const shipped = readFileSync(shippedFile, 'utf8')
   const derived = mode === 'control' ? shipped : spreadCaddyfile(shipped)
   const derivedFile = join(directory, 'Caddyfile.derived')
-  const overlay = join(directory, 'compose.derived-caddy.yml')
+  const overlay = caddyOverlay(directory, derivedFile, derived, 'derived')
   const stamp = Date.now()
-
-  writeFileSync(derivedFile, derived)
-  writeFileSync(
-    overlay,
-    `services:
-  caddy:
-    volumes:
-      - type: bind
-        source: ${derivedFile.replaceAll('\\', '/')}
-        target: /etc/caddy/Caddyfile
-        read_only: true
-`,
-  )
 
   const { stdout: diff } = spawnSync('git', ['diff', '--no-index', '--no-color', shippedFile, derivedFile], {
     encoding: 'utf8',
@@ -1050,6 +1067,122 @@ async function spread(ctx, [mode]) {
   console.log(JSON.stringify({ ...result, pass }, null, 2))
   writeFileSync(join(directory, `spread-${stamp}.json`), JSON.stringify({ ...result, pass, diff }, null, 2))
   process.exitCode = pass ? 0 : 1
+}
+
+// ---------------------------------------------------------------------------
+// The split through a Caddyfile as it is, asserted (#854)
+// ---------------------------------------------------------------------------
+
+/**
+ * How far from half either instance may land, as a share of the requests sent:
+ * 5 %, so 135 to 165 of 300.
+ *
+ * Round robin hands each request to the next upstream, so a serial run and a
+ * concurrent one alike should split exactly, and #854's `spread` runs did: smoke
+ * read [8,8] in 8 of 8. The margin is for the `dynamic` upstream's lookup of
+ * `backend` being refreshed mid-run and answered in another order, which can
+ * hand one instance two requests in a row. Every reading #854 took through the
+ * shipped file is outside it: serial traffic read [0,300] or [300,0], and the
+ * nearest concurrent one, [118,182], is 32 from even, over twice the margin.
+ */
+export const EVEN_TOLERANCE = 0.05
+
+/** The margin in requests, whole, so 300 gives 15 and not 15.000000000000002. */
+const marginOf = (sent) => Math.round(sent * EVEN_TOLERANCE)
+
+export const isEven = ({ sent, counted }) =>
+  counted.every((count) => Math.abs(count - sent / 2) <= marginOf(sent))
+
+/** Why a split run fails, or nothing. `expect` is `even` or `one-sided`. */
+export function splitFailures(expect, { inUse, serial, concurrent, smokeExit }) {
+  const failures = []
+  const readings = { serial, 'ten at a time': concurrent }
+
+  if (!inUse) {
+    failures.push('Caddy is not serving the file under test')
+  }
+
+  // A count that does not add up is not a reading of where anything went.
+  for (const [label, reading] of Object.entries(readings)) {
+    if (total(reading.counted) !== reading.sent) {
+      failures.push(`${label}: the instances counted ${total(reading.counted)} of ${reading.sent}`)
+    }
+  }
+
+  if (smokeExit !== 0) {
+    failures.push(`smoke exited ${smokeExit}`)
+  }
+
+  if (expect === 'even') {
+    for (const [label, reading] of Object.entries(readings)) {
+      if (!isEven(reading)) {
+        failures.push(
+          `${label}: [${reading.counted}] of ${reading.sent} is not even within ` +
+            `±${marginOf(reading.sent)} of ${reading.sent / 2} each`,
+        )
+      }
+    }
+  } else if (!serial.counted.includes(0)) {
+    failures.push(`serial: [${serial.counted}] reached both instances; the control expects one`)
+  }
+
+  return failures
+}
+
+/**
+ * Traffic through Caddy started cold on `file`, unchanged: 300 requests one at a
+ * time, 300 ten at a time, then #777's smoke. Caddy is put back after.
+ *
+ * `even` is #854's assertion on the shipped file. `one-sided` is its control, on
+ * a file that does not balance: serial traffic all on one instance, as #854
+ * measured it every time, which shows the same reading can tell them apart.
+ */
+async function split(ctx, [file, expect]) {
+  if (!file || !['even', 'one-sided'].includes(expect)) {
+    throw new Error('usage: node run.mjs two split <Caddyfile> even|one-sided')
+  }
+
+  const directory = ctx.stack().runDirectory
+  const text = readFileSync(file, 'utf8')
+  const overlay = caddyOverlay(directory, join(directory, `Caddyfile.${expect}`), text, expect)
+  const stamp = Date.now()
+  const result = {
+    at: new Date().toISOString(),
+    expect,
+    caddyfile: file,
+    caddyfileSha256: sha(text),
+    tolerance: EVEN_TOLERANCE,
+  }
+
+  try {
+    await recreateCaddy(ctx, '-f', overlay)
+    result.inUse = caddyfileInUse(ctx) === text
+
+    const { accessToken: token } = (await login(ctx, 1, 'load-user-003', ctx.stack().password)).data
+
+    result.serial = await throughCaddy(ctx, token, 300, 1)
+    result.concurrent = await throughCaddy(ctx, token, 30, 10)
+
+    const before = served(ctx)
+    const smoke = spawnSync(process.execPath, [join(HERE, 'run.mjs'), 'smoke'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    })
+
+    writeFileSync(join(directory, `split-${expect}-smoke-${stamp}.log`), `${smoke.stdout}${smoke.stderr}`)
+    result.smokeExit = smoke.status
+    result.smokeMoved = change(served(ctx), before)
+  } finally {
+    await recreateCaddy(ctx)
+  }
+
+  result.failures = splitFailures(expect, result)
+
+  const record = JSON.stringify({ ...result, pass: result.failures.length === 0 }, null, 2)
+
+  console.log(record)
+  writeFileSync(join(directory, `split-${expect}-${stamp}.json`), record)
+  process.exitCode = result.failures.length === 0 ? 0 : 1
 }
 
 /**
@@ -1101,6 +1234,8 @@ export async function twoBackends(step, args, ctx) {
     cross,
     e2e,
     spread,
+    document: oneDocument,
+    split,
     errors,
     count: () => console.log(JSON.stringify(served(ctx))),
   }

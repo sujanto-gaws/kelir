@@ -18,6 +18,11 @@
 #     server offers no TLS, as a loopback-only native one need not.
 #   * **The tenant the backend signs people into** is the throwaway one the
 #     seeder makes, by the setting a deployment uses for its own default.
+#   * **The roles are this database's** (ADR-0051, #984). `kelir_load` owns the
+#     schema and migrates, through `KELIR_DATABASE_MIGRATION_URL`; the backend
+#     serves as `kelir_app`, which `seed/serving-role.sh` makes when the volume
+#     is first initialised, granted as the provisioner grants it. A path here
+#     is read from the first file's directory, `deploy/staging`.
 #
 # Nothing else moves: not the images, not the Caddyfile, not the pool.
 
@@ -35,12 +40,20 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
+      KELIR_DB_APP_PASSWORD: ${KELIR_DB_APP_PASSWORD:?set KELIR_DB_APP_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - type: bind
+        source: ../../load/seed/serving-role.sh
+        target: /docker-entrypoint-initdb.d/serving-role.sh
+        read_only: true
+        bind:
+          create_host_path: false
 
   backend:
     environment:
-      KELIR_DATABASE_URL: postgres://kelir_load:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@postgres:5432/${KELIR_LOAD_DATABASE:?set KELIR_LOAD_DATABASE}
+      KELIR_DATABASE_URL: postgres://kelir_app:${KELIR_DB_APP_PASSWORD:?set KELIR_DB_APP_PASSWORD}@postgres:5432/${KELIR_LOAD_DATABASE:?set KELIR_LOAD_DATABASE}
+      KELIR_DATABASE_MIGRATION_URL: postgres://kelir_load:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@postgres:5432/${KELIR_LOAD_DATABASE:?set KELIR_LOAD_DATABASE}
       KELIR_DEFAULT_TENANT_CODE: TNT-LOAD
     depends_on:
       postgres:
