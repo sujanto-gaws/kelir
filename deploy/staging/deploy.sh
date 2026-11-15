@@ -252,7 +252,7 @@ if [[ -f "${example_env}" ]]; then
     done < <(grep -Eo '^[[:space:]]*KELIR_[A-Z0-9_]+=' "${example_env}" | tr -d ' =' )
 fi
 
-for required in KELIR_DB_PASSWORD KELIR_JWT_SECRET KELIR_MINIO_USER KELIR_MINIO_PASSWORD; do
+for required in KELIR_DB_PASSWORD KELIR_DB_APP_PASSWORD KELIR_JWT_SECRET KELIR_MINIO_USER KELIR_MINIO_PASSWORD; do
     value="${!required:-}"
     [[ -n "${value}" ]] || die "${required} is empty in .env"
 

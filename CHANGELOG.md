@@ -11,6 +11,82 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **`{:?}` of the backend's configuration prints no secret**
+  ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
+  `AppConfig` derived `Debug`, so any debug print of it showed both database
+  URLs with their passwords, the signing secret, the object store's pair and
+  the bootstrap password. Its `Debug` now names every setting and prints
+  `<redacted>` for each secret, or `None` for an optional one left unset
+  (`config.rs`, `debug_prints_no_secret`). No log line printed it before;
+  nothing to rotate.
+- **The backend migrates as `kelir` and serves as `kelir_app`, a role that
+  owns no relation, function, schema or type, and the upgrade from `v0.9.0`
+  needs database steps first**
+  ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
+  `KELIR_DATABASE_URL` is now the serving role's URL, and the new
+  `KELIR_DATABASE_MIGRATION_URL` is the owner's, which migrates at startup
+  through a pool closed before the server binds. `staging` and `production`
+  refuse to start without it, and refuse a serving role that is a superuser,
+  belongs to any role, owns a relation, function, schema or type, may change
+  `audit_events` or `_sqlx_migrations` (a column grant or a grant to `PUBLIC`
+  included), may create in schema `public` or the database, or holds
+  `CREATEROLE`. The release compose file needs a new `.env` value,
+  `KELIR_DB_APP_PASSWORD`, and `deploy.sh` refuses a `.env` without it. Take
+  a backup first. On the
+  staging-shape host the provisioner does the database half, run from the
+  new release's `deploy/staging/` as Installation guide §6.1 says, because
+  it installs the two backup scripts beside it:
+
+  ```bash
+  # on the host: the new password first, on a line of its own
+  printf '\nKELIR_DB_APP_PASSWORD=%s\n' "$(openssl rand -base64 36 | tr -d '\n/+=' | head -c 40)" \
+    | sudo tee -a /opt/kelir/.env > /dev/null
+  # from the new release's checkout: creates kelir_app, grants it, admits it in pg_hba.conf
+  cd <release>/deploy/staging
+  sudo KELIR_APP_DIR=/opt/kelir ./provision-ubuntu-24.sh
+  cp docker-compose.staging.yml .env.staging.example deploy.sh /opt/kelir/
+  cd /opt/kelir && ./deploy.sh 1.0.0
+  ```
+
+  **The provisioner restarts PostgreSQL once** when it adds `kelir_app`'s
+  `pg_hba.conf` line, so the running `v0.9.0` backend loses its connections
+  for a few seconds before the deploy replaces it.
+
+  On any other host, the local deployment included, as a superuser:
+
+  ```sql
+  CREATE ROLE kelir_app WITH LOGIN PASSWORD '...';     -- KELIR_DB_APP_PASSWORD
+  GRANT CONNECT ON DATABASE kelir TO kelir_app;
+  \c kelir
+  REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+  GRANT USAGE ON SCHEMA public TO kelir_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO kelir_app;
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO kelir_app;
+  REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM kelir_app;
+  REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON _sqlx_migrations FROM kelir_app;
+  ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kelir_app;
+  ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+      GRANT USAGE, SELECT ON SEQUENCES TO kelir_app;
+  ```
+
+  Where `pg_hba.conf` names roles, add a line for `kelir_app` beside
+  `kelir`'s and run `SELECT pg_reload_conf();`. Then add
+  `KELIR_DB_APP_PASSWORD` to `.env`, copy the new compose file, and deploy.
+  Nothing changes owner and no data is rewritten. **A rollback to `v0.9.0`
+  runs as the owner.** `v0.9.0`'s binary migrates at startup, and as
+  `kelir_app` its migrator is refused, for want of `CREATE` on schema
+  `public` (`serving_role_campaign.rs`; CI's `N−1 rehearsal` job rehearses
+  the "any other host" SQL path above on PostgreSQL 16 and 17, rollback and
+  roll forward included, and passed with that outcome on both; the
+  provisioner's path is not run by it). So before `./deploy.sh 0.9.0`,
+  point `KELIR_DATABASE_URL` in the compose file at the owner,
+  `postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@...`, and put
+  it back before rolling forward. **For as long as the rollback lasts,
+  NFR-SEC-006 holds only against the application's connection**, as on
+  `v0.9.0` today: that connection is the owner's again. The serving role is
+  not given `CREATE` to make `v0.9.0` start. The development stack keeps one
+  URL, as `postgres`.
 - **A role code with an invisible edge is refused, and five more code points
   are blank** ([#805](https://github.com/sujanto-gaws/kelir/issues/805),
   **D-120**, **D-121**). A client that creates a role with a `roleCode`
@@ -1697,10 +1773,12 @@ While the major version is `0`, the public API may change in any release.
   kept a row as written. `0052_audit_events_append_only.sql` adds a trigger
   that refuses `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events`, a write
   matching no row included. **It holds against the application's connection,
-  not against the table's owner or a superuser**, and the application connects
+  not against the table's owner or a superuser**, ~~and the application connects
   as the owner, so a stolen application credential defeats it
   ([#842](https://github.com/sujanto-gaws/kelir/issues/842) is the separate
-  roles). `INSERT` stays allowed, so a forged appended row is not stopped.
+  roles)~~ (struck 2026-11-15: since #842 the application serves as
+  `kelir_app`, which owns nothing and holds no `UPDATE`, `DELETE` or
+  `TRUNCATE` on the table; the owner, `kelir`, only migrates, ADR-0051). `INSERT` stays allowed, so a forged appended row is not stopped.
   `0052` changes no table and no column, and the audit module only inserts and
   selects, so the previous image runs against the schema it leaves (release
   process §6).

@@ -56,7 +56,14 @@ services:
       # Host and port are configurable because PostgreSQL is not part of this
       # stack: the defaults address the host's native install over the Docker
       # bridge, but a test rig may run it elsewhere or on another port.
-      KELIR_DATABASE_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@${KELIR_DB_HOST:-host.docker.internal}:${KELIR_DB_PORT:-5432}/kelir
+      #
+      # **Two roles** (ADR-0051). The backend serves as kelir_app, which owns
+      # nothing and may not change audit_events, and migrates as kelir, the
+      # schema's owner, through a pool it closes before serving. Staging and
+      # production refuse to start without the migration URL, and refuse a
+      # serving URL that names the owner.
+      KELIR_DATABASE_URL: postgres://kelir_app:${KELIR_DB_APP_PASSWORD:?set KELIR_DB_APP_PASSWORD (ADR-0051; see CHANGELOG.md for the upgrade)}@${KELIR_DB_HOST:-host.docker.internal}:${KELIR_DB_PORT:-5432}/kelir
+      KELIR_DATABASE_MIGRATION_URL: postgres://kelir:${KELIR_DB_PASSWORD:?set KELIR_DB_PASSWORD}@${KELIR_DB_HOST:-host.docker.internal}:${KELIR_DB_PORT:-5432}/kelir
       # **A KELIR_DB_HOST other than host.docker.internal is reached over TLS
       # or not at all** (#803, NFR-SEC-010). Empty keeps the default: `prefer`
       # for the host's own PostgreSQL, `require` for any other host. A bridge IP

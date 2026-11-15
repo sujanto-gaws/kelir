@@ -436,6 +436,387 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
     })
 }
 
+/// The migration pool's ceiling (ADR-0051 §2): the migrator holds one
+/// connection, with its advisory lock, and the narrowing needs no more.
+pub const MIGRATION_MAX_CONNECTIONS: u32 = 2;
+
+/// The pool the binary migrates through, as the schema's owner, from
+/// `KELIR_DATABASE_MIGRATION_URL` (ADR-0051 §2).
+///
+/// The TLS rule is [`connect_options`]'s, as for the serving pool: the two
+/// settings apply to both URLs.
+pub fn create_migration_pool(
+    migration_url: &str,
+    tls: DatabaseTlsSettings<'_>,
+) -> Result<PgPool, ConnectOptionsError> {
+    Ok(lazy_pool(
+        connect_options(migration_url, tls)?,
+        MIGRATION_MAX_CONNECTIONS,
+    ))
+}
+
+/// What the serving role may not hold, revoked from it on every start
+/// (ADR-0051 §2): the table, and the privileges.
+///
+/// **A table whose rows nobody may change joins this list in the change that
+/// creates it** (ADR-0051 §5). Default privileges grant every new table in
+/// full, so a table left off this list is the serving role's to rewrite.
+pub const SERVING_ROLE_NARROWING: [(&str, &str); 2] = [
+    ("audit_events", "UPDATE, DELETE, TRUNCATE"),
+    ("_sqlx_migrations", "INSERT, UPDATE, DELETE, TRUNCATE"),
+];
+
+/// The role a pool connects as.
+async fn current_user(pool: &PgPool) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(pool)
+        .await
+}
+
+/// Revokes [`SERVING_ROLE_NARROWING`] from the serving role, through the
+/// owner's pool, and says whether it ran (ADR-0051 §2).
+///
+/// **Widening is provisioning's; narrowing is the backend's.** A migration
+/// names no role, because the role names are a deployment's, so the serving
+/// role is learnt here as `current_user` on its own pool. The revokes are
+/// idempotent: they hold against a table a migration recreated, and against a
+/// fresh host, where default privileges grant `_sqlx_migrations` in full when
+/// the first start creates it.
+///
+/// **Skipped when both pools are the same role**, the development shape: the
+/// owner would revoke from itself.
+pub async fn narrow_serving_role(owner: &PgPool, serving: &PgPool) -> Result<bool, sqlx::Error> {
+    let serving_role = current_user(serving).await?;
+
+    if current_user(owner).await? == serving_role {
+        return Ok(false);
+    }
+
+    // REVOKE takes no bind parameters, so the name is quoted by the server.
+    let role: String = sqlx::query_scalar("SELECT quote_ident($1)")
+        .bind(&serving_role)
+        .fetch_one(owner)
+        .await?;
+
+    for (table, privileges) in SERVING_ROLE_NARROWING {
+        sqlx::query(&format!("REVOKE {privileges} ON {table} FROM {role}"))
+            .execute(owner)
+            .await?;
+    }
+
+    Ok(true)
+}
+
+/// Why the serving role may not serve (ADR-0051 §2).
+#[derive(Debug)]
+pub enum ServingRoleError {
+    /// The catalogue could not be read on the serving pool.
+    Unreadable(sqlx::Error),
+    /// The role holds what the serving role may not. `found` names each.
+    Overprivileged { role: String, found: Vec<String> },
+}
+
+impl fmt::Display for ServingRoleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable(error) => {
+                write!(f, "the serving role's privileges cannot be read: {error}")
+            }
+            Self::Overprivileged { role, found } => write!(
+                f,
+                "KELIR_DATABASE_URL connects as `{role}`, which may not serve: {}. It must be \
+                 a role that owns no relation, function, schema or type and may not change \
+                 audit_events, with the owner's \
+                 URL in KELIR_DATABASE_MIGRATION_URL (ADR-0051)",
+                found.join("; ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ServingRoleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable(error) => Some(error),
+            Self::Overprivileged { .. } => None,
+        }
+    }
+}
+
+/// What [`check_serving_posture`] reads, on the serving pool.
+///
+/// The privilege lists are text, empty when nothing is held, so the query
+/// names each privilege it found rather than answering a flag per privilege.
+#[derive(sqlx::FromRow)]
+struct ServingRolePosture {
+    role: String,
+    superuser: bool,
+    creates_roles: bool,
+    owner: String,
+    member_of_owner: bool,
+    memberships: String,
+    owned_objects: i64,
+    owned_examples: String,
+    audit_writes: String,
+    migration_writes: String,
+    creates_in_public: bool,
+    creates_in_the_database: bool,
+}
+
+/// The serving role's posture, read on its own pool before the server binds
+/// (ADR-0051 §2, Database Schema §1.5.1). It is refused when it:
+///
+/// - is a superuser, or holds `CREATEROLE`;
+/// - is a member of the owner of `audit_events`, the owner itself included,
+///   or of any other role, directly or inherited: `pg_write_all_data` and the
+///   roles that reach the server's files and programs among them;
+/// - owns an object: a relation, a function, a schema or a type;
+/// - holds `UPDATE`, on the table or on any column, `DELETE` or `TRUNCATE` on
+///   `audit_events`;
+/// - holds any write on `_sqlx_migrations`, on the table or on a column;
+/// - holds `CREATE` on schema `public` or on the database.
+///
+/// So one URL naming the owner twice, a serving role granted too much, or a
+/// superuser in `KELIR_DATABASE_URL` cannot pass for the deployed shape.
+/// Privileges are read as effective ones, so a grant through `PUBLIC` or a
+/// membership counts, and the narrowing, which revokes from the role by name,
+/// cannot take those back.
+pub async fn check_serving_posture(serving: &PgPool) -> Result<(), ServingRoleError> {
+    let posture: ServingRolePosture = sqlx::query_as(
+        "SELECT current_user::text AS role,
+                r.rolsuper AS superuser,
+                r.rolcreaterole AS creates_roles,
+                pg_get_userbyid(c.relowner)::text AS owner,
+                pg_has_role(current_user, c.relowner, 'MEMBER') AS member_of_owner,
+                coalesce((
+                    SELECT string_agg(m.rolname::text, ', ' ORDER BY m.rolname)
+                    FROM pg_roles m
+                    WHERE NOT r.rolsuper
+                      AND m.oid NOT IN (r.oid, c.relowner)
+                      AND pg_has_role(r.oid, m.oid, 'MEMBER')
+                ), '') AS memberships,
+                owned.owned_objects,
+                owned.owned_examples,
+                array_to_string(ARRAY(
+                    SELECT verb
+                    FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) AS verb
+                    WHERE has_table_privilege(c.oid, verb)
+                       OR (verb = 'UPDATE' AND has_any_column_privilege(c.oid, verb))
+                ), ', ') AS audit_writes,
+                coalesce(array_to_string(ARRAY(
+                    SELECT verb
+                    FROM unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS verb
+                    WHERE has_table_privilege(migrations.oid, verb)
+                       OR (verb IN ('INSERT', 'UPDATE') AND has_any_column_privilege(migrations.oid, verb))
+                ), ', '), '') AS migration_writes,
+                has_schema_privilege('public', 'CREATE') AS creates_in_public,
+                has_database_privilege(current_database(), 'CREATE') AS creates_in_the_database
+         FROM pg_roles r
+         CROSS JOIN pg_class c
+         LEFT JOIN pg_class migrations
+             ON migrations.oid = to_regclass('public._sqlx_migrations')
+         CROSS JOIN LATERAL (
+             SELECT count(*) AS owned_objects,
+                    coalesce(array_to_string(
+                        (array_agg(objects.name ORDER BY objects.name))[1:5], ', '
+                    ), '') AS owned_examples
+             FROM (
+                 SELECT 'relation ' || o.relname AS name
+                 FROM pg_class o
+                 WHERE o.relowner = r.oid AND o.relpersistence <> 't'
+                 UNION ALL
+                 SELECT 'function ' || p.proname
+                 FROM pg_proc p
+                 WHERE p.proowner = r.oid
+                 UNION ALL
+                 SELECT 'schema ' || n.nspname
+                 FROM pg_namespace n
+                 WHERE n.nspowner = r.oid
+                 UNION ALL
+                 SELECT 'type ' || t.typname
+                 FROM pg_type t
+                 WHERE t.typowner = r.oid AND t.typrelid = 0 AND t.typcategory <> 'A'
+             ) objects
+             WHERE NOT r.rolsuper
+         ) owned
+         WHERE r.rolname = current_user AND c.oid = 'audit_events'::regclass",
+    )
+    .fetch_one(serving)
+    .await
+    .map_err(|error| ServingRoleError::Unreadable(name_the_tls_settings(error)))?;
+
+    let found = posture.findings();
+
+    if found.is_empty() {
+        Ok(())
+    } else {
+        Err(ServingRoleError::Overprivileged {
+            role: posture.role,
+            found,
+        })
+    }
+}
+
+impl ServingRolePosture {
+    /// Each thing the role holds that the serving role may not, as a phrase.
+    fn findings(&self) -> Vec<String> {
+        let mut found = Vec::new();
+
+        if self.superuser {
+            found.push("it is a superuser".to_owned());
+        }
+        if self.creates_roles {
+            found.push("it holds CREATEROLE".to_owned());
+        }
+        if self.member_of_owner {
+            found.push(format!(
+                "it is, or is a member of, `{}`, the owner of audit_events",
+                self.owner
+            ));
+        }
+        if !self.memberships.is_empty() {
+            found.push(format!("it is a member of {}", self.memberships));
+        }
+        if self.owned_objects > 0 {
+            found.push(format!(
+                "it owns {} object(s), among them {}",
+                self.owned_objects, self.owned_examples
+            ));
+        }
+        if !self.audit_writes.is_empty() {
+            found.push(format!("it holds {} on audit_events", self.audit_writes));
+        }
+        if !self.migration_writes.is_empty() {
+            found.push(format!(
+                "it holds {} on _sqlx_migrations",
+                self.migration_writes
+            ));
+        }
+        if self.creates_in_public {
+            found.push("it holds CREATE on schema public".to_owned());
+        }
+        if self.creates_in_the_database {
+            found.push("it holds CREATE on the database".to_owned());
+        }
+
+        found
+    }
+}
+
+/// Why the database was not ready to serve at startup.
+#[derive(Debug)]
+pub enum DatabaseStartupError {
+    /// The serving pool's options were refused.
+    ServingPool(ConnectOptionsError),
+    /// The migration pool's options were refused.
+    MigrationPool(ConnectOptionsError),
+    /// A migration failed.
+    Migration(sqlx::migrate::MigrateError),
+    /// The serving role's privileges could not be narrowed.
+    Narrowing(sqlx::Error),
+    /// The serving role may not serve.
+    ServingRole(ServingRoleError),
+}
+
+impl fmt::Display for DatabaseStartupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ServingPool(error) => write!(f, "{error}"),
+            Self::MigrationPool(error) => write!(
+                f,
+                "the migration pool (KELIR_DATABASE_MIGRATION_URL) cannot be built: {error}"
+            ),
+            Self::Migration(error) => write!(f, "the database could not be migrated: {error}"),
+            Self::Narrowing(error) => write!(
+                f,
+                "the serving role's privileges on audit_events and _sqlx_migrations could not \
+                 be revoked through KELIR_DATABASE_MIGRATION_URL: {error}"
+            ),
+            Self::ServingRole(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for DatabaseStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ServingPool(error) | Self::MigrationPool(error) => Some(error),
+            Self::Migration(error) => Some(error),
+            Self::Narrowing(error) => Some(error),
+            Self::ServingRole(error) => Some(error),
+        }
+    }
+}
+
+/// Readies the database and returns the pool the server serves on
+/// (ADR-0051 §2).
+///
+/// - **With `KELIR_DATABASE_MIGRATION_URL`**, the owner's pool migrates and
+///   then narrows the serving role, and **is closed before this returns**, so
+///   it is gone before the server binds.
+/// - **Without it**, the development shape, the serving URL migrates, as every
+///   release before `v1.0.0` did. Configuration refuses this shape in
+///   `staging` and `production`.
+/// - **In `staging` and `production`** the serving role's posture is checked
+///   last, on the serving pool, whichever shape got here.
+pub async fn prepare_serving_pool(config: &AppConfig) -> Result<PgPool, DatabaseStartupError> {
+    let tls = DatabaseTlsSettings::from(config);
+
+    // A non-local database without TLS is refused here when the configuration
+    // alone says so, and at the first connection when the server does.
+    let serving = create_pool_with_tls(&config.database_url, tls)
+        .map_err(DatabaseStartupError::ServingPool)?;
+
+    match config.database_migration_url.as_deref() {
+        Some(migration_url) => {
+            let owner = create_migration_pool(migration_url, tls)
+                .map_err(DatabaseStartupError::MigrationPool)?;
+
+            let prepared = migrate_and_narrow(&owner, &serving).await;
+            owner.close().await;
+            prepared?;
+        }
+        None => {
+            run_migrations(&serving)
+                .await
+                .map_err(DatabaseStartupError::Migration)?;
+            tracing::info!("database migrations applied through the one URL");
+        }
+    }
+
+    if config.app_env.requires_real_secrets() {
+        check_serving_posture(&serving)
+            .await
+            .map_err(DatabaseStartupError::ServingRole)?;
+        tracing::info!(
+            "the serving role owns no relation, function, schema or type and may not change \
+             audit_events"
+        );
+    }
+
+    Ok(serving)
+}
+
+/// [`prepare_serving_pool`]'s owner half: migrate, then narrow.
+async fn migrate_and_narrow(owner: &PgPool, serving: &PgPool) -> Result<(), DatabaseStartupError> {
+    run_migrations(owner)
+        .await
+        .map_err(DatabaseStartupError::Migration)?;
+    tracing::info!("database migrations applied as the schema's owner");
+
+    let narrowed = narrow_serving_role(owner, serving)
+        .await
+        .map_err(|error| DatabaseStartupError::Narrowing(name_the_tls_settings(error)))?;
+
+    if narrowed {
+        tracing::info!("the serving role's audit_events and _sqlx_migrations writes revoked");
+    } else {
+        tracing::info!("one role migrates and serves; the narrowing is skipped");
+    }
+
+    Ok(())
+}
+
 /// Cheap liveness probe for the database, used by `/health/ready`, whose log
 /// line carries the TLS settings' names when TLS is what failed.
 pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {

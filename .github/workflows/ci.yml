@@ -612,6 +612,7 @@ jobs:
         run: |
           cat > deploy/staging/.env <<'ENVFILE'
           KELIR_DB_PASSWORD=ci-only-database-password-6Qb2xR
+          KELIR_DB_APP_PASSWORD=ci-only-app-database-password-8Kp3vW
           KELIR_JWT_SECRET=ci-only-jwt-secret-Xr4Lm8Qp2ZvT6Ns1
           KELIR_MINIO_USER=ci-only-minio-user
           KELIR_MINIO_PASSWORD=ci-only-minio-password-9Hd3Bs
@@ -624,6 +625,28 @@ jobs:
           KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml
           KELIR_E2E_UPSTREAM_TOKEN=ci-only-upstream-token-7Wq2nV5c
           ENVFILE
+
+      - name: Provision the serving role
+        # ADR-0051 §2 and §4: the release compose file serves as kelir_app; the
+        # service container's POSTGRES_USER, kelir, owns the schema and migrates.
+        # The same statements as the provisioner's and Installation guide §5's.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: kelir
+          PGPASSWORD: ci-only-database-password-6Qb2xR
+          PGDATABASE: kelir
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -q <<'SQL'
+          CREATE ROLE kelir_app WITH LOGIN PASSWORD 'ci-only-app-database-password-8Kp3vW';
+          GRANT CONNECT ON DATABASE kelir TO kelir_app;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          GRANT USAGE ON SCHEMA public TO kelir_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kelir_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+              GRANT USAGE, SELECT ON SEQUENCES TO kelir_app;
+          SQL
 
       - name: Bring the release stack up
         # The version has to be the one the binary reports, because deploy.sh
@@ -675,6 +698,84 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report
           retention-days: 7
+
+  n-minus-one:
+    name: N−1 rehearsal (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    # ADR-0051 §4 (#842): does the previous release's binary start as the
+    # serving role against a database this release migrated, and if not, does
+    # the documented fallback, the owner's URL, roll back and forward? The
+    # script rehearses the real upgrade path and keeps its output as the record.
+    #
+    # **Outcome 10 is the expected one**, not 0: serving_role_campaign shows
+    # v0.9.0's migrator refused as kelir_app (no CREATE on schema public) and
+    # starting as the owner, and CHANGELOG.md's upgrade note is written for
+    # that. A 0 means the note and Release Process §6 are wrong, so it fails.
+    # No secrets: every password is the script's own throwaway.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The previous release is built from its tag.
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Check out the previous release
+        run: git worktree add --detach "${RUNNER_TEMP}/previous" v0.9.0
+
+      - name: Build this tree's backend
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: kelir-backend
+          file: deploy/docker/backend.Dockerfile
+          build-args: KELIR_BUILD_SHA=${{ github.sha }}
+          tags: kelir-backend:n1-current
+          load: true
+          cache-from: type=gha,scope=n1-current
+          cache-to: type=gha,mode=max,scope=n1-current,ignore-error=true
+
+      - name: Build the previous release's backend
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ${{ runner.temp }}/previous/kelir-backend
+          file: ${{ runner.temp }}/previous/deploy/docker/backend.Dockerfile
+          tags: kelir-backend:n1-previous
+          load: true
+          cache-from: type=gha,scope=n1-previous
+          cache-to: type=gha,mode=max,scope=n1-previous,ignore-error=true
+
+      - name: Rehearse
+        env:
+          KELIR_REHEARSAL_PG_IMAGE: postgres:${{ matrix.postgres }}
+          KELIR_REHEARSAL_CURRENT_IMAGE: kelir-backend:n1-current
+          KELIR_REHEARSAL_PREVIOUS_IMAGE: kelir-backend:n1-previous
+          KELIR_REHEARSAL_RESULT: n-minus-one-postgres-${{ matrix.postgres }}.txt
+        run: |
+          set +e
+          deploy/staging/n-minus-one.rehearsal.sh
+          code=$?
+          set -e
+          case "${code}" in
+            10) echo "Expected: v0.9.0 is refused as kelir_app; the owner fallback and the roll forward passed." ;;
+            0)  echo "::error::v0.9.0 served as kelir_app. CHANGELOG.md's upgrade note and Release Process §6 say it cannot; correct them."
+                exit 1 ;;
+            *)  echo "::error::The rehearsal failed (exit ${code}); its output above names the step."
+                exit 1 ;;
+          esac
+
+      - name: Keep the record
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: n-minus-one-postgres-${{ matrix.postgres }}
+          path: n-minus-one-postgres-${{ matrix.postgres }}.txt
+          if-no-files-found: ignore
+          retention-days: 90
 
   commit-messages:
     name: Commit messages

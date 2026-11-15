@@ -1,7 +1,8 @@
 //! Binary entry point.
 //!
 //! The application itself lives in the library crate (`src/lib.rs`); this file
-//! only loads configuration, opens the pool, migrates, bootstraps and serves.
+//! only loads configuration, migrates, opens the serving pool, bootstraps and
+//! serves.
 //! Keeping it thin is what lets `tests/` drive exactly the router the binary
 //! serves rather than a reconstruction of it.
 
@@ -51,15 +52,19 @@ async fn run() -> anyhow::Result<()> {
         "starting kelir backend"
     );
 
-    // A non-local database without TLS is refused here when the configuration
-    // alone says so, and at the first connection below when the server does.
-    let pool = db::create_pool_with_tls(&config.database_url, (&config).into())?;
-
+    // **Two roles** (ADR-0051 §2). The owner migrates, through
+    // KELIR_DATABASE_MIGRATION_URL and a pool of its own, narrows the serving
+    // role, and its pool is closed before this returns, so it is gone before
+    // the server binds. Everything below runs on the serving pool, as a role
+    // that owns no relation, function, schema or type and may not change
+    // `audit_events`; staging and production check that posture before going
+    // on.
+    //
     // Migrations run at startup so a fresh compose stack is usable immediately.
     // This is safe while deployments are single-instance; once several replicas
-    // start together, migration moves to a release step (release process §5).
-    db::run_migrations(&pool).await?;
-    tracing::info!("database migrations applied");
+    // start together, migration moves to a release step (release process §5,
+    // ADR-0051 §6).
+    let pool = db::prepare_serving_pool(&config).await?;
 
     // After migrations, so the seeded role exists; before serving, so the
     // instance is never reachable without a way to sign in.

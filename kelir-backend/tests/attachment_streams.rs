@@ -1889,7 +1889,14 @@ async fn a_request_dropped_waiting_for_the_database_leaves_nothing_in_the_store(
     let mut held = Vec::new();
 
     for _ in 0..common::TEST_POOL_MAX_CONNECTIONS {
-        held.push(watching.app.pool.acquire().await.expect("a connection"));
+        held.push(
+            watching
+                .app
+                .serving_pool
+                .acquire()
+                .await
+                .expect("a connection"),
+        );
     }
 
     release.send(()).expect("the body is waiting");
