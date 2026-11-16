@@ -1128,3 +1128,54 @@ async fn a_department_set_and_cleared_and_roles_replaced_each_audit() {
         "taking every role away is audited"
     );
 }
+
+/// **[#795]: a user's creation audits the row it stored.** `User.Created`'s
+/// `new_value` held the request: the address untrimmed, and no display
+/// name, status or department. It is now the same five fields `User.Updated`
+/// holds, as stored, with the username. A `new_value` built from the request
+/// again fails here on the padded address and name and on the department.
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+#[tokio::test]
+async fn a_user_creation_audits_the_stored_row() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-CREATE").await;
+    let first = grantable_role(&app, "ROLE-AUD-795-CREATE-A").await;
+    let second = grantable_role(&app, "ROLE-AUD-795-CREATE-B").await;
+
+    let mut body = payload("audited.create");
+    body["email"] = json!("  audited.create@kelir.test  ");
+    body["displayName"] = json!("\u{3000}Created Person\u{3000}");
+    body["departmentId"] = json!(place);
+    body["roleIds"] = json!([second, first]);
+    let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "audited.create").await;
+
+    let rows: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT old_value_json, new_value_json FROM audit_events
+         WHERE event_type = 'User.Created' AND object_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit rows");
+    assert_eq!(rows.len(), 1, "a creation writes one User.Created row");
+    let (old, new) = rows.into_iter().next().expect("the row just counted");
+
+    let mut expected = user_row(
+        "audited.create@kelir.test",
+        "Created Person",
+        "ACTIVE",
+        Some(place),
+        &[first, second],
+    );
+    expected["username"] = json!("audited.create");
+    assert_eq!(old, None, "a creation has no before");
+    assert_eq!(
+        normalized(new.unwrap_or_default()),
+        expected,
+        "new_value is the stored row: trimmed, with its department and roles"
+    );
+}

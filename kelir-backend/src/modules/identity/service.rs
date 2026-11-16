@@ -104,7 +104,7 @@ pub async fn create_user(
     // The department is checked before anything is written. Without this the
     // reference reaches the foreign key and a caller who mistyped a UUID gets a
     // 500 rather than a 422 naming the field (FR-IDM-008, decision D-8).
-    check_department(state, tenant_id, request.department_id).await?;
+    check_department(&state.pool, tenant_id, request.department_id).await?;
 
     // The user and its role grants are one unit: a user created without the
     // roles that were asked for would silently have no access.
@@ -128,6 +128,16 @@ pub async fn create_user(
     .map_err(duplicate_user_to_conflict)?;
 
     repo::replace_user_roles(&mut transaction, tenant_id, id, &request.role_ids).await?;
+
+    // What was stored, not what was asked for (#795): the address and name
+    // trimmed, and the department and roles the user now holds. Read in the
+    // transaction, as `update_user` reads back (#787).
+    let user = repo::find_user_in(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("User"))?;
+    let mut created = user.audit_value();
+    created["username"] = serde_json::json!(user.username);
+
     transaction.commit().await?;
 
     audit::record_or_warn(
@@ -142,16 +152,12 @@ pub async fn create_user(
             ip_address: caller.ip_address(),
             reason: None,
             old_value: None,
-            new_value: Some(serde_json::json!({
-                "username": request.username,
-                "email": request.email,
-                "roleIds": request.role_ids,
-            })),
+            new_value: Some(created),
         },
     )
     .await;
 
-    get_user_unchecked(state, tenant_id, id).await
+    Ok(user)
 }
 
 pub async fn update_user(
@@ -167,15 +173,29 @@ pub async fn update_user(
     validate_update_user(&request)?;
 
     let tenant_id = caller.tenant_id();
-    let before = repo::find_user(&state.pool, tenant_id, id)
+    let mut transaction = state.pool.begin().await?;
+
+    // The row is locked before it is read, so the "before" this edit audits
+    // is the row its `UPDATE` changes: a second edit of the user waits here
+    // until this one commits, and then reads what this one stored (#795).
+    if !repo::lock_user_for_edit(&mut *transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("User"));
+    }
+    let before = repo::find_user_in(&mut transaction, tenant_id, id)
         .await?
         .ok_or_else(|| AppError::not_found("User"))?;
 
     // Only a department the caller is *setting* is checked, and only when it
     // names one. `Some(None)` clears the column and has nothing to resolve.
-    check_department(state, tenant_id, request.department_id.flatten()).await?;
-
-    let mut transaction = state.pool.begin().await?;
+    // Checked after the user is found, as it was before the read moved into
+    // the transaction: an unknown user is a 404 whatever department the body
+    // names.
+    check_department(
+        &mut *transaction,
+        tenant_id,
+        request.department_id.flatten(),
+    )
+    .await?;
 
     let updated = repo::update_user_fields(
         &mut *transaction,
@@ -228,16 +248,11 @@ pub async fn update_user(
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
             reason: None,
-            old_value: Some(serde_json::json!({
-                "email": before.email,
-                "displayName": before.display_name,
-                "status": before.status,
-            })),
-            new_value: Some(serde_json::json!({
-                "email": request.email,
-                "displayName": request.display_name,
-                "status": request.status,
-            })),
+            // Both halves are stored rows, read under this edit's lock: never
+            // the request, which holds nothing for a field it did not send
+            // and the value it sent before it was trimmed (#795).
+            old_value: Some(before.audit_value()),
+            new_value: Some(user.audit_value()),
         },
     )
     .await;
@@ -672,12 +687,6 @@ pub async fn delete_role(
     Ok(())
 }
 
-async fn get_user_unchecked(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<User, AppError> {
-    repo::find_user(&state.pool, tenant_id, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("User"))
-}
-
 /// Permission grants are the changes most worth being able to reconstruct
 /// later (SRS FR-AUD-002), so they are always audited with their new set.
 async fn audit_permission_change(
@@ -737,7 +746,7 @@ fn duplicate_role_to_conflict(error: sqlx::Error) -> AppError {
 /// correct one, and the window is a rare administrative race rather than the
 /// ordinary case of a mistyped id.
 async fn check_department(
-    state: &AppState,
+    executor: impl sqlx::PgExecutor<'_>,
     tenant_id: Uuid,
     department_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -745,7 +754,7 @@ async fn check_department(
         return Ok(());
     };
 
-    if department_repo::department_is_live(&state.pool, tenant_id, department_id).await? {
+    if department_repo::department_is_live(executor, tenant_id, department_id).await? {
         return Ok(());
     }
 

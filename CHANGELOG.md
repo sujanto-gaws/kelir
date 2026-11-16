@@ -1171,6 +1171,21 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A user's creation and edit audit the row that was stored**
+  ([#795](https://github.com/sujanto-gaws/kelir/issues/795),
+  NFR-AUD-001 and 002, FR-AUD-002). `User.Updated` built its new value
+  from the request, so a partial edit audited `null` for every field it
+  did not send and a padded value untrimmed. Neither half held the
+  department or the roles, so placing a user in a department, taking
+  them out of it, or granting a role left no trace in the trail.
+  `User.Created` held the untrimmed address and no department. Both
+  halves of `User.Updated` now hold `email`, `displayName`, `status`,
+  `departmentId` and `roleIds` as stored. Its "before" is read after the
+  edit locks the user's row, so a concurrent edit cannot come between
+  them. `User.Created`'s new value holds the same five keys, with
+  `username`. Rows written before the fix keep their old shapes. The
+  keys are listed in the Database Schema §10.2, "Audit events".
+
 - **The backend holds no connection as the schema's owner while it
   serves** ([#991](https://github.com/sujanto-gaws/kelir/issues/991),
   ADR-0051). Sometimes one of the owner's connections, the one that ran
