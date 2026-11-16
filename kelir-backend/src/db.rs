@@ -53,7 +53,11 @@ pub fn create_pool_with_max_connections(
     let options = connect_options(database_url, DatabaseTlsSettings::default())
         .map_err(ConnectOptionsError::into_sqlx)?;
 
-    Ok(lazy_pool(options, max_connections))
+    Ok(lazy_pool(
+        options,
+        max_connections,
+        SERVING_APPLICATION_NAME,
+    ))
 }
 
 /// The pool the binary opens: [`create_pool`], with the operator's
@@ -68,10 +72,28 @@ pub fn create_pool_with_tls(
     Ok(lazy_pool(
         connect_options(database_url, tls)?,
         DEFAULT_MAX_CONNECTIONS,
+        SERVING_APPLICATION_NAME,
     ))
 }
 
-fn lazy_pool(options: PgConnectOptions, max_connections: u32) -> PgPool {
+/// The `application_name` the serving pool's connections carry, so
+/// `pg_stat_activity` tells them from the owner's (#991).
+pub const SERVING_APPLICATION_NAME: &str = "kelir";
+
+/// The `application_name` the owner's connections carry, from
+/// [`create_migration_pool`]: none is to be left once the server binds
+/// (ADR-0051 §2, #991).
+pub const MIGRATION_APPLICATION_NAME: &str = "kelir-migrate";
+
+/// A pool that dials nothing until it is first used, naming its connections
+/// `application_name` unless the URL names them itself.
+fn lazy_pool(options: PgConnectOptions, max_connections: u32, application_name: &str) -> PgPool {
+    let options = if options.get_application_name().is_some() {
+        options
+    } else {
+        options.application_name(application_name)
+    };
+
     PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(5))
@@ -452,6 +474,7 @@ pub fn create_migration_pool(
     Ok(lazy_pool(
         connect_options(migration_url, tls)?,
         MIGRATION_MAX_CONNECTIONS,
+        MIGRATION_APPLICATION_NAME,
     ))
 }
 
@@ -1411,6 +1434,39 @@ mod tests {
                 .connect_options()
                 .get_ssl_mode(),
         )
+    }
+
+    /// Each pool names its connections, so `pg_stat_activity` tells the
+    /// owner's from the serving role's (#991); a name the URL gives wins.
+    #[tokio::test]
+    async fn each_pool_names_its_connections() {
+        let url = "postgres://u:p@localhost/kelir";
+        let tls = DatabaseTlsSettings::default();
+        let name = |pool: PgPool| {
+            pool.connect_options()
+                .get_application_name()
+                .map(str::to_owned)
+        };
+
+        assert_eq!(
+            name(create_pool_with_tls(url, tls).expect("a serving pool")).as_deref(),
+            Some(SERVING_APPLICATION_NAME)
+        );
+        assert_eq!(
+            name(create_pool(url).expect("a pool")).as_deref(),
+            Some(SERVING_APPLICATION_NAME)
+        );
+        assert_eq!(
+            name(create_migration_pool(url, tls).expect("an owner's pool")).as_deref(),
+            Some(MIGRATION_APPLICATION_NAME)
+        );
+        assert_eq!(
+            name(
+                create_migration_pool(&format!("{url}?application_name=ops"), tls).expect("a pool")
+            )
+            .as_deref(),
+            Some("ops")
+        );
     }
 
     #[tokio::test]
