@@ -55,12 +55,10 @@ use std::path::Path;
 
 use axum::http::{Method, StatusCode};
 use regex::Regex;
-use serde_json::{json, Value};
-use utoipa::OpenApi;
-use uuid::Uuid;
+use serde_json::json;
 
+use common::operations::{every_operation, Operation};
 use common::TestApp;
-use kelir_backend::router::ApiDoc;
 
 /// **Every operation a caller reaches with no token, and why.** A row here is a
 /// decision that the operation is public; review it as one.
@@ -101,84 +99,11 @@ const PUBLIC: [(&str, &str, &str); 10] = [
 /// its own, which `router::tests` excuses by name.
 const THE_DOCUMENT_ITSELF: &str = "/api/docs/openapi.json";
 
-const METHODS: [(&str, Method); 5] = [
-    ("get", Method::GET),
-    ("post", Method::POST),
-    ("put", Method::PUT),
-    ("patch", Method::PATCH),
-    ("delete", Method::DELETE),
-];
-
-struct Operation {
-    method: Method,
-    template: String,
-    /// The path with every `{capture}` resolved.
-    path: String,
-    declares_bearer: bool,
-}
-
-impl Operation {
-    fn is_public(&self) -> bool {
-        PUBLIC
-            .iter()
-            .any(|(method, template, _)| *method == self.method && *template == self.template)
-    }
-
-    fn name(&self) -> String {
-        format!("{} {}", self.method, self.template)
-    }
-}
-
-/// A value for a path capture: the annotation's `example` if it gives one, and
-/// otherwise a fresh uuid, which is what almost all of them are.
-fn capture_value(parameters: Option<&Vec<Value>>, name: &str) -> String {
-    parameters
-        .into_iter()
-        .flatten()
-        .filter(|parameter| parameter["in"] == "path" && parameter["name"] == name)
-        .find_map(|parameter| {
-            parameter["example"]
-                .as_str()
-                .or_else(|| parameter["schema"]["example"].as_str())
-        })
-        .map_or_else(|| Uuid::now_v7().to_string(), ToOwned::to_owned)
-}
-
-/// Every operation in the document, whatever it declares.
-fn every_operation() -> Vec<Operation> {
-    let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serialises");
-    let paths = document["paths"]
-        .as_object()
-        .expect("the document has paths");
-
-    let mut operations = Vec::new();
-    for (template, item) in paths {
-        for (key, method) in METHODS {
-            let operation = &item[key];
-            if operation.is_null() {
-                continue;
-            }
-
-            let mut path = template.clone();
-            while let Some(start) = path.find('{') {
-                let end = start + path[start..].find('}').expect("a closed capture");
-                let value =
-                    capture_value(operation["parameters"].as_array(), &path[start + 1..end]);
-                path.replace_range(start..=end, &value);
-            }
-
-            operations.push(Operation {
-                method,
-                template: template.clone(),
-                path,
-                declares_bearer: operation["security"].as_array().is_some_and(|schemes| {
-                    schemes.iter().any(|scheme| scheme.get("bearer").is_some())
-                }),
-            });
-        }
-    }
-
-    operations
+/// Whether [`PUBLIC`] names the operation.
+fn is_public(operation: &Operation) -> bool {
+    PUBLIC
+        .iter()
+        .any(|(method, template, _)| *method == operation.method && *template == operation.template)
 }
 
 /// What keeps the document and [`PUBLIC`] from disagreeing: each failure names
@@ -187,7 +112,7 @@ fn door_failures(operations: &[Operation]) -> Vec<String> {
     let mut failures = Vec::new();
 
     for operation in operations {
-        match (operation.is_public(), operation.declares_bearer) {
+        match (is_public(operation), operation.declares_bearer) {
             (false, false) => failures.push(format!(
                 "{} declares no bearer and is not in PUBLIC: protect it, or list it with its reason",
                 operation.name()
@@ -262,7 +187,7 @@ async fn no_operation_answers_a_caller_with_no_token_unless_it_is_named_public()
 
     // The public operations first: a row that stopped being public is a stale
     // row, and whatever an ordinary request writes is written before the counts.
-    for operation in operations.iter().filter(|operation| operation.is_public()) {
+    for operation in operations.iter().filter(|operation| is_public(operation)) {
         let response = send(&app, operation).await;
         if matches!(
             response.status,
@@ -287,7 +212,7 @@ async fn no_operation_answers_a_caller_with_no_token_unless_it_is_named_public()
 
     let protected: Vec<&Operation> = operations
         .iter()
-        .filter(|operation| !operation.is_public())
+        .filter(|operation| !is_public(operation))
         .collect();
     assert!(
         !protected.is_empty(),

@@ -48,8 +48,10 @@
     reason = "shared harness; each test binary uses a different subset"
 )]
 
+pub mod audit_chain;
 pub mod fixtures;
 pub mod gate;
+pub mod operations;
 
 use std::env;
 use std::net::SocketAddr;
