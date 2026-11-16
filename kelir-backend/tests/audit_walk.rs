@@ -2883,8 +2883,18 @@ async fn an_automatic_step_writes_no_audit_row_of_its_own_issue_1005() {
 #[tokio::test]
 async fn the_notification_and_outbox_workers_write_no_audit_row_as_ruled() {
     let mut walk = Walk::start().await;
-    walk.approver().await;
-    walk.awaiting_approval().await;
+    let approver = walk.approver().await;
+    let (_, task) = walk.awaiting_approval().await;
+
+    // The outbox carries a transition the engine fires, and entering the
+    // initial state at the submit is not one: the decision is.
+    walk.ok(
+        Method::POST,
+        &format!("/api/v1/workflow/tasks/{task}/decision"),
+        approver.token.as_deref().expect("a token"),
+        Some(json!({ "action": "APPROVE" })),
+    )
+    .await;
 
     let pending = |app: &TestApp| {
         let pool = app.pool.clone();
@@ -2897,7 +2907,7 @@ async fn the_notification_and_outbox_workers_write_no_audit_row_as_ruled() {
             .expect("the pending notifications")
         }
     };
-    assert!(pending(&walk.app).await > 0, "the submit told the approver");
+    assert!(pending(&walk.app).await > 0, "the approval told somebody");
 
     let before = audit_ids(&walk.app).await;
     walk.app.deliver_notifications().await;
