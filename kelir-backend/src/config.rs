@@ -330,6 +330,12 @@ fn multi_tenant(raw: &str) -> Result<bool, ConfigError> {
 /// production.
 const PLACEHOLDER_SECRETS: &[&str] = &["change-me", "changeme", "secret", "test-secret"];
 
+/// The shortest signing secret staging and production accept, in bytes of
+/// UTF-8 (#837, NFR-SEC-007). Access tokens are HS256, and RFC 7518 §3.2 asks
+/// for a key at least as long as the hash output. Bytes, because the bytes
+/// are the HMAC key: `é` counts two.
+const MIN_SIGNING_SECRET_BYTES: usize = 32;
+
 /// Parses a boolean deployment flag.
 ///
 /// Refuses anything it does not recognise rather than treating it as `false`.
@@ -560,6 +566,19 @@ impl AppConfig {
             return Err(ConfigError::Invalid {
                 key: "KELIR_JWT_SECRET",
                 reason: format!("the development placeholder cannot be used in {app_env}"),
+            });
+        }
+
+        // A secret short enough to guess forges every token as surely as the
+        // placeholder does (#837). The raw value is measured, untrimmed, as it
+        // is the key; the message gives the minimum and never the value.
+        if app_env.requires_real_secrets() && jwt_secret.len() < MIN_SIGNING_SECRET_BYTES {
+            return Err(ConfigError::Invalid {
+                key: "KELIR_JWT_SECRET",
+                reason: format!(
+                    "must be at least {MIN_SIGNING_SECRET_BYTES} bytes in {app_env}; \
+                     generate one with `openssl rand -base64 48`"
+                ),
             });
         }
 

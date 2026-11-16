@@ -553,7 +553,7 @@ STUB
         cat <<ENV
 KELIR_DB_PASSWORD=probe-database-password
 KELIR_DB_APP_PASSWORD=probe-app-database-password
-KELIR_JWT_SECRET=probe-jwt-secret-0123456789
+KELIR_JWT_SECRET=probe-jwt-secret-0123456789abcdef0123456789
 KELIR_MINIO_USER=probe-user
 KELIR_MINIO_PASSWORD=probe-minio-password
 KELIR_MINIO_KMS_SECRET_KEY=probe-store:$(head -c 32 /dev/urandom | base64)

@@ -263,6 +263,13 @@ for required in KELIR_DB_PASSWORD KELIR_DB_APP_PASSWORD KELIR_JWT_SECRET KELIR_M
     esac
 done
 
+# The backend refuses a signing secret under 32 bytes (#837, NFR-SEC-007);
+# refuse it here first. Bytes, as the backend counts them: LC_ALL=C makes
+# ${#var} count bytes rather than characters.
+jwt_secret_bytes="$(LC_ALL=C; printf '%s' "${#KELIR_JWT_SECRET}")"
+(( jwt_secret_bytes >= 32 )) \
+    || die "KELIR_JWT_SECRET must be at least 32 bytes; generate one with: openssl rand -base64 48"
+
 # **The store key** (NFR-SEC-009, ADR-0049 §2). MinIO encrypts every object
 # under it, and its shape is `<name>:<32 bytes in base64>`, so anything else is
 # a placeholder. The development key is refused by value: it is published in
