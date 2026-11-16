@@ -210,7 +210,14 @@ impl TestApp {
                     )
                 });
 
-        db::narrow_serving_role(&pool, &serving_pool)
+        let mut owner = pool.acquire().await.unwrap_or_else(|error| {
+            harness_failure(
+                "take an owner's connection to narrow with",
+                &error.to_string(),
+                &database_url,
+            )
+        });
+        db::narrow_serving_role(&mut owner, &serving_pool)
             .await
             .unwrap_or_else(|error| {
                 harness_failure(
@@ -219,6 +226,7 @@ impl TestApp {
                     &database_url,
                 )
             });
+        drop(owner);
         db::check_serving_posture(&serving_pool)
             .await
             .unwrap_or_else(|error| {
@@ -1148,11 +1156,19 @@ impl TestApp {
             )
         });
 
-        db::narrow_serving_role(&self.pool, &pool)
+        let mut owner = self.pool.acquire().await.unwrap_or_else(|error| {
+            harness_failure(
+                "take an owner's connection to narrow with",
+                &error.to_string(),
+                &url,
+            )
+        });
+        db::narrow_serving_role(&mut owner, &pool)
             .await
             .unwrap_or_else(|error| {
                 harness_failure("narrow the scratch serving role", &error.to_string(), &url)
             });
+        drop(owner);
 
         ScratchServingRole { name, url, pool }
     }

@@ -2,23 +2,32 @@
 //! nothing (ADR-0051, [#842]).
 //!
 //! `audit_append_only.rs` holds the serving role against `audit_events`. This
-//! file holds the startup that puts it there: the owner's pool migrates and
-//! narrows, and `staging` and `production` check the serving role's posture
+//! file holds the startup that puts it there: one connection as the owner
+//! migrates and narrows, and `staging` and `production` check the serving role's posture
 //! before the server binds, refusing a URL that names the owner, a grant the
 //! narrowing does not take back, and a superuser. The refusal of one URL in
 //! `staging` and `production` is `config.rs`'s, and is tested there.
 //!
 //! Each test drives `db::prepare_serving_pool`, the sequence `main.rs` runs,
-//! against a database the harness provisioned as a host is provisioned.
+//! or its halves, `db::StartupPools::open` and `prepare`, as `main.rs` runs
+//! them, against a database the harness provisioned as a host is provisioned.
+//!
+//! **The owner holds no connection once startup is prepared** ([#991]): the
+//! owner's connection is named `db::MIGRATION_APPLICATION_NAME`, and none may
+//! be left in `pg_stat_activity`.
 //!
 //! [#842]: https://github.com/sujanto-gaws/kelir/issues/842
+//! [#991]: https://github.com/sujanto-gaws/kelir/issues/991
 
 mod common;
 
+use std::time::Duration;
+
 use common::{TestApp, SERVING_ROLE};
 use kelir_backend::config::{AppConfig, AppEnv};
-use kelir_backend::db::{self, DatabaseStartupError, ServingRoleError};
+use kelir_backend::db::{self, DatabaseStartupError, ServingRoleError, StartupPools};
 use sqlx::PgPool;
+use tokio::time::Instant;
 
 /// The owner's URL the harness gave the application.
 fn owner_url(app: &TestApp) -> String {
@@ -193,8 +202,9 @@ async fn the_narrowing_is_idempotent() {
     let app = TestApp::spawn().await;
     let after_one = the_narrowed_grants(&app).await;
 
+    let mut owner = app.pool.acquire().await.expect("an owner's connection");
     for _ in 0..2 {
-        let narrowed = db::narrow_serving_role(&app.pool, &app.serving_pool)
+        let narrowed = db::narrow_serving_role(&mut owner, &app.serving_pool)
             .await
             .expect("the narrowing runs again");
         assert!(narrowed, "two roles, so the narrowing runs");
@@ -210,10 +220,12 @@ async fn the_narrowing_is_idempotent() {
 async fn one_url_migrates_and_serves_outside_a_deployment() {
     let app = TestApp::spawn().await;
 
-    let skipped = !db::narrow_serving_role(&app.pool, &app.pool)
+    let mut owner = app.pool.acquire().await.expect("an owner's connection");
+    let skipped = !db::narrow_serving_role(&mut owner, &app.pool)
         .await
         .expect("the narrowing reads both roles");
     assert!(skipped, "one role, so the narrowing is skipped");
+    drop(owner);
 
     let config = AppConfig {
         app_env: AppEnv::Test,
@@ -228,4 +240,148 @@ async fn one_url_migrates_and_serves_outside_a_deployment() {
 
     assert_eq!(role_of(&serving).await, role_of(&app.pool).await);
     serving.close().await;
+}
+
+/// One of the owner's connections to the test's database, as
+/// `pg_stat_activity` shows it.
+#[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code, reason = "read through Debug, in a failure's message")]
+struct OwnerConnection {
+    pid: i32,
+    usename: String,
+    client_addr: String,
+    backend_start: String,
+    state: String,
+    wait_event_type: String,
+    state_change: String,
+    query: String,
+}
+
+/// The owner's connections to the test's database: those named
+/// [`db::MIGRATION_APPLICATION_NAME`]. The harness's own pool is named
+/// otherwise, so it is not among them.
+async fn owner_connections(app: &TestApp) -> Vec<OwnerConnection> {
+    sqlx::query_as(
+        "SELECT pid,
+                coalesce(usename::text, '') AS usename,
+                coalesce(host(client_addr), 'local') AS client_addr,
+                backend_start::text AS backend_start,
+                coalesce(state, '') AS state,
+                coalesce(wait_event_type, '') AS wait_event_type,
+                coalesce(state_change::text, '') AS state_change,
+                left(coalesce(query, ''), 200) AS query
+         FROM pg_stat_activity
+         WHERE datname = $1 AND application_name = $2 AND backend_type = 'client backend'
+         ORDER BY backend_start",
+    )
+    .bind(&app.database_name)
+    .bind(db::MIGRATION_APPLICATION_NAME)
+    .fetch_all(&app.pool)
+    .await
+    .expect("pg_stat_activity reads back")
+}
+
+/// How long a backend whose connection was closed may take to leave
+/// `pg_stat_activity`. Only a connection left open reaches it.
+const BACKEND_EXIT: Duration = Duration::from_secs(10);
+
+/// No connection of the owner's is left in `pg_stat_activity`.
+///
+/// **This waits, and says so**: a closed connection's backend exits a moment
+/// after `close()` returns, so its row is waited out, up to [`BACKEND_EXIT`].
+/// A connection left open stays idle, and only that reaches the deadline.
+async fn the_owner_holds_no_connection(app: &TestApp, when: &str) {
+    let deadline = Instant::now() + BACKEND_EXIT;
+    loop {
+        let left = owner_connections(app).await;
+        if left.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{when}: the owner still holds connections {BACKEND_EXIT:?} on: {left:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// **The owner opens one connection, and leaves none** (#991, ADR-0051 §2).
+///
+/// `prepare` is held part way: the test locks `_sqlx_migrations`, so the
+/// migrator, which takes its advisory lock and then reads the table, waits on
+/// the lock. While it waits, the owner's connections are counted: there is
+/// exactly one, and it is the one waiting. Then the lock is released, and
+/// once `prepare` returns that connection is gone too.
+///
+/// Before #991 the owner had a pool, whose `close()` could leave a connection
+/// it was still returning (launchbadge/sqlx#3217, `tests/pool_close.rs`).
+/// Now it has one connection, which `prepare` closes itself, so there is no
+/// return in the background to race. The stall and the count are
+/// deterministic; the waits are bounded and only a failure reaches them.
+#[tokio::test]
+async fn the_owner_opens_one_connection_and_leaves_none() {
+    let app = TestApp::spawn().await;
+    let config = staging(&app);
+    let pools = StartupPools::open(&config).expect("the pool and the owner's options build");
+
+    let mut lock = app.pool.begin().await.expect("a transaction to lock with");
+    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .expect("_sqlx_migrations locks");
+
+    let held_part_way = async {
+        let deadline = Instant::now() + BACKEND_EXIT;
+        let waiting = loop {
+            let owner = owner_connections(&app).await;
+            if owner
+                .iter()
+                .any(|connection| connection.wait_event_type == "Lock")
+            {
+                break owner;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "prepare never waited on the lock as the owner: {owner:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        assert_eq!(
+            waiting.len(),
+            1,
+            "the owner holds more than one connection while it migrates: {waiting:#?}"
+        );
+
+        lock.rollback().await.expect("the lock is released");
+    };
+
+    let (prepared, ()) = tokio::join!(pools.prepare(&config), held_part_way);
+    prepared.expect("both URLs, the serving role as provisioned, starts");
+
+    the_owner_holds_no_connection(&app, "once prepared").await;
+    pools.serving.close().await;
+}
+
+/// **Once startup is prepared, the owner holds no connection** (#991,
+/// ADR-0051 §2): `StartupPools::open`, then `prepare` with both URLs, as
+/// `main.rs` runs them, and on a multi-threaded runtime, as `main.rs` runs:
+/// the shape in which the owner's pool could leave a connection behind, while
+/// it had one. Repeated, because that was a race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owner_holds_no_connection_once_startup_is_prepared() {
+    let app = TestApp::spawn().await;
+    let config = staging(&app);
+
+    for round in 1..=30 {
+        let pools = StartupPools::open(&config).expect("the pool and the owner's options build");
+        pools
+            .prepare(&config)
+            .await
+            .expect("both URLs, the serving role as provisioned, starts");
+
+        the_owner_holds_no_connection(&app, &format!("round {round}, once prepared")).await;
+
+        pools.serving.close().await;
+    }
 }

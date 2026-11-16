@@ -2,7 +2,7 @@ use std::fmt;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use sqlx::{ConnectOptions, PgPool};
+use sqlx::{ConnectOptions, Connection, Executor, PgConnection, PgPool, Postgres};
 
 use crate::config::AppConfig;
 
@@ -53,7 +53,11 @@ pub fn create_pool_with_max_connections(
     let options = connect_options(database_url, DatabaseTlsSettings::default())
         .map_err(ConnectOptionsError::into_sqlx)?;
 
-    Ok(lazy_pool(options, max_connections))
+    Ok(lazy_pool(
+        options,
+        max_connections,
+        SERVING_APPLICATION_NAME,
+    ))
 }
 
 /// The pool the binary opens: [`create_pool`], with the operator's
@@ -68,14 +72,40 @@ pub fn create_pool_with_tls(
     Ok(lazy_pool(
         connect_options(database_url, tls)?,
         DEFAULT_MAX_CONNECTIONS,
+        SERVING_APPLICATION_NAME,
     ))
 }
 
-fn lazy_pool(options: PgConnectOptions, max_connections: u32) -> PgPool {
+/// The `application_name` the serving pool's connections carry, so
+/// `pg_stat_activity` tells them from the owner's (#991).
+pub const SERVING_APPLICATION_NAME: &str = "kelir";
+
+/// The `application_name` the owner's connection carries, from
+/// [`migration_connect_options`]: it is closed before the server binds
+/// (ADR-0051 §2, #991).
+pub const MIGRATION_APPLICATION_NAME: &str = "kelir-migrate";
+
+/// How long a pool waits for a connection, and how long the owner's
+/// connection is retried while the server refuses it or is starting up.
+pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `options`, naming its connections `application_name` unless the URL names
+/// them itself.
+fn named(options: PgConnectOptions, application_name: &str) -> PgConnectOptions {
+    if options.get_application_name().is_some() {
+        options
+    } else {
+        options.application_name(application_name)
+    }
+}
+
+/// A pool that dials nothing until it is first used, naming its connections
+/// `application_name` unless the URL names them itself.
+fn lazy_pool(options: PgConnectOptions, max_connections: u32, application_name: &str) -> PgPool {
     PgPoolOptions::new()
         .max_connections(max_connections)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect_lazy_with(options)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_lazy_with(named(options, application_name))
 }
 
 /// The two settings that decide how the database hop is protected (#803).
@@ -426,33 +456,108 @@ fn name_the_tls_settings(error: sqlx::Error) -> sqlx::Error {
 /// The binary's first connection is made here, so a server that refuses TLS
 /// is reported here, with the setting named (#803).
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    migrator()
+        .run(pool)
+        .await
+        .map_err(name_the_tls_settings_in_migration)
+}
+
+/// [`run_migrations`] on one connection: the owner's, at startup (ADR-0051
+/// §2, #991). The migrator holds it, with its advisory lock, until done.
+pub async fn run_migrations_on(
+    connection: &mut PgConnection,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    migrator()
+        .run(&mut *connection)
+        .await
+        .map_err(name_the_tls_settings_in_migration)
+}
+
+/// The binary's migrations, tolerating those of a newer release (#76).
+fn migrator() -> sqlx::migrate::Migrator {
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_ignore_missing(true);
-    migrator.run(pool).await.map_err(|error| match error {
+    migrator
+}
+
+fn name_the_tls_settings_in_migration(
+    error: sqlx::migrate::MigrateError,
+) -> sqlx::migrate::MigrateError {
+    match error {
         sqlx::migrate::MigrateError::Execute(error) => {
             sqlx::migrate::MigrateError::Execute(name_the_tls_settings(error))
         }
         other => other,
-    })
+    }
 }
 
-/// The migration pool's ceiling (ADR-0051 §2): the migrator holds one
-/// connection, with its advisory lock, and the narrowing needs no more.
-pub const MIGRATION_MAX_CONNECTIONS: u32 = 2;
-
-/// The pool the binary migrates through, as the schema's owner, from
-/// `KELIR_DATABASE_MIGRATION_URL` (ADR-0051 §2).
+/// The options the binary connects with as the schema's owner, from
+/// `KELIR_DATABASE_MIGRATION_URL` (ADR-0051 §2), its connection named
+/// [`MIGRATION_APPLICATION_NAME`] unless the URL names it.
 ///
 /// The TLS rule is [`connect_options`]'s, as for the serving pool: the two
 /// settings apply to both URLs.
-pub fn create_migration_pool(
+pub fn migration_connect_options(
     migration_url: &str,
     tls: DatabaseTlsSettings<'_>,
-) -> Result<PgPool, ConnectOptionsError> {
-    Ok(lazy_pool(
+) -> Result<PgConnectOptions, ConnectOptionsError> {
+    Ok(named(
         connect_options(migration_url, tls)?,
-        MIGRATION_MAX_CONNECTIONS,
+        MIGRATION_APPLICATION_NAME,
     ))
+}
+
+/// The owner's one connection (ADR-0051 §2, #991).
+///
+/// **One connection, not a pool.** The migrator holds one connection, with
+/// its advisory lock, and the narrowing needs no more. A pool returns a
+/// dropped connection from a task it spawns, and sqlx-core 0.8.6's `close()`
+/// can return while that task is still putting the connection back, leaving
+/// it open in the closed pool (launchbadge/sqlx#3217, `tests/pool_close.rs`).
+/// The pool's handle lived as long as the server (#987), so the owner's
+/// connection did too. A connection the caller holds is closed when the
+/// caller closes it, or hung up when it is dropped, as a stop during startup
+/// drops it (#856).
+///
+/// **Retried as the pools retry**: a refused connection, and the server's
+/// `too_many_connections` (53300) and `cannot_connect_now` (57P03), with a
+/// backoff from 10 ms, until [`ACQUIRE_TIMEOUT`]. Any other error is
+/// returned at once.
+pub async fn connect_owner(options: &PgConnectOptions) -> Result<PgConnection, sqlx::Error> {
+    let deadline = tokio::time::Instant::now() + ACQUIRE_TIMEOUT;
+    let mut backoff = Duration::from_millis(10);
+
+    loop {
+        let error = match tokio::time::timeout_at(deadline, options.connect()).await {
+            Ok(Ok(connection)) => return Ok(connection),
+            Ok(Err(error)) => error,
+            Err(_) => {
+                return Err(sqlx::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("no connection as the schema's owner within {ACQUIRE_TIMEOUT:?}"),
+                )))
+            }
+        };
+
+        if !is_worth_retrying(&error) || tokio::time::Instant::now() + backoff >= deadline {
+            return Err(error);
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(ACQUIRE_TIMEOUT / 5);
+    }
+}
+
+/// What sqlx's pool retries while connecting: the server not listening yet,
+/// or saying it cannot take the connection yet.
+fn is_worth_retrying(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(error) => error.kind() == std::io::ErrorKind::ConnectionRefused,
+        sqlx::Error::Database(error) => {
+            matches!(error.code().as_deref(), Some("53300" | "57P03"))
+        }
+        _ => false,
+    }
 }
 
 /// What the serving role may not hold, revoked from it on every start
@@ -466,15 +571,18 @@ pub const SERVING_ROLE_NARROWING: [(&str, &str); 2] = [
     ("_sqlx_migrations", "INSERT, UPDATE, DELETE, TRUNCATE"),
 ];
 
-/// The role a pool connects as.
-async fn current_user(pool: &PgPool) -> Result<String, sqlx::Error> {
+/// The role a pool or a connection connects as.
+async fn current_user<'e, E>(executor: E) -> Result<String, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar("SELECT current_user::text")
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await
 }
 
-/// Revokes [`SERVING_ROLE_NARROWING`] from the serving role, through the
-/// owner's pool, and says whether it ran (ADR-0051 §2).
+/// Revokes [`SERVING_ROLE_NARROWING`] from the serving role, on the owner's
+/// connection, and says whether it ran (ADR-0051 §2).
 ///
 /// **Widening is provisioning's; narrowing is the backend's.** A migration
 /// names no role, because the role names are a deployment's, so the serving
@@ -483,24 +591,27 @@ async fn current_user(pool: &PgPool) -> Result<String, sqlx::Error> {
 /// fresh host, where default privileges grant `_sqlx_migrations` in full when
 /// the first start creates it.
 ///
-/// **Skipped when both pools are the same role**, the development shape: the
+/// **Skipped when both are the same role**, the development shape: the
 /// owner would revoke from itself.
-pub async fn narrow_serving_role(owner: &PgPool, serving: &PgPool) -> Result<bool, sqlx::Error> {
+pub async fn narrow_serving_role(
+    owner: &mut PgConnection,
+    serving: &PgPool,
+) -> Result<bool, sqlx::Error> {
     let serving_role = current_user(serving).await?;
 
-    if current_user(owner).await? == serving_role {
+    if current_user(&mut *owner).await? == serving_role {
         return Ok(false);
     }
 
     // REVOKE takes no bind parameters, so the name is quoted by the server.
     let role: String = sqlx::query_scalar("SELECT quote_ident($1)")
         .bind(&serving_role)
-        .fetch_one(owner)
+        .fetch_one(&mut *owner)
         .await?;
 
     for (table, privileges) in SERVING_ROLE_NARROWING {
         sqlx::query(&format!("REVOKE {privileges} ON {table} FROM {role}"))
-            .execute(owner)
+            .execute(&mut *owner)
             .await?;
     }
 
@@ -708,8 +819,10 @@ impl ServingRolePosture {
 pub enum DatabaseStartupError {
     /// The serving pool's options were refused.
     ServingPool(ConnectOptionsError),
-    /// The migration pool's options were refused.
-    MigrationPool(ConnectOptionsError),
+    /// The owner's connection options were refused.
+    MigrationOptions(ConnectOptionsError),
+    /// The owner's connection could not be made.
+    OwnerConnection(sqlx::Error),
     /// A migration failed.
     Migration(sqlx::migrate::MigrateError),
     /// The serving role's privileges could not be narrowed.
@@ -722,9 +835,14 @@ impl fmt::Display for DatabaseStartupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ServingPool(error) => write!(f, "{error}"),
-            Self::MigrationPool(error) => write!(
+            Self::MigrationOptions(error) => write!(
                 f,
-                "the migration pool (KELIR_DATABASE_MIGRATION_URL) cannot be built: {error}"
+                "the owner's connection (KELIR_DATABASE_MIGRATION_URL) cannot be built: {error}"
+            ),
+            Self::OwnerConnection(error) => write!(
+                f,
+                "the database could not be reached as the schema's owner \
+                 (KELIR_DATABASE_MIGRATION_URL): {error}"
             ),
             Self::Migration(error) => write!(f, "the database could not be migrated: {error}"),
             Self::Narrowing(error) => write!(
@@ -740,7 +858,8 @@ impl fmt::Display for DatabaseStartupError {
 impl std::error::Error for DatabaseStartupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::ServingPool(error) | Self::MigrationPool(error) => Some(error),
+            Self::ServingPool(error) | Self::MigrationOptions(error) => Some(error),
+            Self::OwnerConnection(error) => Some(error),
             Self::Migration(error) => Some(error),
             Self::Narrowing(error) => Some(error),
             Self::ServingRole(error) => Some(error),
@@ -761,18 +880,19 @@ pub async fn prepare_serving_pool(config: &AppConfig) -> Result<PgPool, Database
     Ok(pools.serving)
 }
 
-/// The pools startup uses (ADR-0051 §2), opened before anything connects.
+/// What startup connects with (ADR-0051 §2), built before anything connects.
 pub struct StartupPools {
     /// The pool the server serves on.
     pub serving: PgPool,
-    /// The owner's, with `KELIR_DATABASE_MIGRATION_URL`. [`Self::prepare`]
-    /// closes it.
-    pub owner: Option<PgPool>,
+    /// The owner's connection options, with `KELIR_DATABASE_MIGRATION_URL`.
+    /// Not a pool: [`Self::prepare`] opens one connection with them and
+    /// closes it before it returns (#991).
+    pub owner: Option<PgConnectOptions>,
 }
 
 impl StartupPools {
-    /// Builds both pools. Neither connects yet, so this cannot wait on the
-    /// database.
+    /// Builds the serving pool and the owner's options. Nothing connects yet,
+    /// so this cannot wait on the database.
     ///
     /// A non-local database without TLS is refused here when the configuration
     /// alone says so, and at the first connection when the server does.
@@ -785,18 +905,21 @@ impl StartupPools {
         let owner = config
             .database_migration_url
             .as_deref()
-            .map(|migration_url| create_migration_pool(migration_url, tls))
+            .map(|migration_url| migration_connect_options(migration_url, tls))
             .transpose()
-            .map_err(DatabaseStartupError::MigrationPool)?;
+            .map_err(DatabaseStartupError::MigrationOptions)?;
 
         Ok(Self { serving, owner })
     }
 
     /// Readies the database for serving.
     ///
-    /// - **With `KELIR_DATABASE_MIGRATION_URL`**, the owner's pool migrates and
-    ///   then narrows the serving role, and **is closed before this returns**,
-    ///   so it is gone before the server binds.
+    /// - **With `KELIR_DATABASE_MIGRATION_URL`**, one connection as the owner
+    ///   migrates and then narrows the serving role, and **is closed before
+    ///   this returns**, so it is gone before the server binds. It is one
+    ///   connection rather than a pool so that nothing returns it in the
+    ///   background ([`connect_owner`], #991). A stop that drops this future
+    ///   drops the connection, which hangs it up.
     /// - **Without it**, the development shape, the serving URL migrates, as
     ///   every release before `v1.0.0` did. Configuration refuses this shape in
     ///   `staging` and `production`.
@@ -804,9 +927,18 @@ impl StartupPools {
     ///   checked last, on the serving pool, whichever shape got here.
     pub async fn prepare(&self, config: &AppConfig) -> Result<(), DatabaseStartupError> {
         match &self.owner {
-            Some(owner) => {
-                let prepared = migrate_and_narrow(owner, &self.serving).await;
-                owner.close().await;
+            Some(options) => {
+                let mut owner = connect_owner(options).await.map_err(|error| {
+                    DatabaseStartupError::OwnerConnection(name_the_tls_settings(error))
+                })?;
+
+                let prepared = migrate_and_narrow(&mut owner, &self.serving).await;
+
+                // Terminate, then the socket is shut. An error here is a
+                // connection already broken, which the server has let go.
+                if let Err(error) = owner.close().await {
+                    tracing::warn!(%error, "the owner's connection did not close cleanly");
+                }
                 prepared?;
             }
             None => {
@@ -830,20 +962,22 @@ impl StartupPools {
         Ok(())
     }
 
-    /// Closes both pools: for a stop that ended [`Self::prepare`] part way
-    /// (#856). Closing a pool twice is harmless.
+    /// Closes the serving pool: for a stop that ended [`Self::prepare`] part
+    /// way (#856). The owner's connection, if [`Self::prepare`] had opened
+    /// it, was dropped with that future and is already hung up. Closing a
+    /// pool twice is harmless.
     pub async fn close(&self) {
-        if let Some(owner) = &self.owner {
-            owner.close().await;
-        }
-
         self.serving.close().await;
     }
 }
 
-/// [`StartupPools::prepare`]'s owner half: migrate, then narrow.
-async fn migrate_and_narrow(owner: &PgPool, serving: &PgPool) -> Result<(), DatabaseStartupError> {
-    run_migrations(owner)
+/// [`StartupPools::prepare`]'s owner half: migrate, then narrow, on the
+/// owner's one connection.
+async fn migrate_and_narrow(
+    owner: &mut PgConnection,
+    serving: &PgPool,
+) -> Result<(), DatabaseStartupError> {
+    run_migrations_on(owner)
         .await
         .map_err(DatabaseStartupError::Migration)?;
     tracing::info!("database migrations applied as the schema's owner");
@@ -1411,6 +1545,41 @@ mod tests {
                 .connect_options()
                 .get_ssl_mode(),
         )
+    }
+
+    /// Each pool, and the owner's connection, is named, so `pg_stat_activity`
+    /// tells the owner's from the serving role's (#991); a name the URL gives
+    /// wins.
+    #[tokio::test]
+    async fn each_pool_names_its_connections() {
+        let url = "postgres://u:p@localhost/kelir";
+        let tls = DatabaseTlsSettings::default();
+        let name = |pool: PgPool| {
+            pool.connect_options()
+                .get_application_name()
+                .map(str::to_owned)
+        };
+
+        assert_eq!(
+            name(create_pool_with_tls(url, tls).expect("a serving pool")).as_deref(),
+            Some(SERVING_APPLICATION_NAME)
+        );
+        assert_eq!(
+            name(create_pool(url).expect("a pool")).as_deref(),
+            Some(SERVING_APPLICATION_NAME)
+        );
+        assert_eq!(
+            migration_connect_options(url, tls)
+                .expect("the owner's options")
+                .get_application_name(),
+            Some(MIGRATION_APPLICATION_NAME)
+        );
+        assert_eq!(
+            migration_connect_options(&format!("{url}?application_name=ops"), tls)
+                .expect("the owner's options")
+                .get_application_name(),
+            Some("ops")
+        );
     }
 
     #[tokio::test]

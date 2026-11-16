@@ -37,8 +37,8 @@ pub struct AppConfig {
     /// nothing and may not change `audit_events`.
     pub database_url: String,
     /// `KELIR_DATABASE_MIGRATION_URL`: the schema owner's URL, which migrates
-    /// at startup through a pool of its own that is closed before the server
-    /// binds (ADR-0051 §2).
+    /// at startup through one connection of its own, named `kelir-migrate`,
+    /// that is closed before the server binds (ADR-0051 §2, #991).
     ///
     /// **`None` is the development shape**: one URL migrates and serves, as
     /// every release before `v1.0.0` did. `staging` and `production` refuse to

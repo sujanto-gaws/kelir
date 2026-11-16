@@ -314,10 +314,10 @@ async fn a_request_in_flight_at_the_stop_completes_and_the_workers_stop() {
     );
 }
 
-/// How long the binary's pool retries a refused connection before startup
-/// fails: `acquire_timeout` in `db::lazy_pool`, for both pools. The stop
-/// below has to land, and end the process, well inside it, or the exit is
-/// startup's failure rather than the stop's.
+/// How long the binary retries a refused connection before startup fails:
+/// `db::ACQUIRE_TIMEOUT`, for the serving pool and the owner's connection.
+/// The stop below has to land, and end the process, well inside it, or the
+/// exit is startup's failure rather than the stop's.
 #[cfg(unix)]
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -325,7 +325,7 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The binary is given both URLs, as a deployment is (ADR-0051 §2), each at a
 /// loopback port nothing listens on, so its migrations wait on the owner's
-/// pool retrying a refused connection, and the stop closes both pools.
+/// connection being retried, and the stop drops it and closes the pool.
 /// SIGTERM is sent once it has logged that it is starting, which is after its
 /// signal handlers are installed. It must exit 0 at once rather than wait for
 /// the database, and well before the retry gives up and startup fails with
@@ -428,7 +428,7 @@ async fn a_stop_during_startup_ends_it_with_exit_zero() {
     );
     assert!(
         started.elapsed() < ACQUIRE_TIMEOUT,
-        "control: the run took {:?}, past the pool's {ACQUIRE_TIMEOUT:?} retry, so the exit \
+        "control: the run took {:?}, past the {ACQUIRE_TIMEOUT:?} retry, so the exit \
          may not be the stop's",
         started.elapsed()
     );

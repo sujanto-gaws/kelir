@@ -254,10 +254,21 @@ audited_write() {
     after="$(psql_as_superuser -c 'SELECT count(*) FROM audit_events')"
     (( after > before )) || fail "${step}: no audit row was written (${before} before, ${after} after)"
 
-    held="$(psql_as_superuser -c "SELECT coalesce(string_agg(DISTINCT usename, ','), '')
-        FROM pg_stat_activity
-        WHERE datname = 'kelir' AND backend_type = 'client backend' AND pid <> pg_backend_pid()")"
-    [[ "${held}" == "${role}" ]] || fail "${step}: the backend holds connections as '${held}', not ${role} alone"
+    local counted="FROM pg_stat_activity
+        WHERE datname = 'kelir' AND backend_type = 'client backend' AND pid <> pg_backend_pid()"
+    held="$(psql_as_superuser -c "SELECT coalesce(string_agg(DISTINCT usename, ','), '') ${counted}")"
+    if [[ "${held}" != "${role}" ]]; then
+        # Each counted connection, so a failure says which pool held what
+        # (#991): this release names the owner's connection `kelir-migrate` and the
+        # serving pool `kelir`; a previous release names neither.
+        echo "--- the connections counted, pid | usename | application_name | client_addr | backend_start | state | state_change | query"
+        psql_as_superuser -c "SELECT pid, usename, coalesce(nullif(application_name, ''), '-'),
+                coalesce(host(client_addr), 'local'), backend_start, coalesce(state, '-'),
+                state_change, left(regexp_replace(coalesce(query, ''), '\s+', ' ', 'g'), 200)
+            ${counted} ORDER BY backend_start" || true
+        echo "---"
+        fail "${step}: the backend holds connections as '${held}', not ${role} alone"
+    fi
 
     pass "${step}: audit rows ${before} -> ${after}, every connection ${role}'s"
 }

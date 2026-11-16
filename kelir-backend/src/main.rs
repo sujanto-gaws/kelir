@@ -57,9 +57,10 @@ async fn run() -> anyhow::Result<()> {
         "starting kelir backend"
     );
 
-    // **Two roles** (ADR-0051 §2): the serving pool, and the owner's, from
-    // KELIR_DATABASE_MIGRATION_URL when it is set. Opened here, connecting
-    // neither, so a stop during startup can close both.
+    // **Two roles** (ADR-0051 §2): the serving pool, and the owner's connection
+    // options, from KELIR_DATABASE_MIGRATION_URL when it is set. Built here,
+    // connecting neither, so a stop during startup can close the pool; the
+    // owner's one connection, if open, is dropped with the startup (#991).
     let pools = db::StartupPools::open(&config)?;
 
     // **A stop during startup ends startup** (#856). Migrating, bootstrapping
@@ -79,7 +80,7 @@ async fn run() -> anyhow::Result<()> {
             .await
             .is_err()
         {
-            tracing::warn!("the database pools had not closed {POOL_CLOSE:?} into the stop");
+            tracing::warn!("the serving pool had not closed {POOL_CLOSE:?} into the stop");
         }
 
         return Ok(());
@@ -92,13 +93,13 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How long a stop during startup waits for the pools to close.
+/// How long a stop during startup waits for the serving pool to close.
 const POOL_CLOSE: Duration = Duration::from_secs(1);
 
 /// The startup that waits on something else: preparing the database, the
 /// bootstrap and the bind. Returns the bound listener.
 async fn start(pools: &db::StartupPools, config: &AppConfig) -> anyhow::Result<TcpListener> {
-    // The owner migrates and narrows the serving role, and its pool is closed
+    // The owner migrates and narrows the serving role on one connection, closed
     // before this goes on, so it is gone before the server binds. Everything
     // below runs on the serving pool, as a role that owns no relation,
     // function, schema or type and may not change `audit_events`; staging and
