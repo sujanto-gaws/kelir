@@ -258,7 +258,7 @@ for required in KELIR_DB_PASSWORD KELIR_DB_APP_PASSWORD KELIR_JWT_SECRET KELIR_M
 
     case "${value}" in
         change-me|changeme|secret|test-secret|password)
-            die "${required} is a placeholder; generate one with: openssl rand -base64 36"
+            die "${required} is a placeholder; generate one with: openssl rand -base64 48"
             ;;
     esac
 done
@@ -267,6 +267,11 @@ done
 # refuse it here first. Bytes, as the backend counts them: LC_ALL=C makes
 # ${#var} count bytes rather than characters.
 jwt_secret_bytes="$(LC_ALL=C; printf '%s' "${#KELIR_JWT_SECRET}")"
+# Nor one that begins or ends with whitespace. [[:space:]] follows the locale
+# and may miss U+00A0; the backend refuses that too.
+if [[ "${KELIR_JWT_SECRET}" =~ ^[[:space:]]|[[:space:]]$ ]]; then
+    die "KELIR_JWT_SECRET must not begin or end with whitespace"
+fi
 (( jwt_secret_bytes >= 32 )) \
     || die "KELIR_JWT_SECRET must be at least 32 bytes; generate one with: openssl rand -base64 48"
 

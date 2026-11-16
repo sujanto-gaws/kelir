@@ -19,13 +19,16 @@ While the major version is `0`, the public API may change in any release.
   whose secret is shorter than 32 bytes, counted in bytes of UTF-8 and not
   in characters, will not start** in `staging` or `production`: the error
   names `KELIR_JWT_SECRET` and the minimum, never the value, and `deploy.sh`
-  refuses the `.env` before replacing the running version. `development` and
-  `test` are unchanged, and `change-me` still works there. Check the length
-  before upgrading (on the staging-shape host, as below), and generate a new
-  secret if it is short:
+  refuses the `.env` before replacing the running version. **A secret that
+  begins or ends with whitespace is refused too**, at any length, so padding
+  cannot carry `change-me` past the floor, and the placeholders are compared
+  trimmed. `development` and `test` are unchanged, and `change-me` still works
+  there. Check the length before upgrading (on the staging-shape host of
+  Installation guide §6; the line strips one pair of surrounding quotes), and
+  generate a new secret if it is short:
 
   ```bash
-  grep '^KELIR_JWT_SECRET=' /opt/kelir/.env | cut -d= -f2- | tr -d '\n' | wc -c   # 32 or more
+  grep '^KELIR_JWT_SECRET=' /opt/kelir/.env | cut -d= -f2- | sed -e "s/^[\"']//" -e "s/[\"']\$//" | tr -d '\n' | wc -c   # 32 or more
   openssl rand -base64 48
   ```
 

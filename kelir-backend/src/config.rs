@@ -559,10 +559,25 @@ impl AppConfig {
 
         let jwt_secret = required("KELIR_JWT_SECRET")?;
 
+        // Surrounding whitespace is where `deploy.sh`'s sourcing, compose's
+        // `.env` parser and this loader can read different bytes, and padding
+        // would carry a placeholder past the floor (#837). Refused first, by
+        // `char::is_whitespace`, so the message is about the padding.
+        if app_env.requires_real_secrets()
+            && (jwt_secret.starts_with(char::is_whitespace)
+                || jwt_secret.ends_with(char::is_whitespace))
+        {
+            return Err(ConfigError::Invalid {
+                key: "KELIR_JWT_SECRET",
+                reason: format!("must not begin or end with whitespace in {app_env}"),
+            });
+        }
+
         // `.env.example` and the compose stack ship a placeholder secret so
         // local development works out of the box. Shipping that placeholder to
         // production would make every token forgeable, so refuse to start.
-        if app_env.requires_real_secrets() && PLACEHOLDER_SECRETS.contains(&jwt_secret.as_str()) {
+        // Compared trimmed, so no padding gets one past this check.
+        if app_env.requires_real_secrets() && PLACEHOLDER_SECRETS.contains(&jwt_secret.trim()) {
             return Err(ConfigError::Invalid {
                 key: "KELIR_JWT_SECRET",
                 reason: format!("the development placeholder cannot be used in {app_env}"),
@@ -570,8 +585,8 @@ impl AppConfig {
         }
 
         // A secret short enough to guess forges every token as surely as the
-        // placeholder does (#837). The raw value is measured, untrimmed, as it
-        // is the key; the message gives the minimum and never the value.
+        // placeholder does (#837). The value is the key, measured in bytes; the
+        // message gives the minimum and never the value.
         if app_env.requires_real_secrets() && jwt_secret.len() < MIN_SIGNING_SECRET_BYTES {
             return Err(ConfigError::Invalid {
                 key: "KELIR_JWT_SECRET",
