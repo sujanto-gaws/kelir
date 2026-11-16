@@ -312,6 +312,29 @@ pub struct User {
     pub roles: Vec<RoleSummary>,
 }
 
+impl User {
+    /// The fields an edit can change, as this row holds them: both halves of
+    /// `User.Updated`, and with the username `User.Created`'s new value
+    /// ([#795]).
+    ///
+    /// Built from a stored row, never from a request: a request holds nothing
+    /// for a field it did not send, holds a value before it was trimmed, and
+    /// does not say which roles the user holds once the change is made. The
+    /// roles are the ones granted, in the order [`super::repository`] reads
+    /// them, by role code.
+    ///
+    /// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+    pub fn audit_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "email": self.email,
+            "displayName": self.display_name,
+            "status": self.status,
+            "departmentId": self.department_id,
+            "roleIds": self.roles.iter().map(|role| role.id).collect::<Vec<_>>(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleSummary {
@@ -869,6 +892,46 @@ mod tests {
             version,
             status,
         }
+    }
+
+    /// #795: the audit value is the row's five fields, with a department
+    /// the user is not in as `null` and the roles as their ids.
+    #[test]
+    fn a_users_audit_value_is_its_stored_fields() {
+        let department = Uuid::now_v7();
+        let role = Uuid::now_v7();
+        let mut user = User {
+            id: Uuid::now_v7(),
+            username: "person".to_owned(),
+            email: "person@kelir.test".to_owned(),
+            display_name: "A Person".to_owned(),
+            status: UserStatus::Locked,
+            department_id: Some(department),
+            must_change_password: false,
+            last_login_at: None,
+            locked_until: None,
+            created_at: Utc::now(),
+            roles: vec![RoleSummary {
+                id: role,
+                role_code: "ROLE-X".to_owned(),
+                name: "X".to_owned(),
+            }],
+        };
+        assert_eq!(
+            user.audit_value(),
+            serde_json::json!({
+                "email": "person@kelir.test",
+                "displayName": "A Person",
+                "status": "LOCKED",
+                "departmentId": department,
+                "roleIds": [role],
+            })
+        );
+
+        user.department_id = None;
+        user.roles.clear();
+        assert_eq!(user.audit_value()["departmentId"], serde_json::Value::Null);
+        assert_eq!(user.audit_value()["roleIds"], serde_json::json!([]));
     }
 
     #[test]

@@ -653,6 +653,38 @@ pub async fn find_user_in(
     }))
 }
 
+/// Locks a live user's row for an edit, before the edit reads it, so the row
+/// it audits as "before" is the one its `UPDATE` changes: a second edit of
+/// the same user waits here until the first commits ([#795]). `false` when
+/// there is no live user by that id in the tenant.
+///
+/// `FOR NO KEY UPDATE`, the lock the edit's own `UPDATE` takes, taken a
+/// statement earlier. Not `FOR UPDATE`: that would conflict with the
+/// `FOR KEY SHARE` every stamping foreign key takes on the acting user, and
+/// nothing takes a user `FOR UPDATE` (record 23 §5.1, see
+/// [`lock_password_hash_for_session`]).
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+pub async fn lock_user_for_edit(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let locked = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM users
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR NO KEY UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(locked.is_some())
+}
+
 /// Roles a user holds, as embedded in the user record. Tenant-scoped for the
 /// reason [`permissions_for_user`] gives (**D-18**, #65).
 pub async fn roles_of_user(

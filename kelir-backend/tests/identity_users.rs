@@ -912,3 +912,535 @@ async fn an_invalid_update_is_refused_before_the_user_is_looked_up() {
         .await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
 }
+
+// ---------------------------------------------------------------------------
+// #795: a user edit audits the stored row
+// ---------------------------------------------------------------------------
+
+/// A department in the administrator's tenant, for a user to be placed in.
+async fn department(app: &TestApp, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name) VALUES ($1, $2, $3, $3)",
+    )
+    .bind(id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+    id
+}
+
+/// An empty role in the administrator's tenant, to be granted.
+async fn grantable_role(app: &TestApp, code: &str) -> Uuid {
+    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, code, &[]).await
+}
+
+/// The five fields a `User.Updated` half holds, as the stored row has them.
+/// `roleIds` is compared as a set: [`normalized`] sorts both sides.
+fn user_row(
+    email: &str,
+    display_name: &str,
+    status: &str,
+    department_id: Option<Uuid>,
+    role_ids: &[Uuid],
+) -> serde_json::Value {
+    normalized(json!({
+        "email": email,
+        "displayName": display_name,
+        "status": status,
+        "departmentId": department_id,
+        "roleIds": role_ids,
+    }))
+}
+
+/// `value` with its `roleIds` sorted, so the order grants are read in does
+/// not decide the comparison.
+fn normalized(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(roles) = value.get_mut("roleIds").and_then(|r| r.as_array_mut()) {
+        roles.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    value
+}
+
+/// Every `User.Updated` row for `id`, oldest first, as `(old, new)`.
+async fn user_updates(app: &TestApp, id: Uuid) -> Vec<(serde_json::Value, serde_json::Value)> {
+    let rows: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT old_value_json, new_value_json FROM audit_events
+         WHERE event_type = 'User.Updated' AND object_id = $1
+         ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit rows");
+    rows.into_iter()
+        .map(|(old, new)| {
+            (
+                normalized(old.unwrap_or_default()),
+                normalized(new.unwrap_or_default()),
+            )
+        })
+        .collect()
+}
+
+/// PUTs `body` to the user and returns the `User.Updated` row it wrote,
+/// asserting it wrote exactly one.
+async fn edited(
+    app: &TestApp,
+    token: &str,
+    id: Uuid,
+    body: serde_json::Value,
+) -> (serde_json::Value, serde_json::Value) {
+    let before = user_updates(app, id).await.len();
+    let response = app
+        .put(
+            &format!("/api/v1/identity/users/{id}"),
+            Some(token),
+            body.clone(),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{body}: {}", response.body);
+    let mut rows = user_updates(app, id).await;
+    assert_eq!(
+        rows.len(),
+        before + 1,
+        "an edit writes one User.Updated row: {body}"
+    );
+    rows.pop().expect("the row just counted")
+}
+
+/// **[#795]: a partial edit audits the stored row, before and after.** Both
+/// halves hold the five fields an edit can change, as the row has them: a
+/// field the edit did not send is its stored value, not `null`, and a value
+/// the edit sent padded is audited as stored, trimmed. A `new_value` built
+/// from the request fails each edit here: it holds `null` for the unsent
+/// fields, the untrimmed value, and no department or roles.
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+#[tokio::test]
+async fn a_partial_user_edit_audits_the_stored_row_before_and_after() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-PLACE").await;
+    let role = grantable_role(&app, "ROLE-AUD-795-HELD").await;
+
+    let mut body = payload("audited.edit");
+    body["departmentId"] = json!(place);
+    body["roleIds"] = json!([role]);
+    let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "audited.edit").await;
+    let email = "audited.edit@kelir.test";
+
+    let (old, new) = edited(
+        &app,
+        &token,
+        id,
+        json!({ "displayName": "  Renamed Person  " }),
+    )
+    .await;
+    assert_eq!(
+        old,
+        user_row(email, "Test Person", "ACTIVE", Some(place), &[role])
+    );
+    assert_eq!(
+        new,
+        user_row(email, "Renamed Person", "ACTIVE", Some(place), &[role]),
+        "new_value is the stored row: the unsent fields as they are, the name trimmed"
+    );
+
+    let (old, new) = edited(
+        &app,
+        &token,
+        id,
+        json!({ "email": " moved@kelir.test ", "status": "LOCKED" }),
+    )
+    .await;
+    assert_eq!(
+        old,
+        user_row(email, "Renamed Person", "ACTIVE", Some(place), &[role]),
+        "old_value is the row the previous edit stored"
+    );
+    assert_eq!(
+        new,
+        user_row(
+            "moved@kelir.test",
+            "Renamed Person",
+            "LOCKED",
+            Some(place),
+            &[role]
+        )
+    );
+}
+
+/// **[#795]: placing a user in a department, taking them out of it and
+/// replacing their roles each audit.** None of the three was in the
+/// `User.Updated` row before, so a role grant left no trace in the trail,
+/// unlike a role's own permission change (FR-AUD-002).
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+#[tokio::test]
+async fn a_department_set_and_cleared_and_roles_replaced_each_audit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-DEPT").await;
+    let first = grantable_role(&app, "ROLE-AUD-795-FIRST").await;
+    let second = grantable_role(&app, "ROLE-AUD-795-SECOND").await;
+    let third = grantable_role(&app, "ROLE-AUD-795-THIRD").await;
+
+    let mut body = payload("audited.placement");
+    body["roleIds"] = json!([first]);
+    let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "audited.placement").await;
+    let email = "audited.placement@kelir.test";
+    let row = |department: Option<Uuid>, roles: &[Uuid]| {
+        user_row(email, "Test Person", "ACTIVE", department, roles)
+    };
+
+    let set = edited(&app, &token, id, json!({ "departmentId": place })).await;
+    assert_eq!(
+        set,
+        (row(None, &[first]), row(Some(place), &[first])),
+        "setting a department is audited"
+    );
+
+    let cleared = edited(&app, &token, id, json!({ "departmentId": null })).await;
+    assert_eq!(
+        cleared,
+        (row(Some(place), &[first]), row(None, &[first])),
+        "clearing a department is audited"
+    );
+
+    let replaced = edited(&app, &token, id, json!({ "roleIds": [second, third] })).await;
+    assert_eq!(
+        replaced,
+        (row(None, &[first]), row(None, &[second, third])),
+        "replacing the roles is audited"
+    );
+
+    let emptied = edited(&app, &token, id, json!({ "roleIds": [] })).await;
+    assert_eq!(
+        emptied,
+        (row(None, &[second, third]), row(None, &[])),
+        "taking every role away is audited"
+    );
+}
+
+/// **[#795]: a user's creation audits the row it stored.** `User.Created`'s
+/// `new_value` held the request: the address untrimmed, and no display
+/// name, status or department. It is now the same five fields `User.Updated`
+/// holds, as stored, with the username. A `new_value` built from the request
+/// again fails here on the padded address and name and on the department.
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+#[tokio::test]
+async fn a_user_creation_audits_the_stored_row() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-CREATE").await;
+    let first = grantable_role(&app, "ROLE-AUD-795-CREATE-A").await;
+    let second = grantable_role(&app, "ROLE-AUD-795-CREATE-B").await;
+
+    let mut body = payload("audited.create");
+    body["email"] = json!("  audited.create@kelir.test  ");
+    body["displayName"] = json!("\u{3000}Created Person\u{3000}");
+    body["departmentId"] = json!(place);
+    body["roleIds"] = json!([second, first]);
+    let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "audited.create").await;
+
+    let rows: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT old_value_json, new_value_json FROM audit_events
+         WHERE event_type = 'User.Created' AND object_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit rows");
+    assert_eq!(rows.len(), 1, "a creation writes one User.Created row");
+    let (old, new) = rows.into_iter().next().expect("the row just counted");
+
+    let mut expected = user_row(
+        "audited.create@kelir.test",
+        "Created Person",
+        "ACTIVE",
+        Some(place),
+        &[first, second],
+    );
+    expected["username"] = json!("audited.create");
+    assert_eq!(old, None, "a creation has no before");
+    assert_eq!(
+        normalized(new.unwrap_or_default()),
+        expected,
+        "new_value is the stored row: trimmed, with its department and roles"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #795, the independent pass: races, refusals and the order roles are read in
+// ---------------------------------------------------------------------------
+
+/// How many requests wait on a row lock of `users` now.
+async fn waiting_on_users(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'
+           AND query ~* '\\musers\\M'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("read pg_stat_activity")
+}
+
+/// A user created in `place` with `roles`, by its username.
+async fn placed_user(app: &TestApp, token: &str, name: &str, place: Uuid, roles: &[Uuid]) -> Uuid {
+    let mut body = payload(name);
+    body["departmentId"] = json!(place);
+    body["roleIds"] = json!(roles);
+    let created = app.post("/api/v1/identity/users", Some(token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    user_id_of(app, name).await
+}
+
+/// `token`'s PUT of `body` to the user, spawned so that it can wait on a lock.
+fn spawn_edit(
+    app: &std::sync::Arc<TestApp>,
+    token: &str,
+    id: Uuid,
+    body: serde_json::Value,
+) -> tokio::task::JoinHandle<common::TestResponse> {
+    let (app, token) = (std::sync::Arc::clone(app), token.to_owned());
+    tokio::spawn(async move {
+        let uri = format!("/api/v1/identity/users/{id}");
+        app.put(&uri, Some(&token), body).await
+    })
+}
+
+/// **#795 (a): two edits of one user at once audit one history.** The test
+/// holds the user's row `FOR SHARE`, which both edits' locks conflict with,
+/// until both wait on it. The edit that goes first audits the original row as
+/// its "before"; the other audits exactly the row the first committed, never
+/// the original and never a mix. A "before" read ahead of the lock, as it was
+/// until #795, gives both edits the original.
+///
+/// The chain is not asserted: `audit::record` reads the tenant's last hash
+/// with no lock, so two audit writes at once can link to the same row. That
+/// is not #795's, and is reported with this pass.
+#[tokio::test]
+async fn two_edits_of_one_user_at_once_audit_one_history() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-RACE").await;
+    let first = grantable_role(&app, "ROLE-AUD-795-RACE-A").await;
+    let second = grantable_role(&app, "ROLE-AUD-795-RACE-B").await;
+    let id = placed_user(&app, &token, "audited.race", place, &[first]).await;
+
+    let mut holder = app.pool.begin().await.expect("begin the holder");
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR SHARE")
+        .bind(id)
+        .execute(&mut *holder)
+        .await
+        .expect("hold the user's row");
+    let edits = [
+        spawn_edit(&app, &token, id, json!({ "displayName": "Raced Name" })),
+        spawn_edit(
+            &app,
+            &token,
+            id,
+            json!({ "email": "raced@kelir.test", "roleIds": [second] }),
+        ),
+    ];
+    let deadline = tokio::time::Instant::now() + common::gate::PATIENCE;
+    while waiting_on_users(&app).await < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both edits should wait on the row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    holder.rollback().await.expect("release the user's row");
+    for edit in edits {
+        let answered = tokio::time::timeout(common::gate::PATIENCE, edit)
+            .await
+            .expect("an edit never answered")
+            .expect("an edit panicked");
+        assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    }
+
+    let original = user_row(
+        "audited.race@kelir.test",
+        "Test Person",
+        "ACTIVE",
+        Some(place),
+        &[first],
+    );
+    let rows = user_updates(&app, id).await;
+    assert_eq!(rows.len(), 2, "each edit writes one User.Updated row");
+    let earlier = rows
+        .iter()
+        .position(|(old, _)| *old == original)
+        .expect("one edit's before is the original row");
+    let (later_old, later_new) = &rows[1 - earlier];
+    assert_eq!(
+        later_old, &rows[earlier].1,
+        "the later before is the earlier after"
+    );
+    assert_eq!(
+        later_new,
+        &user_row(
+            "raced@kelir.test",
+            "Raced Name",
+            "ACTIVE",
+            Some(place),
+            &[second]
+        ),
+        "the later after holds both edits"
+    );
+}
+
+/// **#795 (g): the edit's lock does not wait on a write the user is making.**
+/// A write by the user stamps them as its actor, and the stamp's foreign key
+/// holds their row `FOR KEY SHARE` until it commits. `FOR NO KEY UPDATE` does
+/// not conflict with that; `FOR UPDATE` would (record 23 §5.1).
+#[tokio::test]
+async fn editing_a_user_does_not_wait_on_a_write_the_user_is_making() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-KEYSHARE").await;
+    let id = placed_user(&app, &token, "audited.keyshare", place, &[]).await;
+
+    let mut stamping = app.pool.begin().await.expect("begin the user's write");
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE")
+        .bind(id)
+        .execute(&mut *stamping)
+        .await
+        .expect("hold the row as a stamping key does");
+    let edit = spawn_edit(&app, &token, id, json!({ "displayName": "Not Held" }));
+    let deadline = tokio::time::Instant::now() + common::gate::PATIENCE;
+    while !edit.is_finished() {
+        assert_eq!(
+            waiting_on_users(&app).await,
+            0,
+            "the edit waits on the user's write"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the edit never answered"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let answered = edit.await.expect("the edit panicked");
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    stamping.rollback().await.expect("end the user's write");
+}
+
+/// **#795 (b), (c) and (f): what an edit that changes nothing, a refused edit
+/// and a refused creation audit.** An edit that sends nothing, or every field
+/// at its stored value, writes one row with equal halves; the catalogue does
+/// not say so, and this pins today's behaviour. An unknown department, an
+/// unknown role, a repeated role or another user's address is refused with
+/// the address change beside it undone and no row written. A creation refused
+/// for a taken username or address, or an unknown role, writes no
+/// `User.Created` row and no user.
+#[tokio::test]
+async fn a_user_edit_that_changes_nothing_or_is_refused_audits_as_stored() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-REFUSED").await;
+    let role = grantable_role(&app, "ROLE-AUD-795-REFUSED").await;
+    let id = placed_user(&app, &token, "audited.refused", place, &[role]).await;
+    placed_user(&app, &token, "audited.other", place, &[]).await;
+    let email = "audited.refused@kelir.test";
+    let stored = user_row(email, "Test Person", "ACTIVE", Some(place), &[role]);
+
+    let unknown = Uuid::now_v7();
+    for body in [
+        json!({ "email": "moved@kelir.test", "departmentId": unknown }),
+        json!({ "email": "moved@kelir.test", "roleIds": [unknown] }),
+        json!({ "email": "moved@kelir.test", "roleIds": [role, role] }),
+        json!({ "email": "audited.other@kelir.test", "displayName": "Moved" }),
+    ] {
+        let uri = format!("/api/v1/identity/users/{id}");
+        let refused = app.put(&uri, Some(&token), body.clone()).await;
+        assert!(!refused.status.is_success(), "{body}: {}", refused.body);
+        assert!(
+            user_updates(&app, id).await.is_empty(),
+            "{body} was audited"
+        );
+    }
+
+    // The empty edit's "before" is the stored row: none of the above changed it.
+    let empty = edited(&app, &token, id, json!({})).await;
+    assert_eq!(empty, (stored.clone(), stored.clone()), "an empty edit");
+    let same = json!({
+        "email": email, "displayName": "Test Person", "status": "ACTIVE",
+        "departmentId": place, "roleIds": [role],
+    });
+    let resent = edited(&app, &token, id, same).await;
+    assert_eq!(
+        resent,
+        (stored.clone(), stored),
+        "every field at its stored value"
+    );
+
+    let created = "SELECT count(*) FROM audit_events WHERE event_type = 'User.Created'";
+    let (audited, users) = (
+        count_rows(&app, created).await,
+        count_rows(&app, "SELECT count(*) FROM users").await,
+    );
+    let mut taken_name = payload("audited.refused");
+    taken_name["email"] = json!("fresh@kelir.test");
+    let mut taken_email = payload("audited.fresh");
+    taken_email["email"] = json!(format!(" {email} "));
+    let mut unknown_role = payload("audited.fresher");
+    unknown_role["roleIds"] = json!([unknown]);
+    for body in [taken_name, taken_email, unknown_role] {
+        let refused = app
+            .post("/api/v1/identity/users", Some(&token), body.clone())
+            .await;
+        assert!(!refused.status.is_success(), "{body}: {}", refused.body);
+    }
+    assert_eq!(
+        count_rows(&app, created).await,
+        audited,
+        "a refused creation was audited"
+    );
+    assert_eq!(count_rows(&app, "SELECT count(*) FROM users").await, users);
+}
+
+/// **#795 (d): `roleIds` is the stored set in role-code order.** The roles are
+/// made so that their code order, their id order and the request's order all
+/// differ. A `roleIds` copied from the request, even merged over the stored
+/// row and trimmed, fails here; the builder's tests sort both sides.
+#[tokio::test]
+async fn the_audited_roles_are_the_stored_set_in_role_code_order() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let c = grantable_role(&app, "ROLE-AUD-795-ORD-C").await;
+    let b = grantable_role(&app, "ROLE-AUD-795-ORD-B").await;
+    let a = grantable_role(&app, "ROLE-AUD-795-ORD-A").await;
+    let place = department(&app, "AUD-795-ORDER").await;
+    let id = placed_user(&app, &token, "audited.order", place, &[b, c, a]).await;
+    edited(&app, &token, id, json!({ "roleIds": [c, a] })).await;
+
+    let halves: Vec<(Option<serde_json::Value>, serde_json::Value)> = sqlx::query_as(
+        "SELECT old_value_json -> 'roleIds', new_value_json -> 'roleIds' FROM audit_events
+         WHERE object_id = $1 AND event_type IN ('User.Created', 'User.Updated')
+         ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit rows");
+    assert_eq!(
+        halves,
+        [
+            (None, json!([a, b, c])),
+            (Some(json!([a, b, c])), json!([a, c]))
+        ]
+    );
+}
