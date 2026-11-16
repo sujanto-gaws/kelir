@@ -259,7 +259,7 @@ audited_write() {
     held="$(psql_as_superuser -c "SELECT coalesce(string_agg(DISTINCT usename, ','), '') ${counted}")"
     if [[ "${held}" != "${role}" ]]; then
         # Each counted connection, so a failure says which pool held what
-        # (#991): this release names the owner's pool `kelir-migrate` and the
+        # (#991): this release names the owner's connection `kelir-migrate` and the
         # serving pool `kelir`; a previous release names neither.
         echo "--- the connections counted, pid | usename | application_name | client_addr | backend_start | state | state_change | query"
         psql_as_superuser -c "SELECT pid, usename, coalesce(nullif(application_name, ''), '-'),

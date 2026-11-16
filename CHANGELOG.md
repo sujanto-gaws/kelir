@@ -25,7 +25,9 @@ While the major version is `0`, the public API may change in any release.
   ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
   `KELIR_DATABASE_URL` is now the serving role's URL, and the new
   `KELIR_DATABASE_MIGRATION_URL` is the owner's, which migrates at startup
-  through a pool closed before the server binds. `staging` and `production`
+  through ~~a pool~~ one connection (struck and restated 2026-11-16,
+  [#991](https://github.com/sujanto-gaws/kelir/issues/991)) closed before the
+  server binds. `staging` and `production`
   refuse to start without it, and refuse a serving role that is a superuser,
   belongs to any role, owns a relation, function, schema or type, may change
   `audit_events` or `_sqlx_migrations` (a column grant or a grant to `PUBLIC`
@@ -1173,14 +1175,16 @@ While the major version is `0`, the public API may change in any release.
   serves** ([#991](https://github.com/sujanto-gaws/kelir/issues/991),
   ADR-0051). Sometimes one of the owner's connections, the one that ran
   the last `REVOKE` of the narrowing, stayed open, idle, for as long as
-  the backend served. The pool's close could return with a connection
-  that was still being handed back (launchbadge/sqlx#3217), and since
+  the backend served. The owner migrated through a pool, whose close
+  could return with a connection that was still being handed back
+  (launchbadge/sqlx#3217), and since
   [#856](https://github.com/sujanto-gaws/kelir/issues/856) nothing
-  dropped the closed pool before the server stopped. The pool is now
-  closed again when it still counts a connection, with a warning in the
-  log. The two pools' connections are now named in `pg_stat_activity`:
-  `kelir-migrate` for the owner's, `kelir` for the serving role's,
-  unless the URL names them itself.
+  dropped the closed pool before the server stopped. The owner now has no
+  pool: startup opens one connection as the owner, migrates and narrows
+  on it, and closes it before the server binds, so a start takes one
+  owner's connection, not up to two. The connections are now named in
+  `pg_stat_activity`: `kelir-migrate` for the owner's, `kelir` for the
+  serving role's, unless the URL names them itself.
 
 - **A stop finishes the work in hand**
   ([#856](https://github.com/sujanto-gaws/kelir/issues/856)). On

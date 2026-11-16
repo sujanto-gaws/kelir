@@ -2,8 +2,8 @@
 //! nothing (ADR-0051, [#842]).
 //!
 //! `audit_append_only.rs` holds the serving role against `audit_events`. This
-//! file holds the startup that puts it there: the owner's pool migrates and
-//! narrows, and `staging` and `production` check the serving role's posture
+//! file holds the startup that puts it there: one connection as the owner
+//! migrates and narrows, and `staging` and `production` check the serving role's posture
 //! before the server binds, refusing a URL that names the owner, a grant the
 //! narrowing does not take back, and a superuser. The refusal of one URL in
 //! `staging` and `production` is `config.rs`'s, and is tested there.
@@ -13,8 +13,8 @@
 //! them, against a database the harness provisioned as a host is provisioned.
 //!
 //! **The owner holds no connection once startup is prepared** ([#991]): the
-//! owner's pool names its connections `db::MIGRATION_APPLICATION_NAME`, and
-//! none may be left in `pg_stat_activity`.
+//! owner's connection is named `db::MIGRATION_APPLICATION_NAME`, and none may
+//! be left in `pg_stat_activity`.
 //!
 //! [#842]: https://github.com/sujanto-gaws/kelir/issues/842
 //! [#991]: https://github.com/sujanto-gaws/kelir/issues/991
@@ -202,8 +202,9 @@ async fn the_narrowing_is_idempotent() {
     let app = TestApp::spawn().await;
     let after_one = the_narrowed_grants(&app).await;
 
+    let mut owner = app.pool.acquire().await.expect("an owner's connection");
     for _ in 0..2 {
-        let narrowed = db::narrow_serving_role(&app.pool, &app.serving_pool)
+        let narrowed = db::narrow_serving_role(&mut owner, &app.serving_pool)
             .await
             .expect("the narrowing runs again");
         assert!(narrowed, "two roles, so the narrowing runs");
@@ -219,10 +220,12 @@ async fn the_narrowing_is_idempotent() {
 async fn one_url_migrates_and_serves_outside_a_deployment() {
     let app = TestApp::spawn().await;
 
-    let skipped = !db::narrow_serving_role(&app.pool, &app.pool)
+    let mut owner = app.pool.acquire().await.expect("an owner's connection");
+    let skipped = !db::narrow_serving_role(&mut owner, &app.pool)
         .await
         .expect("the narrowing reads both roles");
     assert!(skipped, "one role, so the narrowing is skipped");
+    drop(owner);
 
     let config = AppConfig {
         app_env: AppEnv::Test,
@@ -249,11 +252,12 @@ struct OwnerConnection {
     client_addr: String,
     backend_start: String,
     state: String,
+    wait_event_type: String,
     state_change: String,
     query: String,
 }
 
-/// The owner's pool's connections to the test's database: those named
+/// The owner's connections to the test's database: those named
 /// [`db::MIGRATION_APPLICATION_NAME`]. The harness's own pool is named
 /// otherwise, so it is not among them.
 async fn owner_connections(app: &TestApp) -> Vec<OwnerConnection> {
@@ -263,6 +267,7 @@ async fn owner_connections(app: &TestApp) -> Vec<OwnerConnection> {
                 coalesce(host(client_addr), 'local') AS client_addr,
                 backend_start::text AS backend_start,
                 coalesce(state, '') AS state,
+                coalesce(wait_event_type, '') AS wait_event_type,
                 coalesce(state_change::text, '') AS state_change,
                 left(coalesce(query, ''), 200) AS query
          FROM pg_stat_activity
@@ -276,29 +281,17 @@ async fn owner_connections(app: &TestApp) -> Vec<OwnerConnection> {
     .expect("pg_stat_activity reads back")
 }
 
-/// The owner's pool is closed, counts no connection, and no connection of its
-/// is left in `pg_stat_activity`.
+/// How long a backend whose connection was closed may take to leave
+/// `pg_stat_activity`. Only a connection left open reaches it.
+const BACKEND_EXIT: Duration = Duration::from_secs(10);
+
+/// No connection of the owner's is left in `pg_stat_activity`.
 ///
-/// **The count decides first, without waiting.** A connection the closed pool
-/// still counts sits in its idle queue, its backend idle, until the last
-/// handle to the pool drops: in `main.rs`, when the server stops. **Then the
-/// server is waited on**, and only for this: a connection the pool hung up
-/// leaves `pg_stat_activity` when its backend exits, a moment after `close()`
-/// returns. Only a leak reaches the deadline.
-async fn the_owner_holds_no_connection(app: &TestApp, owner: &PgPool, when: &str) {
-    assert!(owner.is_closed(), "{when}: the owner's pool is still open");
-
-    let counted = owner.size();
-    if counted != 0 {
-        panic!(
-            "{when}: the closed owner's pool still counts {counted} connection(s), {} of them \
-             idle; the owner's connections: {:#?}",
-            owner.num_idle(),
-            owner_connections(app).await
-        );
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(10);
+/// **This waits, and says so**: a closed connection's backend exits a moment
+/// after `close()` returns, so its row is waited out, up to [`BACKEND_EXIT`].
+/// A connection left open stays idle, and only that reaches the deadline.
+async fn the_owner_holds_no_connection(app: &TestApp, when: &str) {
+    let deadline = Instant::now() + BACKEND_EXIT;
     loop {
         let left = owner_connections(app).await;
         if left.is_empty() {
@@ -306,75 +299,88 @@ async fn the_owner_holds_no_connection(app: &TestApp, owner: &PgPool, when: &str
         }
         assert!(
             Instant::now() < deadline,
-            "{when}: the owner still holds connections the closed pool does not count: {left:#?}"
+            "{when}: the owner still holds connections {BACKEND_EXIT:?} on: {left:#?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
-/// **The owner's pool, once closed, holds no connection, one it was still
-/// returning when the close began among them** (#991).
+/// **The owner opens one connection, and leaves none** (#991, ADR-0051 §2).
 ///
-/// sqlx-core 0.8.6's `close()` returns after its last wait for permits
-/// without draining the idle queue again, so a connection whose return passed
-/// `is_closed()` before the close, and whose ping is answered after the last
-/// drain, is left in the closed pool (`tests/pool_close.rs` gives the
-/// mechanism and its rates). Here that shape is made on demand, as
-/// `pool_close.rs` makes it: the connection is dropped, which spawns its
-/// return, and the test yields so the return sends its ping before
-/// `StartupPools::close` begins. Five rounds, each of which must leave nothing.
+/// `prepare` is held part way: the test locks `_sqlx_migrations`, so the
+/// migrator, which takes its advisory lock and then reads the table, waits on
+/// the lock. While it waits, the owner's connections are counted: there is
+/// exactly one, and it is the one waiting. Then the lock is released, and
+/// once `prepare` returns that connection is gone too.
+///
+/// Before #991 the owner had a pool, whose `close()` could leave a connection
+/// it was still returning (launchbadge/sqlx#3217, `tests/pool_close.rs`).
+/// Now it has one connection, which `prepare` closes itself, so there is no
+/// return in the background to race. The stall and the count are
+/// deterministic; the waits are bounded and only a failure reaches them.
 #[tokio::test]
-async fn the_owner_pool_closes_a_connection_it_was_still_returning() {
+async fn the_owner_opens_one_connection_and_leaves_none() {
     let app = TestApp::spawn().await;
     let config = staging(&app);
+    let pools = StartupPools::open(&config).expect("the pool and the owner's options build");
 
-    for round in 1..=5 {
-        let pools = StartupPools::open(&config).expect("both pools build");
-        let owner = pools.owner.as_ref().expect("the harness gives both URLs");
+    let mut lock = app.pool.begin().await.expect("a transaction to lock with");
+    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .expect("_sqlx_migrations locks");
 
-        let mut connection = owner.acquire().await.expect("an owner's connection");
-        sqlx::query("SELECT 1")
-            .execute(&mut *connection)
-            .await
-            .expect("the owner's connection answers");
+    let held_part_way = async {
+        let deadline = Instant::now() + BACKEND_EXIT;
+        let waiting = loop {
+            let owner = owner_connections(&app).await;
+            if owner
+                .iter()
+                .any(|connection| connection.wait_event_type == "Lock")
+            {
+                break owner;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "prepare never waited on the lock as the owner: {owner:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
 
-        // Spawns the return; the yield lets it pass `is_closed()` and ping.
-        drop(connection);
-        tokio::task::yield_now().await;
-        pools.close().await;
+        assert_eq!(
+            waiting.len(),
+            1,
+            "the owner holds more than one connection while it migrates: {waiting:#?}"
+        );
 
-        the_owner_holds_no_connection(
-            &app,
-            owner,
-            &format!("round {round}, closed while a connection was returning"),
-        )
-        .await;
-    }
+        lock.rollback().await.expect("the lock is released");
+    };
+
+    let (prepared, ()) = tokio::join!(pools.prepare(&config), held_part_way);
+    prepared.expect("both URLs, the serving role as provisioned, starts");
+
+    the_owner_holds_no_connection(&app, "once prepared").await;
+    pools.serving.close().await;
 }
 
 /// **Once startup is prepared, the owner holds no connection** (#991,
 /// ADR-0051 §2): `StartupPools::open`, then `prepare` with both URLs, as
 /// `main.rs` runs them, and on a multi-threaded runtime, as `main.rs` runs:
-/// there, the return a dropped connection spawns can be picked up by a worker
-/// while `prepare` goes on to close the pool. Repeated, because that is a race.
+/// the shape in which the owner's pool could leave a connection behind, while
+/// it had one. Repeated, because that was a race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_owner_holds_no_connection_once_startup_is_prepared() {
     let app = TestApp::spawn().await;
     let config = staging(&app);
 
     for round in 1..=30 {
-        let pools = StartupPools::open(&config).expect("both pools build");
+        let pools = StartupPools::open(&config).expect("the pool and the owner's options build");
         pools
             .prepare(&config)
             .await
             .expect("both URLs, the serving role as provisioned, starts");
 
-        the_owner_holds_no_connection(
-            &app,
-            pools.owner.as_ref().expect("the harness gives both URLs"),
-            &format!("round {round}, once prepared"),
-        )
-        .await;
+        the_owner_holds_no_connection(&app, &format!("round {round}, once prepared")).await;
 
         pools.serving.close().await;
     }
