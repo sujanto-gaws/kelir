@@ -39,108 +39,12 @@
 mod common;
 
 use axum::http::StatusCode;
-use chrono::{DateTime, Utc};
+use common::audit_chain::{stored_rows, GENESIS};
 use common::{fixtures, TestApp};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use kelir_backend::modules::audit::domain::ObjectType;
-use kelir_backend::modules::audit::{canonical_json, chain_hash, AuditEntry};
-
-/// One `audit_events` row, as a verifier would read it.
-struct StoredRow {
-    id: Uuid,
-    tenant_id: Uuid,
-    event_type: String,
-    action: String,
-    object_type: String,
-    object_id: Uuid,
-    actor_user_id: Option<Uuid>,
-    ip_address: Option<String>,
-    reason: Option<String>,
-    old_value: Option<Value>,
-    new_value: Option<Value>,
-    previous_hash: String,
-    current_hash: String,
-    created_at: DateTime<Utc>,
-}
-
-impl StoredRow {
-    /// The hash this row should carry, recomputed from the row itself.
-    fn recomputed(&self) -> String {
-        chain_hash(
-            &self.previous_hash,
-            &self.id,
-            self.created_at,
-            &AuditEntry {
-                tenant_id: self.tenant_id,
-                event_type: &self.event_type,
-                action: &self.action,
-                // **The column's text, read back through the vocabulary**
-                // ([#323](https://github.com/sujanto-gaws/kelir/issues/323)).
-                // `AuditEntry.object_type` is an `ObjectType` now, and `as_db`
-                // returns the same bytes the chain was taken over — so this
-                // recomputation is unchanged for every row and the chain does
-                // not break at the release that made the field a type.
-                //
-                // **A row this build cannot place is a row it cannot verify**,
-                // and that is stated rather than smoothed over: it panics here.
-                // Only this crate writes rows into a test database, so reaching
-                // it means the writer and the vocabulary disagree, which is
-                // worth a loud failure. A plugin's row in a real deployment is a
-                // different question, and #252 AC5 keeps chain verification off
-                // the caller-facing surfaces entirely.
-                object_type: ObjectType::from_db(&self.object_type).unwrap_or_else(|| {
-                    panic!(
-                        "audit row {} names object type {}, which this build cannot place",
-                        self.id, self.object_type
-                    )
-                }),
-                object_id: self.object_id,
-                actor_user_id: self.actor_user_id,
-                ip_address: self.ip_address.as_deref(),
-                reason: self.reason.as_deref(),
-                old_value: self.old_value.clone(),
-                new_value: self.new_value.clone(),
-            },
-        )
-    }
-}
-
-/// Every audit row of the tenant, oldest first — the order a verifier walks.
-async fn stored_rows(app: &TestApp) -> Vec<StoredRow> {
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, tenant_id, event_type, action, object_type, object_id,
-               actor_user_id, ip_address, reason, old_value_json, new_value_json,
-               previous_hash, current_hash, created_at
-        FROM audit_events
-        ORDER BY created_at, id
-        "#
-    )
-    .fetch_all(&app.pool)
-    .await
-    .expect("the audit rows read back");
-
-    rows.into_iter()
-        .map(|row| StoredRow {
-            id: row.id,
-            tenant_id: row.tenant_id,
-            event_type: row.event_type,
-            action: row.action,
-            object_type: row.object_type,
-            object_id: row.object_id,
-            actor_user_id: row.actor_user_id,
-            ip_address: row.ip_address,
-            reason: row.reason,
-            old_value: row.old_value_json,
-            new_value: row.new_value_json,
-            previous_hash: row.previous_hash,
-            current_hash: row.current_hash,
-            created_at: row.created_at,
-        })
-        .collect()
-}
+use kelir_backend::modules::audit::canonical_json;
 
 /// A party, then an edit to it — the edit is what produces a record carrying
 /// both payload halves.
@@ -254,9 +158,7 @@ async fn the_chain_links_every_row_to_the_one_before_it() {
     a_party_with_a_change_behind_it(&app, &token).await;
 
     let rows = stored_rows(&app).await;
-    let genesis = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-
-    let mut expected_previous = genesis.to_owned();
+    let mut expected_previous = GENESIS.to_owned();
     for row in &rows {
         assert_eq!(
             row.previous_hash, expected_previous,

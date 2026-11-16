@@ -209,12 +209,141 @@ async fn a_renamed_actor_does_not_change_what_the_timeline_says() {
 // AC2, AC6 — the events that are actually written, and who can read them
 // ---------------------------------------------------------------------------
 
+/// **Both halves, as the name says** (#960). Until row 15 this test drafted a
+/// document and asserted `Document.Created` alone, so the workflow half of its
+/// name was asserted by nothing. It now drives the lifecycle through an
+/// approval: the draft, the submit that starts the workflow, and the decision
+/// that completes it, each on the timeline with its category, its actor and,
+/// for the decision, what moved.
 #[tokio::test]
 async fn the_document_lifecycle_and_the_workflow_both_reach_the_timeline() {
+    const APPROVER: &str = "ACT-LIFECYCLE-APPROVER";
+
     let app = TestApp::spawn().await;
     let token = app.administrator_token().await;
-    let type_id = document_type(&app, &token, "PR_ACT_LIFECYCLE").await;
+
+    let role = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        APPROVER,
+        &[
+            "workflow:task:read",
+            "workflow:task:execute",
+            "workflow:instance:read",
+            "document:read",
+        ],
+    )
+    .await;
+    fixtures::create_user(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "act.approver",
+        "act.approver@example.test",
+        common::ADMIN_PASSWORD,
+        &[role],
+    )
+    .await;
+    let approver = app.sign_in("act.approver", common::ADMIN_PASSWORD).await;
+
+    let key = "wf_act_lifecycle";
+    let created = app
+        .post(
+            "/api/v1/workflow/definitions",
+            Some(&token),
+            json!({
+                "workflowKey": key,
+                "name": "Approval",
+                "definition": {
+                    "workflowKey": key,
+                    "version": "1.0.0",
+                    "name": "Approval",
+                    "initialState": "MANAGER_APPROVAL",
+                    "states": [
+                        { "code": "MANAGER_APPROVAL", "name": "Manager approval",
+                          "mapsToDocumentStatus": "PENDING_APPROVAL",
+                          "task": { "taskDefinitionKey": "manager_approval",
+                                    "taskName": "Approve the request",
+                                    "assignment": { "assigneeType": "ROLE", "roleCode": APPROVER } } },
+                        { "code": "COMPLETED", "name": "Completed",
+                          "mapsToDocumentStatus": "COMPLETED", "isFinal": true },
+                        { "code": "REJECTED", "name": "Rejected",
+                          "mapsToDocumentStatus": "REJECTED", "isFinal": true }
+                    ],
+                    "transitions": [
+                        { "from": "MANAGER_APPROVAL", "to": "COMPLETED", "action": "APPROVE",
+                          "allowedBy": format!("ROLE:{APPROVER}") },
+                        { "from": "MANAGER_APPROVAL", "to": "REJECTED", "action": "REJECT",
+                          "allowedBy": format!("ROLE:{APPROVER}") }
+                    ]
+                },
+            }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let workflow = id_of(&created.body["data"]);
+    let published = app
+        .post(
+            &format!("/api/v1/workflow/definitions/{workflow}/publication"),
+            Some(&token),
+            json!({}),
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "{}", published.body);
+
+    let typed = app
+        .post(
+            "/api/v1/document-types",
+            Some(&token),
+            json!({
+                "typeCode": "PR_ACT_LIFECYCLE",
+                "name": "PR_ACT_LIFECYCLE",
+                "workflows": [{ "workflowDefinitionId": workflow }],
+            }),
+        )
+        .await;
+    assert_eq!(typed.status, StatusCode::CREATED, "{}", typed.body);
+    let type_id = id_of(&typed.body["data"]);
+    let rule = app
+        .put(
+            &format!("/api/v1/document-types/{type_id}/numbering-rule"),
+            Some(&token),
+            json!({
+                "ruleTemplate": "PR_ACT_LIFECYCLE-{year}-{sequence}",
+                "sequenceScope": "YEAR",
+                "gapPolicy": "GAPLESS",
+            }),
+        )
+        .await;
+    assert_eq!(rule.status, StatusCode::OK, "{}", rule.body);
+
     let document = draft(&app, &token, type_id).await;
+
+    let submitted = app
+        .send(
+            Method::POST,
+            &format!("/api/v1/documents/{document}/submission"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+
+    let task: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow_tasks WHERE document_id = $1 \
+         AND status IN ('CREATED','ASSIGNED','IN_PROGRESS')",
+    )
+    .bind(document)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the open task");
+    let decided = app
+        .post(
+            &format!("/api/v1/workflow/tasks/{task}/decision"),
+            Some(&approver),
+            json!({ "action": "APPROVE" }),
+        )
+        .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
 
     let listed = app
         .get(
@@ -222,12 +351,32 @@ async fn the_document_lifecycle_and_the_workflow_both_reach_the_timeline() {
             Some(&token),
         )
         .await;
-
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    assert_eq!(listed.body["data"][0]["eventType"], "Document.Created");
-    assert_eq!(listed.body["data"][0]["eventCategory"], "DOCUMENT");
-    assert_eq!(listed.body["data"][0]["actorName"], common::ADMIN_USERNAME);
-    assert_eq!(listed.body["meta"]["total"], 1);
+    assert_eq!(
+        listed.body["meta"]["total"], 3,
+        "the draft, the submit and the decision: {}",
+        listed.body
+    );
+
+    // The document's half.
+    let drafted = entry_of(&listed.body, "Document.Created");
+    assert_eq!(drafted["eventCategory"], "DOCUMENT");
+    assert_eq!(drafted["actorName"], common::ADMIN_USERNAME);
+
+    let committed = entry_of(&listed.body, "Document.Submitted");
+    assert_eq!(committed["eventCategory"], "DOCUMENT");
+    assert_eq!(committed["actorName"], common::ADMIN_USERNAME);
+
+    // The workflow's half: who decided, and what moved.
+    let decision = entry_of(&listed.body, "Workflow.Decided");
+    assert_eq!(decision["eventCategory"], "WORKFLOW", "{decision}");
+    assert_eq!(decision["actorName"], "act.approver", "{decision}");
+    assert_eq!(decision["details"]["action"], "APPROVE", "{decision}");
+    assert_eq!(
+        decision["details"]["from"], "MANAGER_APPROVAL",
+        "{decision}"
+    );
+    assert_eq!(decision["details"]["to"], "COMPLETED", "{decision}");
 }
 
 /// **Tenant scope lives in the statement** (#247 AC6), not in the handler that
