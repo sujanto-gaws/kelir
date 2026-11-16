@@ -923,7 +923,7 @@ mod tests {
     #[test]
     fn refuses_a_placeholder_bootstrap_password_in_staging() {
         let error = AppConfig::from_source(source(&[
-            ("KELIR_JWT_SECRET", "a-real-secret"),
+            ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
             ("KELIR_APP_ENV", "staging"),
             ("KELIR_BOOTSTRAP_ADMIN_USERNAME", "admin"),
             ("KELIR_BOOTSTRAP_ADMIN_PASSWORD", "change-me"),
@@ -979,7 +979,7 @@ mod tests {
     #[test]
     fn refuses_a_storage_access_key_nobody_set_in_staging() {
         let error = AppConfig::from_source(source(&[
-            ("KELIR_JWT_SECRET", "a-real-secret-value"),
+            ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
             ("KELIR_APP_ENV", "staging"),
         ]))
         .expect_err("staging must not run on MinIO's own credentials");
@@ -1004,7 +1004,7 @@ mod tests {
     #[test]
     fn refuses_a_storage_secret_key_nobody_set_in_production() {
         let error = AppConfig::from_source(source(&[
-            ("KELIR_JWT_SECRET", "a-real-secret-value"),
+            ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
             ("KELIR_APP_ENV", "production"),
             ("KELIR_STORAGE_ACCESS_KEY", "kelir-production"),
         ]))
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn a_credential_somebody_set_is_accepted_however_ordinary_it_looks() {
         let config = AppConfig::from_source(source(&[
-            ("KELIR_JWT_SECRET", "a-real-secret-value"),
+            ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
             ("KELIR_APP_ENV", "production"),
             ("KELIR_STORAGE_ACCESS_KEY", "minioadmin"),
             ("KELIR_STORAGE_SECRET_KEY", "minioadmin"),
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn accepts_a_real_secret_in_production() {
         let config = AppConfig::from_source(source(&[
-            ("KELIR_JWT_SECRET", "a-real-deployment-secret"),
+            ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
             ("KELIR_APP_ENV", "production"),
             ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
             ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
@@ -1104,6 +1104,127 @@ mod tests {
         .expect("a non-placeholder secret is accepted");
 
         assert_eq!(config.app_env, AppEnv::Production);
+    }
+
+    // -----------------------------------------------------------------------
+    // The signing secret's floor (#837, NFR-SEC-007)
+    //
+    // Access tokens are HS256, and RFC 7518 §3.2 asks for a key at least as
+    // long as the hash output: 32 bytes. The floor is counted in bytes of
+    // UTF-8, not in characters, and holds where the placeholder is refused:
+    // staging and production. Development and test keep `change-me`.
+    // -----------------------------------------------------------------------
+
+    /// A signing secret long enough for a deployment, for the tests that load
+    /// `staging` or `production` and are about something else.
+    const DEPLOYMENT_SECRET: &str = "a-deployment-signing-secret-at-least-32-bytes-long";
+
+    /// Loads `env` with `secret` and everything else a deployment needs, so
+    /// the signing secret is the only thing that can refuse.
+    fn load_deployed(env: &str, secret: &str) -> Result<AppConfig, ConfigError> {
+        AppConfig::from_source(source(&[
+            ("KELIR_JWT_SECRET", secret),
+            ("KELIR_APP_ENV", env),
+            ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
+            ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
+            ("KELIR_DATABASE_MIGRATION_URL", OWNER_URL),
+        ]))
+    }
+
+    /// Asserts `error` refuses the signing secret, naming the setting and the
+    /// minimum and not the value.
+    fn assert_refused_as_short(error: &ConfigError, secret: &str, env: &str) {
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    key: "KELIR_JWT_SECRET",
+                    ..
+                }
+            ),
+            "{env}: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("KELIR_JWT_SECRET"),
+            "{env}: the refusal names the setting: {message}"
+        );
+        assert!(
+            message.contains("32 bytes"),
+            "{env}: the refusal names the minimum: {message}"
+        );
+        assert!(
+            !message.contains(secret),
+            "{env}: the refusal never prints the secret: {message}"
+        );
+    }
+
+    /// **31 bytes is refused where it is deployed**, as the placeholder is.
+    #[test]
+    fn refuses_a_31_byte_signing_secret_in_staging_and_production() {
+        let secret = "s".repeat(31);
+        for env in ["staging", "production"] {
+            let error = load_deployed(env, &secret)
+                .expect_err("a 31-byte secret is shorter than HS256's 32");
+
+            assert_refused_as_short(&error, &secret, env);
+        }
+    }
+
+    /// **32 bytes is enough**: the boundary itself is accepted.
+    #[test]
+    fn accepts_a_32_byte_signing_secret_in_staging_and_production() {
+        let secret = "s".repeat(32);
+        for env in ["staging", "production"] {
+            let config = load_deployed(env, &secret)
+                .unwrap_or_else(|error| panic!("{env} refused 32 bytes: {error}"));
+
+            assert_eq!(config.jwt_secret, secret, "for {env}");
+        }
+    }
+
+    /// **Bytes, not characters.** Fifteen `é` and an `a` are sixteen
+    /// characters and 31 bytes: refused, though a character count would call
+    /// it sixteen and refuse it too. The test after this one is the half a
+    /// character count gets wrong.
+    #[test]
+    fn refuses_a_multibyte_secret_of_31_bytes() {
+        let secret = format!("{}a", "é".repeat(15));
+        assert_eq!(secret.len(), 31);
+        for env in ["staging", "production"] {
+            let error = load_deployed(env, &secret)
+                .expect_err("31 bytes is short however many characters they hold");
+
+            assert_refused_as_short(&error, &secret, env);
+        }
+    }
+
+    /// Thirty `a` and an `é` are 31 characters and 32 bytes: accepted. A floor
+    /// counted in characters refuses this one.
+    #[test]
+    fn accepts_a_multibyte_secret_of_32_bytes_and_31_characters() {
+        let secret = format!("{}é", "a".repeat(30));
+        assert_eq!((secret.len(), secret.chars().count()), (32, 31));
+        for env in ["staging", "production"] {
+            load_deployed(env, &secret)
+                .unwrap_or_else(|error| panic!("{env} counted characters: {error}"));
+        }
+    }
+
+    /// **Development and test are unaffected**, as they are by the
+    /// placeholder rule: a short secret and `change-me` both still load.
+    #[test]
+    fn a_short_signing_secret_still_loads_on_a_developer_machine() {
+        let short = "s".repeat(31);
+        for env in ["development", "test"] {
+            for secret in [short.as_str(), "change-me", "s3cret"] {
+                AppConfig::from_source(source(&[
+                    ("KELIR_JWT_SECRET", secret),
+                    ("KELIR_APP_ENV", env),
+                ]))
+                .unwrap_or_else(|error| panic!("{env} refused '{secret}': {error}"));
+            }
+        }
     }
 
     #[test]
@@ -1259,7 +1380,7 @@ mod tests {
             // to load at all** (#317, ADR-0051), so this loop supplies them
             // rather than testing four environments and asserting about two.
             let config = AppConfig::from_source(source(&[
-                ("KELIR_JWT_SECRET", "s3cret"),
+                ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
                 ("KELIR_APP_ENV", raw),
                 ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
                 ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
@@ -1297,7 +1418,7 @@ mod tests {
     fn refuses_to_start_without_the_owners_url_where_it_is_deployed() {
         for env in ["staging", "production"] {
             let error = AppConfig::from_source(source(&[
-                ("KELIR_JWT_SECRET", "a-real-secret-value"),
+                ("KELIR_JWT_SECRET", DEPLOYMENT_SECRET),
                 ("KELIR_APP_ENV", env),
                 ("KELIR_STORAGE_ACCESS_KEY", "a-deployment-key"),
                 ("KELIR_STORAGE_SECRET_KEY", "a-deployment-secret"),
