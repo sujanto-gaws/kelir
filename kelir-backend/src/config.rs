@@ -1230,13 +1230,59 @@ mod tests {
         }
     }
 
+    /// **A secret that begins or ends with whitespace is refused** where it is
+    /// deployed, at any length (#837, the product owner, 2026-11-16).
+    /// `deploy.sh`, compose and the backend can each read different bytes
+    /// there, and padding carries a placeholder past the floor: `change-me`
+    /// and 23 spaces is 32 bytes. `char::is_whitespace`, so a no-break space
+    /// counts.
+    #[test]
+    fn refuses_a_signing_secret_that_begins_or_ends_with_whitespace() {
+        let padded = [
+            format!(" {DEPLOYMENT_SECRET}"),
+            format!("{DEPLOYMENT_SECRET} "),
+            format!("{DEPLOYMENT_SECRET}\n"),
+            format!("\t{DEPLOYMENT_SECRET}"),
+            format!("\u{a0}{DEPLOYMENT_SECRET}"),
+            format!("change-me{}", " ".repeat(23)),
+            " change-me".to_owned(),
+        ];
+        for env in ["staging", "production"] {
+            for secret in &padded {
+                let error = load_deployed(env, secret)
+                    .expect_err("surrounding whitespace is refused, however long");
+
+                assert!(
+                    matches!(
+                        error,
+                        ConfigError::Invalid {
+                            key: "KELIR_JWT_SECRET",
+                            ..
+                        }
+                    ),
+                    "{env}, {secret:?}: {error}"
+                );
+                let message = error.to_string();
+                assert!(
+                    message.contains("must not begin or end with whitespace"),
+                    "{env}, {secret:?}: the refusal says why: {message}"
+                );
+                assert!(
+                    !message.contains(secret.trim()),
+                    "{env}: the refusal never prints the secret: {message}"
+                );
+            }
+        }
+    }
+
     /// **Development and test are unaffected**, as they are by the
-    /// placeholder rule: a short secret and `change-me` both still load.
+    /// placeholder rule: a short secret, `change-me` and a padded one all
+    /// still load.
     #[test]
     fn a_short_signing_secret_still_loads_on_a_developer_machine() {
         let short = "s".repeat(31);
         for env in ["development", "test"] {
-            for secret in [short.as_str(), "change-me", "s3cret"] {
+            for secret in [short.as_str(), "change-me", "s3cret", " change-me "] {
                 AppConfig::from_source(source(&[
                     ("KELIR_JWT_SECRET", secret),
                     ("KELIR_APP_ENV", env),

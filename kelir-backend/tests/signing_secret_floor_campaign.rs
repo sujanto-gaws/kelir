@@ -7,10 +7,9 @@
 //!
 //! | Claim | Test |
 //! |---|---|
-//! | The real binary refuses at the floor, names the key and the minimum, never the value; whitespace is counted raw; the placeholder and the empty value keep their own messages | *the binary refuses a short signing secret and nothing else* |
-//! | `deploy.sh` counts bytes, as the backend does, at the same boundary | *deploy sh counts bytes at the same floor as the backend* |
+//! | The real binary refuses at the floor, names the key and the minimum, never the value; a secret that begins or ends with whitespace is refused as such; the placeholder and the empty value keep their own messages | *the binary refuses a short signing secret and nothing else* |
+//! | `deploy.sh` counts bytes, as the backend does, at the same boundary, and refuses surrounding whitespace | *deploy sh counts bytes at the same floor as the backend* |
 //! | Every literal secret shipped for staging or production is at least 32 bytes | *every shipped deployment secret clears the floor* |
-//! | The key that passed the floor is the key that signs, untrimmed | *a refresh token outlives a signing secret rotation across a restart* |
 //! | A refresh token survives a rotation, and the old access token does not | *a refresh token outlives a signing secret rotation across a restart* |
 //!
 //! **The binary is started with a cleared environment.** CI's test job sets
@@ -47,6 +46,8 @@ const FLOOR: usize = 32;
 enum Expected {
     /// Refused as shorter than the floor.
     Short,
+    /// Refused for beginning or ending with whitespace.
+    Padded,
     /// Refused as the development placeholder.
     Placeholder,
     /// Refused as unset.
@@ -93,11 +94,11 @@ async fn start_refused(app_env: &str, secret: Option<&str>) -> (Option<i32>, Str
 ///
 /// - **At the boundary**: 31 bytes refused, 32 passed on, and the same in
 ///   multibyte, where 31 characters can be 32 bytes.
-/// - **Whitespace is counted raw.** `from_env` does not trim the secret, and
-///   the HMAC key is the raw value, so a space is a byte of the key: 31 bytes
-///   and a space pass, and a 30-byte secret with a space either side passes
-///   while one with 29 does not. Whitespace alone is not a secret at any
-///   length: it is refused as unset.
+/// - **Surrounding whitespace is refused**, whatever the length (the product
+///   owner, 2026-11-16). `deploy.sh`'s sourcing, compose's `.env` parser and
+///   the backend can each see different bytes there, and padding would carry
+///   a placeholder past the floor: `change-me` and 23 spaces is 32 bytes.
+///   Whitespace alone is not a secret at any length: it is refused as unset.
 /// - **Ordering**: a placeholder, which is shorter than the floor, is refused
 ///   as the placeholder, and an empty or absent value as required.
 ///
@@ -115,6 +116,7 @@ async fn the_binary_refuses_a_short_signing_secret_and_nothing_else() {
     let padded_to_32 = format!(" {:-<30} ", "probe-padded-secret");
     let padded_to_31 = format!(" {:-<29} ", "probe-padded-secret");
     let only_spaces = " ".repeat(FLOOR);
+    let padded_placeholder = format!("change-me{}", " ".repeat(23));
 
     let cases: Vec<(&str, Option<&str>, Expected)> = vec![
         ("31 bytes", Some(short.as_str()), Expected::Short),
@@ -132,27 +134,37 @@ async fn the_binary_refuses_a_short_signing_secret_and_nothing_else() {
         (
             "a space, then 31 bytes",
             Some(leading_space.as_str()),
-            Expected::PassedOn,
+            Expected::Padded,
         ),
         (
             "31 bytes, then a space",
             Some(trailing_space.as_str()),
-            Expected::PassedOn,
+            Expected::Padded,
         ),
         (
             "31 bytes, then a newline",
             Some(trailing_newline.as_str()),
-            Expected::PassedOn,
+            Expected::Padded,
         ),
         (
             "30 bytes inside two spaces",
             Some(padded_to_32.as_str()),
-            Expected::PassedOn,
+            Expected::Padded,
         ),
         (
             "29 bytes inside two spaces",
             Some(padded_to_31.as_str()),
-            Expected::Short,
+            Expected::Padded,
+        ),
+        (
+            "change-me and 23 spaces",
+            Some(padded_placeholder.as_str()),
+            Expected::Padded,
+        ),
+        (
+            "a space, then change-me",
+            Some(" change-me"),
+            Expected::Padded,
         ),
         ("change-me", Some("change-me"), Expected::Placeholder),
         ("test-secret", Some("test-secret"), Expected::Placeholder),
@@ -171,6 +183,7 @@ async fn the_binary_refuses_a_short_signing_secret_and_nothing_else() {
     );
     assert_eq!((padded_to_32.len(), padded_to_32.trim().len()), (32, 30));
     assert_eq!((padded_to_31.len(), padded_to_31.trim().len()), (31, 29));
+    assert_eq!(padded_placeholder.len(), 32);
 
     let mut wrong = Vec::new();
     for app_env in ["staging", "production"] {
@@ -184,6 +197,11 @@ async fn the_binary_refuses_a_short_signing_secret_and_nothing_else() {
                         said("KELIR_JWT_SECRET is invalid")
                             && said("at least 32 bytes")
                             && said("openssl rand -base64 48")
+                    }
+                    Expected::Padded => {
+                        said("KELIR_JWT_SECRET is invalid")
+                            && said("must not begin or end with whitespace")
+                            && !said("32 bytes")
                     }
                     Expected::Placeholder => {
                         said("KELIR_JWT_SECRET is invalid")
@@ -226,8 +244,9 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `deploy.sh`'s floor check, as the lines it runs: from the assignment of
-/// `jwt_secret_bytes` to the `die` that refuses.
+/// `deploy.sh`'s signing secret checks, as the lines it runs: from the
+/// assignment of `jwt_secret_bytes` to the first blank line, which must hold a
+/// `die` naming `KELIR_JWT_SECRET`.
 #[cfg(unix)]
 fn deploy_floor_check() -> String {
     let path = repository_root().join("deploy/staging/deploy.sh");
@@ -240,11 +259,14 @@ fn deploy_floor_check() -> String {
         .expect("deploy.sh assigns jwt_secret_bytes: the floor check moved or went");
     let end = lines[start..]
         .iter()
-        .position(|line| line.contains("|| die") && line.contains("KELIR_JWT_SECRET"))
-        .map(|offset| start + offset)
-        .expect("deploy.sh's floor check ends in a die naming KELIR_JWT_SECRET");
-
-    lines[start..=end].join("\n")
+        .position(|line| line.trim().is_empty())
+        .map_or(lines.len(), |offset| start + offset);
+    let check = lines[start..end].join("\n");
+    assert!(
+        check.contains("die") && check.contains("KELIR_JWT_SECRET"),
+        "deploy.sh's floor check ends in a die naming KELIR_JWT_SECRET:\n{check}"
+    );
+    check
 }
 
 /// Runs `script` in bash under a UTF-8 locale, with `KELIR_JWT_SECRET` set to
@@ -275,7 +297,8 @@ fn bash_with_secret(script: &str, secret: &str) -> (Option<i32>, String) {
 /// check, lifted out of the script and run as the script runs it, under
 /// `set -euo pipefail` and a UTF-8 locale, refuses exactly what
 /// `str::len() < 32` refuses. The multibyte 32-byte, 31-character secret is
-/// the case a character count gets wrong.
+/// the case a character count gets wrong. A secret that begins or ends with
+/// whitespace is refused, at any length, as the backend refuses it.
 ///
 /// **The locale is checked first**: unless bash counts that secret as 31
 /// characters here, the multibyte cases could not tell the two counts apart.
@@ -306,6 +329,10 @@ fn deploy_sh_counts_bytes_at_the_same_floor_as_the_backend() {
         multibyte_exact,
         "x".repeat(FLOOR * 2),
     ];
+    let padded = [
+        format!(" {:-<32}", "deploy-leading-space"),
+        format!("{:-<32} ", "deploy-trailing-space"),
+    ];
 
     let mut wrong = Vec::new();
     for secret in &secrets {
@@ -325,6 +352,19 @@ fn deploy_sh_counts_bytes_at_the_same_floor_as_the_backend() {
                  deploy.sh exited {code:?}: {printed}",
                 secret.len(),
                 secret.chars().count()
+            ));
+        }
+    }
+
+    for secret in &padded {
+        let (code, printed) = bash_with_secret(&script, secret);
+        let refused = code == Some(1)
+            && printed.contains("KELIR_JWT_SECRET must not begin or end with whitespace")
+            && !printed.contains(secret.trim());
+        if !refused {
+            wrong.push(format!(
+                "{:?}: deploy.sh exited {code:?}: {printed}",
+                secret.chars().next()
             ));
         }
     }
@@ -560,10 +600,8 @@ fn token_in(body: &Value, field: &str) -> String {
 /// refuses the access token A signed and takes the refresh token, which is a
 /// stored digest, for a new access token that B signed.
 ///
-/// **And the key that passed the floor is the key that signs.** A is 31 bytes
-/// and a trailing space: 32 raw, 31 trimmed. The access token verifies under
-/// A as given and not under A trimmed, so the value measured is the value
-/// used.
+/// Both secrets clear the floor and carry no surrounding whitespace, which
+/// staging refuses.
 #[tokio::test]
 async fn a_refresh_token_outlives_a_signing_secret_rotation_across_a_restart() {
     let app = TestApp::spawn().await;
@@ -573,9 +611,9 @@ async fn a_refresh_token_outlives_a_signing_secret_rotation_across_a_restart() {
         .build()
         .expect("an HTTP client");
 
-    let secret_a = format!("{:-<31} ", "rotation-secret-a");
+    let secret_a = format!("{:-<32}", "rotation-secret-a");
     let secret_b = format!("{:=<48}", "rotation-secret-b");
-    assert_eq!((secret_a.len(), secret_a.trim().len()), (32, 31));
+    assert_eq!(secret_a.len(), 32);
 
     let mut first = start_staging(&app, &secret_a, &client).await;
     let (status, signed_in) = call(
@@ -593,10 +631,6 @@ async fn a_refresh_token_outlives_a_signing_secret_rotation_across_a_restart() {
     assert!(
         verify_access_token(&secret_a, &access_a).is_ok(),
         "the access token is not signed with the secret as configured"
-    );
-    assert!(
-        verify_access_token(secret_a.trim(), &access_a).is_err(),
-        "the access token verifies under the trimmed secret: the key is not the value measured"
     );
     let (status, me) = call(&client, &first, "/api/v1/auth/me", Some(&access_a), None).await;
     assert_eq!(
