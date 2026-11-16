@@ -2288,6 +2288,22 @@ async fn exempt_setup(walk: &mut Walk, name: &str) -> Option<(Caller, String, Bo
         "POST /api/v1/integration/external-systems/{id}/endpoints/{endpointId}/test-call" => {
             let system = walk.system().await;
             let endpoint = walk.endpoint(system).await;
+            // A call needs exactly one usable credential. Its secret is a
+            // variable in the system tenant's namespace, named for this run so
+            // no other test reads it.
+            let variable = format!(
+                "KELIR_INTEGRATION_SECRET_SYSTEM__WALK_{}",
+                Uuid::now_v7().simple().to_string().to_uppercase()
+            );
+            std::env::set_var(&variable, "a-token-the-walk-planted");
+            walk.post(
+                &format!("/api/v1/integration/external-systems/{system}/credentials"),
+                json!({
+                    "credentialType": "BEARER_TOKEN",
+                    "secretReference": format!("env://{variable}"),
+                }),
+            )
+            .await;
             (
                 walk.admin(),
                 format!(
