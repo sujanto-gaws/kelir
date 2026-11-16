@@ -1322,8 +1322,8 @@ export function restartFailures({ inUse, backends, gap }) {
 }
 
 /**
- * #854 (c): the shipped shape, one backend, restarted while `deploy.sh`'s probe
- * polls `/health/ready` through Caddy on `file`, and inside the backend. The
+ * #854 (c): the shipped shape, one backend, stopped for 3 s and started while
+ * `deploy.sh`'s probe polls `/health/ready` through Caddy on `file`, and inside it. The
  * second backend is removed first, and stays removed.
  */
 async function restart(ctx, [file]) {
@@ -1344,7 +1344,11 @@ async function restart(ctx, [file]) {
 
     await pause(1_000)
     result.restartAt = now() - t0
-    await dockerAsync(['restart', '-t', '10', only])
+    // Held down 3 s, as a start that migrates is: `docker restart` here is back
+    // in under 300 ms, between two probes, and so proves nothing (#854's first run).
+    await dockerAsync(['stop', '-t', '10', only])
+    await pause(3_000)
+    await dockerAsync(['start', only])
     await within(120, () => gap().readyAt !== null)
     await within(RESTART_GAP_LIMIT_MS / 1000 + 40, () => gap().caddyAt !== null)
     await pause(2_000)
