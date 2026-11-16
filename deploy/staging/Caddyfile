@@ -67,16 +67,17 @@
 		# SIGTERM, so one that is starting or stopping refuses the connection.
 		# A refused dial is retried on the next instance for up to 5 s, and
 		# CI's failover step measures it: one of two stopped under traffic,
-		# 1907 of 1907 answered 200, with the retry counted by Caddy's admin
-		# API. Only GETs were sent; nothing was sent on a refused dial, but a
+		# 454 of 454 answered 200, 115 of them while it was down, the retry
+		# counted by Caddy's admin API, and it rejoined 2.7 s after ready. Only GETs were sent; nothing was sent on a refused dial, but a
 		# write during a stop is unmeasured. A stopped container also leaves
 		# the name at the next refresh.
 		#
 		# **The refusal benches that instance for 2 s.** With one backend the
 		# bench is the outage: 30 s held a restarted lone backend unserved
 		# 29.9 s after it was ready, in CI's restart step, which now requires
-		# 5 s. At 2 s it is served again about 2 s after ready, and a dead one
-		# of two is tried again at most every 2 s. A backend listening but
+		# 5 s; at 2 s it measured 1.9 s. A dead one of two should be tried
+		# again at most every 2 s, which the setting implies and CI does not
+		# measure. A backend listening but
 		# failing is not taken out, and that is unmeasured: with one
 		# instance, taking it out would turn its 5xx into the whole site's.
 		reverse_proxy {
