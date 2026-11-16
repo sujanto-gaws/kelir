@@ -1117,11 +1117,11 @@ async function split(ctx, [file, expect]) {
 
 /**
  * A started backend is in the name by the next `refresh`, 10 s, and one whose
- * dial failed is benched for `fail_duration`, 30 s: it serves again within
+ * dial failed is benched for `fail_duration`, 2 s: it serves again within
  * both, plus 2 s of polling. A restarted single backend should be served
  * through Caddy within 5 s of its own readiness, as it was before #854.
  */
-export const REJOIN_LIMIT_MS = (10 + 30 + 2) * 1000
+export const REJOIN_LIMIT_MS = (10 + 2 + 2) * 1000
 export const RESTART_GAP_LIMIT_MS = 5_000
 
 const now = () => Date.now()

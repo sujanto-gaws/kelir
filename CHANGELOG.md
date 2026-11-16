@@ -1190,9 +1190,14 @@ While the major version is `0`, the public API may change in any release.
   upstream is now `dynamic a` on `backend`, re-read every 10 seconds, in
   round robin, so with the backend scaled each instance gets every other
   request. A connection an instance refuses, as it does while starting
-  or stopping, is retried on another for up to 5 seconds. Caddy runs no
-  active health check on a dynamic upstream, so a backend that is
-  listening and failing still gets its share. Before, `reverse_proxy
+  or stopping, is retried on another for up to 5 seconds, and benches it
+  for 2: CI's failover step stopped one of two under traffic and all
+  1,907 requests answered 200, the retry counted by Caddy's admin API.
+  A lone backend restarted is served again about 2 seconds after it is
+  ready (CI's restart step requires 5). Caddy runs no active health
+  check on a dynamic upstream, so a backend that is listening and
+  failing still gets its share; that, and writes during a stop, are
+  unmeasured. Before, `reverse_proxy
   backend:8080` sent each new connection wherever the name resolved and
   kept the split in its pool, so 300 requests sent one at a time all
   reached one instance. CI's `Caddy spreads two backends` job runs two

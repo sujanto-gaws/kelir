@@ -65,12 +65,20 @@
 		# upstream.** What stands in for it is the dial. The backend binds its
 		# port only after migrating and bootstrapping, and stops accepting on
 		# SIGTERM, so one that is starting or stopping refuses the connection.
-		# A refused dial is retried on the next instance for up to 5 s, which
-		# is safe for any method because nothing was sent, and it marks that
-		# instance down for 30 s while Caddy holds it. A stopped container
-		# also leaves the name at the next refresh. A backend that is
-		# listening but failing is not taken out: with one instance, that
-		# would turn its 5xx into the whole site's.
+		# A refused dial is retried on the next instance for up to 5 s, and
+		# CI's failover step measures it: one of two stopped under traffic,
+		# 1907 of 1907 answered 200, with the retry counted by Caddy's admin
+		# API. Only GETs were sent; nothing was sent on a refused dial, but a
+		# write during a stop is unmeasured. A stopped container also leaves
+		# the name at the next refresh.
+		#
+		# **The refusal benches that instance for 2 s.** With one backend the
+		# bench is the outage: 30 s held a restarted lone backend unserved
+		# 29.9 s after it was ready, in CI's restart step, which now requires
+		# 5 s. At 2 s it is served again about 2 s after ready, and a dead one
+		# of two is tried again at most every 2 s. A backend listening but
+		# failing is not taken out, and that is unmeasured: with one
+		# instance, taking it out would turn its 5xx into the whole site's.
 		reverse_proxy {
 			dynamic a {
 				name backend
@@ -80,7 +88,7 @@
 			lb_policy round_robin
 			lb_try_duration 5s
 			lb_try_interval 250ms
-			fail_duration 30s
+			fail_duration 2s
 		}
 	}
 
