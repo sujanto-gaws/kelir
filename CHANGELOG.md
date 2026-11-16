@@ -11,6 +11,32 @@ While the major version is `0`, the public API may change in any release.
 
 ### Upgrade notes
 
+- **Staging and production refuse a signing secret under 32 bytes**
+  ([#837](https://github.com/sujanto-gaws/kelir/issues/837), NFR-SEC-007).
+  Access tokens are HS256, and RFC 7518 §3.2 asks for a key at least as long
+  as the hash output. Startup refused only the placeholder values, so a
+  six-character `KELIR_JWT_SECRET` started in production. **A deployment
+  whose secret is shorter than 32 bytes, counted in bytes of UTF-8 and not
+  in characters, will not start** in `staging` or `production`: the error
+  names `KELIR_JWT_SECRET` and the minimum, never the value, and `deploy.sh`
+  refuses the `.env` before replacing the running version. **A secret that
+  begins or ends with whitespace is refused too**, at any length, so padding
+  cannot carry `change-me` past the floor, and the placeholders are compared
+  trimmed. `development` and `test` are unchanged, and `change-me` still works
+  there. Check the length before upgrading (on the staging-shape host of
+  Installation guide §6; the line strips one pair of surrounding quotes, and
+  does not catch surrounding whitespace, which startup also refuses), and
+  generate a new secret if it is short:
+
+  ```bash
+  grep '^KELIR_JWT_SECRET=' /opt/kelir/.env | cut -d= -f2- | sed -e "s/^[\"']//" -e "s/[\"']\$//" | tr -d '\n' | wc -c   # 32 or more
+  openssl rand -base64 48
+  ```
+
+  **Rotating the secret invalidates every issued access token until its
+  client refreshes.** The refresh token still works: refresh tokens are
+  stored digests, not signed with the secret. Every backend must hold the
+  same value (Installation guide §10). Installation guide §7.1 has the row.
 - **`{:?}` of the backend's configuration prints no secret**
   ([#842](https://github.com/sujanto-gaws/kelir/issues/842), ADR-0051).
   `AppConfig` derived `Debug`, so any debug print of it showed both database

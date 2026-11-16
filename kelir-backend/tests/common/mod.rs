@@ -78,7 +78,7 @@ pub const ADMIN_PASSWORD: &str = "bootstrap-administrator-password";
 
 /// Signing secret for the harness. Fixed so a token minted in one place in a
 /// test verifies in another.
-pub const JWT_SECRET: &str = "integration-test-signing-secret";
+pub const JWT_SECRET: &str = "integration-test-signing-secret-at-least-32-bytes";
 
 /// Connections one test instance may hold.
 ///

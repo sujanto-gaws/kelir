@@ -258,10 +258,27 @@ for required in KELIR_DB_PASSWORD KELIR_DB_APP_PASSWORD KELIR_JWT_SECRET KELIR_M
 
     case "${value}" in
         change-me|changeme|secret|test-secret|password)
-            die "${required} is a placeholder; generate one with: openssl rand -base64 36"
+            # The signing secret's command gives 64 characters, clear of its
+            # 32-byte floor (#837); the passwords keep -base64 36, as §6.3 and
+            # the provisioner use.
+            bytes=36
+            [[ "${required}" == KELIR_JWT_SECRET ]] && bytes=48
+            die "${required} is a placeholder; generate one with: openssl rand -base64 ${bytes}"
             ;;
     esac
 done
+
+# The backend refuses a signing secret under 32 bytes (#837, NFR-SEC-007);
+# refuse it here first. Bytes, as the backend counts them: LC_ALL=C makes
+# ${#var} count bytes rather than characters.
+jwt_secret_bytes="$(LC_ALL=C; printf '%s' "${#KELIR_JWT_SECRET}")"
+# Nor one that begins or ends with whitespace. [[:space:]] follows the locale
+# and may miss U+00A0; the backend refuses that too.
+if [[ "${KELIR_JWT_SECRET}" =~ ^[[:space:]]|[[:space:]]$ ]]; then
+    die "KELIR_JWT_SECRET must not begin or end with whitespace"
+fi
+(( jwt_secret_bytes >= 32 )) \
+    || die "KELIR_JWT_SECRET must be at least 32 bytes; generate one with: openssl rand -base64 48"
 
 # **The store key** (NFR-SEC-009, ADR-0049 §2). MinIO encrypts every object
 # under it, and its shape is `<name>:<32 bytes in base64>`, so anything else is
