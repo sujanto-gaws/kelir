@@ -1546,9 +1546,8 @@ async fn setup(walk: &mut Walk, name: &str) -> Option<Cell> {
                 walk.admin(),
                 format!("/api/v1/identity/users/{user}"),
                 Body::Empty,
-                // **Deliberately wrong, for the red-first run** (#960): this
-                // route writes `User.Deactivated`, and the next commit says so.
-                "User.Deleted",
+                // A delete is a deactivation: the account keeps its row.
+                "User.Deactivated",
                 "USER",
                 Known(user),
             )
