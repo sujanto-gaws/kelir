@@ -912,3 +912,219 @@ async fn an_invalid_update_is_refused_before_the_user_is_looked_up() {
         .await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
 }
+
+// ---------------------------------------------------------------------------
+// #795: a user edit audits the stored row
+// ---------------------------------------------------------------------------
+
+/// A department in the administrator's tenant, for a user to be placed in.
+async fn department(app: &TestApp, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO departments (id, tenant_id, department_code, name) VALUES ($1, $2, $3, $3)",
+    )
+    .bind(id)
+    .bind(fixtures::SYSTEM_TENANT_ID)
+    .bind(code)
+    .execute(&app.pool)
+    .await
+    .expect("insert the department");
+    id
+}
+
+/// An empty role in the administrator's tenant, to be granted.
+async fn grantable_role(app: &TestApp, code: &str) -> Uuid {
+    fixtures::create_role_with_permissions(&app.pool, fixtures::SYSTEM_TENANT_ID, code, &[]).await
+}
+
+/// The five fields a `User.Updated` half holds, as the stored row has them.
+/// `roleIds` is compared as a set: [`normalized`] sorts both sides.
+fn user_row(
+    email: &str,
+    display_name: &str,
+    status: &str,
+    department_id: Option<Uuid>,
+    role_ids: &[Uuid],
+) -> serde_json::Value {
+    normalized(json!({
+        "email": email,
+        "displayName": display_name,
+        "status": status,
+        "departmentId": department_id,
+        "roleIds": role_ids,
+    }))
+}
+
+/// `value` with its `roleIds` sorted, so the order grants are read in does
+/// not decide the comparison.
+fn normalized(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(roles) = value.get_mut("roleIds").and_then(|r| r.as_array_mut()) {
+        roles.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    value
+}
+
+/// Every `User.Updated` row for `id`, oldest first, as `(old, new)`.
+async fn user_updates(app: &TestApp, id: Uuid) -> Vec<(serde_json::Value, serde_json::Value)> {
+    let rows: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT old_value_json, new_value_json FROM audit_events
+         WHERE event_type = 'User.Updated' AND object_id = $1
+         ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(&app.pool)
+    .await
+    .expect("read the audit rows");
+    rows.into_iter()
+        .map(|(old, new)| {
+            (
+                normalized(old.unwrap_or_default()),
+                normalized(new.unwrap_or_default()),
+            )
+        })
+        .collect()
+}
+
+/// PUTs `body` to the user and returns the `User.Updated` row it wrote,
+/// asserting it wrote exactly one.
+async fn edited(
+    app: &TestApp,
+    token: &str,
+    id: Uuid,
+    body: serde_json::Value,
+) -> (serde_json::Value, serde_json::Value) {
+    let before = user_updates(app, id).await.len();
+    let response = app
+        .put(
+            &format!("/api/v1/identity/users/{id}"),
+            Some(token),
+            body.clone(),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{body}: {}", response.body);
+    let mut rows = user_updates(app, id).await;
+    assert_eq!(
+        rows.len(),
+        before + 1,
+        "an edit writes one User.Updated row: {body}"
+    );
+    rows.pop().expect("the row just counted")
+}
+
+/// **[#795]: a partial edit audits the stored row, before and after.** Both
+/// halves hold the five fields an edit can change, as the row has them: a
+/// field the edit did not send is its stored value, not `null`, and a value
+/// the edit sent padded is audited as stored, trimmed. A `new_value` built
+/// from the request fails each edit here: it holds `null` for the unsent
+/// fields, the untrimmed value, and no department or roles.
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+#[tokio::test]
+async fn a_partial_user_edit_audits_the_stored_row_before_and_after() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-PLACE").await;
+    let role = grantable_role(&app, "ROLE-AUD-795-HELD").await;
+
+    let mut body = payload("audited.edit");
+    body["departmentId"] = json!(place);
+    body["roleIds"] = json!([role]);
+    let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "audited.edit").await;
+    let email = "audited.edit@kelir.test";
+
+    let (old, new) = edited(
+        &app,
+        &token,
+        id,
+        json!({ "displayName": "  Renamed Person  " }),
+    )
+    .await;
+    assert_eq!(
+        old,
+        user_row(email, "Test Person", "ACTIVE", Some(place), &[role])
+    );
+    assert_eq!(
+        new,
+        user_row(email, "Renamed Person", "ACTIVE", Some(place), &[role]),
+        "new_value is the stored row: the unsent fields as they are, the name trimmed"
+    );
+
+    let (old, new) = edited(
+        &app,
+        &token,
+        id,
+        json!({ "email": " moved@kelir.test ", "status": "LOCKED" }),
+    )
+    .await;
+    assert_eq!(
+        old,
+        user_row(email, "Renamed Person", "ACTIVE", Some(place), &[role]),
+        "old_value is the row the previous edit stored"
+    );
+    assert_eq!(
+        new,
+        user_row(
+            "moved@kelir.test",
+            "Renamed Person",
+            "LOCKED",
+            Some(place),
+            &[role]
+        )
+    );
+}
+
+/// **[#795]: placing a user in a department, taking them out of it and
+/// replacing their roles each audit.** None of the three was in the
+/// `User.Updated` row before, so a role grant left no trace in the trail,
+/// unlike a role's own permission change (FR-AUD-002).
+///
+/// [#795]: https://github.com/sujanto-gaws/kelir/issues/795
+#[tokio::test]
+async fn a_department_set_and_cleared_and_roles_replaced_each_audit() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let place = department(&app, "AUD-795-DEPT").await;
+    let first = grantable_role(&app, "ROLE-AUD-795-FIRST").await;
+    let second = grantable_role(&app, "ROLE-AUD-795-SECOND").await;
+    let third = grantable_role(&app, "ROLE-AUD-795-THIRD").await;
+
+    let mut body = payload("audited.placement");
+    body["roleIds"] = json!([first]);
+    let created = app.post("/api/v1/identity/users", Some(&token), body).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = user_id_of(&app, "audited.placement").await;
+    let email = "audited.placement@kelir.test";
+    let row = |department: Option<Uuid>, roles: &[Uuid]| {
+        user_row(email, "Test Person", "ACTIVE", department, roles)
+    };
+
+    let set = edited(&app, &token, id, json!({ "departmentId": place })).await;
+    assert_eq!(
+        set,
+        (row(None, &[first]), row(Some(place), &[first])),
+        "setting a department is audited"
+    );
+
+    let cleared = edited(&app, &token, id, json!({ "departmentId": null })).await;
+    assert_eq!(
+        cleared,
+        (row(Some(place), &[first]), row(None, &[first])),
+        "clearing a department is audited"
+    );
+
+    let replaced = edited(&app, &token, id, json!({ "roleIds": [second, third] })).await;
+    assert_eq!(
+        replaced,
+        (row(None, &[first]), row(None, &[second, third])),
+        "replacing the roles is audited"
+    );
+
+    let emptied = edited(&app, &token, id, json!({ "roleIds": [] })).await;
+    assert_eq!(
+        emptied,
+        (row(None, &[second, third]), row(None, &[])),
+        "taking every role away is audited"
+    );
+}
