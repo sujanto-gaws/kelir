@@ -8,6 +8,8 @@
 //   node run.mjs two e2e         the browser suite against this stack
 //   node run.mjs two document    one document, so smoke has a row to open
 //   node run.mjs two split <file> even|one-sided   the split through that Caddyfile, asserted
+//   node run.mjs two failover <file>   one of two stopped under traffic and started, asserted
+//   node run.mjs two restart <file>    one backend restarted under the readiness probe, asserted
 //   node run.mjs two errors      a real ERROR on each instance, the control on every zero
 //
 // `smoke` and `down` are `run.mjs`'s own, and the refusals in `guard.mjs` have
@@ -282,16 +284,20 @@ const change = (after, before) => after.map((count, index) => count - before[ind
 /** Sends `rounds` rounds of `size` requests through Caddy and reads where they went. */
 async function throughCaddy(ctx, token, rounds, size) {
   const before = served(ctx)
+  const statuses = {}
   const send = () =>
     fetch(`${ctx.stack().url}/api/v1/auth/me`, { headers: { Authorization: `Bearer ${token}` } }).then(
-      (answer) => answer.text(),
+      async (answer) => {
+        await answer.text()
+        statuses[answer.status] = (statuses[answer.status] ?? 0) + 1
+      },
     )
 
   for (let round = 0; round < rounds; round += 1) {
     await Promise.all(Array.from({ length: size }, send))
   }
 
-  return { sent: rounds * size, atOnce: size, counted: change(served(ctx), before) }
+  return { sent: rounds * size, atOnce: size, counted: change(served(ctx), before), statuses }
 }
 
 /** The count, proved on requests each instance was sent, then read through Caddy. */
@@ -1005,6 +1011,7 @@ export const EVEN_TOLERANCE = 0.05
 const marginOf = (sent) => Math.round(sent * EVEN_TOLERANCE)
 
 export const isEven = ({ sent, counted }) =>
+  sent > 0 &&
   counted.every((count) => Math.abs(count - sent / 2) <= marginOf(sent))
 
 /** Why a split run fails, or nothing. `expect` is `even` or `one-sided`. */
@@ -1020,6 +1027,11 @@ export function splitFailures(expect, { inUse, serial, concurrent, smokeExit }) 
   for (const [label, reading] of Object.entries(readings)) {
     if (total(reading.counted) !== reading.sent) {
       failures.push(`${label}: the instances counted ${total(reading.counted)} of ${reading.sent}`)
+    }
+
+    // Requests the caller saw fail are not a split of traffic served.
+    if ((reading.statuses?.[200] ?? 0) !== reading.sent) {
+      failures.push(`${label}: ${JSON.stringify(reading.statuses)} of ${reading.sent} answered, not all 200`)
     }
   }
 
@@ -1099,6 +1111,282 @@ async function split(ctx, [file, expect]) {
   process.exitCode = result.failures.length === 0 ? 0 : 1
 }
 
+// ---------------------------------------------------------------------------
+// A backend stopping, starting or restarting behind a Caddyfile (#854)
+// ---------------------------------------------------------------------------
+
+/**
+ * A started backend is in the name by the next `refresh`, 10 s, and one whose
+ * dial failed is benched for `fail_duration`, 30 s: it serves again within
+ * both, plus 2 s of polling. A restarted single backend should be served
+ * through Caddy within 5 s of its own readiness, as it was before #854.
+ */
+export const REJOIN_LIMIT_MS = (10 + 30 + 2) * 1000
+export const RESTART_GAP_LIMIT_MS = 5_000
+
+const now = () => Date.now()
+
+/** `docker`, without blocking the requests the event loop is sending beside it. */
+const dockerAsync = (args) =>
+  new Promise((done) => {
+    const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const [out, err] = [[], []]
+
+    child.stdout.on('data', (chunk) => out.push(chunk))
+    child.stderr.on('data', (chunk) => err.push(chunk))
+    child.on('error', () => done({ status: -1, stdout: '', stderr: '' }))
+    child.on('close', (status) => done({ status, stdout: `${Buffer.concat(out)}`, stderr: `${Buffer.concat(err)}` }))
+  })
+
+/** Polls `test` every 250 ms for up to `seconds`; whether it held. */
+async function within(seconds, test) {
+  for (const end = now() + seconds * 1000; now() < end; await pause(250)) {
+    if (await test()) {
+      return true
+    }
+  }
+
+  return false
+}
+
+/** `probe`'s status, again `every` ms after each answer until stopped, as `{ start, end, status }`. */
+function keepPolling(t0, probe, every) {
+  const seen = []
+  let running = true
+  const loop = (async () => {
+    while (running) {
+      const start = now() - t0
+
+      seen.push({ start, status: await probe(), end: now() - t0 })
+      await pause(every)
+    }
+  })()
+
+  return { seen, stop: () => ((running = false), loop.then(() => seen)) }
+}
+
+/** A status, or 0 for a request refused, reset or timed out, whose body is read whole. */
+const statusOf = (url, headers) =>
+  fetch(url, { headers, signal: AbortSignal.timeout(10_000) })
+    .then(async (answer) => (await answer.arrayBuffer(), answer.status))
+    .catch(() => 0)
+const readyInside = async (container) =>
+  (await dockerAsync(['exec', container, 'curl', '-fsS', '--max-time', '2', '-o', '/dev/null',
+    'http://127.0.0.1:8080/health/ready'])).status === 0 ? 200 : 0
+const servedBy = async (container) => {
+  const { stdout, stderr } = await dockerAsync(['logs', container])
+
+  return countOf(`${stdout}${stderr}`, 'AS tenant_deleted')
+}
+const servedNow = (ctx) => Promise.all(INSTANCES.map((n) => servedBy(name(ctx, n))))
+
+/** Caddy's own count of failed dials, sampled every 500 ms, so a bench is seen and not inferred. */
+const watchUpstreams = (ctx, t0) =>
+  keepPolling(t0, async () => {
+    const { status, stdout } = await dockerAsync(['exec', caddy(ctx), 'wget', '-qO-',
+      'http://127.0.0.1:2019/reverse_proxy/upstreams'])
+
+    try {
+      return status === 0 ? JSON.parse(stdout) : null
+    } catch {
+      return null
+    }
+  }, 500)
+
+/** Per upstream address, the most failures Caddy held and from when to when it held any. */
+export function benchesOf(samples) {
+  const benches = {}
+
+  for (const { start, status: upstreams } of samples) {
+    for (const { address, fails } of upstreams ?? []) {
+      const bench = (benches[address] ??= { maxFails: 0, from: null, until: null })
+
+      bench.maxFails = Math.max(bench.maxFails, fails)
+
+      if (fails > 0) {
+        bench.from ??= start
+        bench.until = start
+      }
+    }
+  }
+
+  return benches
+}
+
+/** Answers by status, and how many were sent from `from` to `to`. */
+export const answersOf = (answers, from, to) => ({
+  byStatus: answers.reduce((counts, { status }) => ({ ...counts, [status]: (counts[status] ?? 0) + 1 }), {}),
+  firstBad: answers.filter(({ status }) => status !== 200).slice(0, 5),
+  total: answers.length,
+  whileOneServed: answers.filter(({ start }) => start >= from && start < to).length,
+})
+
+/** Why a failover run fails, or nothing. */
+export function failoverFailures({ inUse, answers, benches, marks, served }) {
+  const ok = answers.byStatus[200] ?? 0
+  const checks = [
+    [inUse, 'Caddy is not serving the file under test'],
+    [ok === answers.total, `${answers.total - ok} of ${answers.total} answered other than 200: ${JSON.stringify(answers.byStatus)}`],
+    [answers.whileOneServed >= 50, `${answers.whileOneServed} requests were sent while one backend was stopped`],
+    [served.beforeStop[1] > 0, 'the backend stopped had served nothing before it was, so nothing failed over'],
+    [Object.values(benches).some(({ maxFails }) => maxFails > 0), 'Caddy never counted a failed dial, so no retry was exercised'],
+    [marks.ready !== undefined, 'the started backend never reported ready'],
+    [marks.rejoined - marks.ready <= REJOIN_LIMIT_MS, `the started backend served nothing through Caddy within ${REJOIN_LIMIT_MS} ms of its readiness`],
+    [total(served.all) >= ok, `the instances counted ${total(served.all)} of the ${ok} answered`],
+  ]
+
+  return checks.filter(([held]) => !held).map(([, failure]) => failure)
+}
+
+/**
+ * #854 (b): three callers through `file` while the second backend is stopped,
+ * left stopped 4 s and started. Every answer must be 200, so the survivor took
+ * what the other could not serve while it drained, was gone and started, and
+ * the started one must serve through Caddy within REJOIN_LIMIT_MS of its readiness.
+ */
+async function failover(ctx, [file]) {
+  const second = name(ctx, 2)
+  const marks = {}
+
+  await underCaddy(ctx, 'failover', file, { marks }, failoverFailures, async (result, t0) => {
+    const mark = (label) => (marks[label] = now() - t0)
+    const { accessToken: token } = (await login(ctx, 1, 'load-user-003', ctx.stack().password)).data
+    const url = `${ctx.stack().url}/api/v1/auth/me`
+    const before = await servedNow(ctx)
+    const callers = [1, 2, 3].map(() => keepPolling(t0, () => statusOf(url, { Authorization: `Bearer ${token}` }), 50))
+
+    await pause(3_000)
+
+    const atStop = await servedNow(ctx)
+
+    mark('stop')
+    await dockerAsync(['stop', '-t', '10', second])
+    mark('stopped')
+
+    const stoppedHad = await servedBy(second)
+
+    await pause(4_000)
+    mark('start')
+    await dockerAsync(['start', second])
+
+    if (await within(90, async () => (await readyInside(second)) === 200)) {
+      mark('ready')
+
+      if (await within(REJOIN_LIMIT_MS / 1000 + 15, async () => (await servedBy(second)) > stoppedHad)) {
+        mark('rejoined')
+      }
+    }
+
+    await pause(1_000)
+    result.answers = answersOf((await Promise.all(callers.map((caller) => caller.stop()))).flat(), marks.stop, marks.start)
+    await pause(1_000)
+    result.served = { beforeStop: change(atStop, before), all: change(await servedNow(ctx), before) }
+  })
+}
+
+/**
+ * From a restart's probes, `{ start, end, status }` in ms: whether the backend
+ * was seen down after `restartAt`, when its own probe was answered 200 again,
+ * and when Caddy was, for good, on a probe sent after the backend's last refusal.
+ */
+export function restartGap({ through, inside }, restartAt) {
+  const after = inside.filter(({ start }) => start >= restartAt)
+  const down = after.findIndex(({ status }) => status !== 200)
+  const back = down === -1 ? -1 : after.findIndex(({ status }, index) => index > down && status === 200)
+  const readyAt = back === -1 ? null : after[back].end
+  // Caddy's first 200 for good: after its last other answer, and sent after the backend's last refusal.
+  const lastBad = through.findLastIndex(({ status }) => status !== 200)
+  const answered = back === -1 ? undefined : through.find(({ start }, index) => index > lastBad && start >= after[back - 1].start)
+  const caddyAt = answered ? answered.end : null
+
+  return {
+    wentDown: down !== -1,
+    readyAt,
+    caddyAt,
+    gapMs: readyAt === null || caddyAt === null ? null : Math.max(0, caddyAt - readyAt),
+  }
+}
+
+/** Why a restart run fails, or nothing. */
+export function restartFailures({ inUse, backends, gap }) {
+  const failures = [
+    [inUse, 'Caddy is not serving the file under test'],
+    [backends === 1, `${backends} backends were running, and the shipped stack has one`],
+    [gap.wentDown, 'the backend was never seen down, so nothing was restarted'],
+    [!gap.wentDown || gap.readyAt !== null, 'the backend never reported ready after its restart'],
+    [gap.readyAt === null || gap.caddyAt !== null, 'Caddy never answered /health/ready 200 after the backend was ready'],
+    [!(gap.gapMs > RESTART_GAP_LIMIT_MS), `Caddy answered 200 ${gap.gapMs} ms after the backend was ready, past ${RESTART_GAP_LIMIT_MS}`],
+  ]
+
+  return failures.filter(([held]) => !held).map(([, failure]) => failure)
+}
+
+/**
+ * #854 (c): the shipped shape, one backend, restarted while `deploy.sh`'s probe
+ * polls `/health/ready` through Caddy on `file`, and inside the backend. The
+ * second backend is removed first, and stays removed.
+ */
+async function restart(ctx, [file]) {
+  ctx.compose('up', '-d', '--no-deps', '--no-recreate', '--scale', 'backend=1', 'backend')
+
+  const running = docker(['ps', '--format', '{{.Names}}', '--filter', `label=com.docker.compose.project=${ctx.config.project}`,
+    '--filter', 'label=com.docker.compose.service=backend']).stdout.split(/\s+/).filter(Boolean)
+  const only = running[0]
+  const ready = () => statusOf(`${ctx.stack().url}/health/ready`)
+
+  await underCaddy(ctx, 'restart', file, { backends: running.length }, restartFailures, async (result, t0) => {
+    if (!(await within(30, async () => (await ready()) === 200))) {
+      throw new Error('Caddy never answered /health/ready 200 before the restart')
+    }
+
+    const probes = { through: keepPolling(t0, ready, 250), inside: keepPolling(t0, () => readyInside(only), 250) }
+    const gap = () => restartGap({ through: probes.through.seen, inside: probes.inside.seen }, result.restartAt)
+
+    await pause(1_000)
+    result.restartAt = now() - t0
+    await dockerAsync(['restart', '-t', '10', only])
+    await within(120, () => gap().readyAt !== null)
+    await within(RESTART_GAP_LIMIT_MS / 1000 + 40, () => gap().caddyAt !== null)
+    await pause(2_000)
+    result.probes = { through: await probes.through.stop(), inside: await probes.inside.stop() }
+    result.gap = gap()
+  })
+}
+
+/**
+ * Caddy recreated cold on `file`, unchanged, then `body`, with its upstreams
+ * watched; the shipped file is put back after, and the record, judged, is kept.
+ */
+async function underCaddy(ctx, label, file, start, judge, body) {
+  if (!file) {
+    throw new Error(`usage: node run.mjs two ${label} <Caddyfile>`)
+  }
+
+  const directory = ctx.stack().runDirectory
+  const text = readFileSync(file, 'utf8')
+  const stamp = Date.now()
+  const result = { at: new Date().toISOString(), caddyfile: file, caddyfileSha256: sha(text), ...start }
+
+  try {
+    await recreateCaddy(ctx, '-f', caddyOverlay(directory, join(directory, `Caddyfile.${label}-${stamp}`), text, `${label}-${stamp}`))
+    result.inUse = caddyfileInUse(ctx) === text
+
+    const t0 = now()
+    const upstreams = watchUpstreams(ctx, t0)
+    await body(result, t0)
+    result.benches = benchesOf(await upstreams.stop())
+    result.failures = judge(result)
+  } finally {
+    await recreateCaddy(ctx)
+  }
+
+  const record = JSON.stringify({ ...result, pass: result.failures.length === 0 }, null, 2)
+
+  console.log(record)
+  writeFileSync(join(directory, `${label}-${stamp}.json`), record)
+  process.exitCode = result.failures.length === 0 ? 0 : 1
+}
+
 /**
  * A positive control for every "0 ERROR" on this stack. A stored hash that is not
  * a PHC string logs ERROR at `password.rs:34`, and its caller only sees a 401, so
@@ -1149,6 +1437,8 @@ export async function twoBackends(step, args, ctx) {
     e2e,
     document: oneDocument,
     split,
+    failover,
+    restart,
     errors,
     count: () => console.log(JSON.stringify(served(ctx))),
   }

@@ -6,11 +6,16 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 import {
+  answersOf,
+  benchesOf,
   bootstrapOf,
   countOf,
+  failoverFailures,
   isEven,
   levelCount,
   lockWaitMs,
+  restartFailures,
+  restartGap,
   splitFailures,
 } from './two-backends.mjs'
 
@@ -73,7 +78,7 @@ test('the shipped Caddyfile has one upstream, a dynamic one in round robin (#854
 })
 
 // #854's readings through the shipped Caddyfile, and what round robin should read.
-const reading = ([a, b]) => ({ sent: a + b, counted: [a, b] })
+const reading = ([a, b]) => ({ sent: a + b, counted: [a, b], statuses: { 200: a + b } })
 const run = (serial, concurrent, rest = {}) => ({
   inUse: true,
   serial: reading(serial),
@@ -87,6 +92,7 @@ test('even is within 5 % of half, and every reading #854 took on the shipped fil
   assert.equal(isEven(reading([135, 165])), true)
   assert.equal(isEven(reading([165, 135])), true)
   assert.equal(isEven(reading([134, 166])), false)
+  assert.equal(isEven(reading([0, 0])), false)
 
   for (const shipped of [[0, 300], [300, 0], [93, 207], [118, 182], [201, 99]]) {
     assert.equal(isEven(reading(shipped)), false, `[${shipped}]`)
@@ -111,4 +117,70 @@ test('a split is not read from a count that does not add up, a failed smoke or a
   assert.match(splitFailures('even', { ...run([150, 150], [150, 150]), serial: short }).join('\n'), /counted 299 of 300/)
   assert.match(splitFailures('even', run([150, 150], [150, 150], { smokeExit: 1 })).join('\n'), /smoke exited 1/)
   assert.match(splitFailures('one-sided', run([0, 300], [0, 300], { inUse: false })).join('\n'), /not serving/)
+
+  const failed = { ...reading([150, 150]), statuses: { 200: 299, 502: 1 } }
+
+  assert.match(splitFailures('even', { ...run([150, 150], [150, 150]), concurrent: failed }).join('\n'), /not all 200/)
+})
+
+// #854's failover and restart, judged from their records.
+const probe = (start, status) => ({ start, end: start + 100, status })
+const answers = Array.from({ length: 300 }, (_, index) => probe(index * 40, 200))
+const failoverRun = (rest = {}) => ({
+  inUse: true,
+  answers: answersOf(answers, 3_000, 9_000),
+  benches: benchesOf([{ start: 3_100, status: [{ address: '10.89.0.3:8080', fails: 1 }] }]),
+  marks: { stop: 3_000, stopped: 4_000, start: 9_000, ready: 12_000, rejoined: 40_000 },
+  served: { beforeStop: [40, 40], all: [200, 100] },
+  ...rest,
+})
+
+test('a failover passes on 200s alone, a counted refusal and a rejoin in time, and fails without each', () => {
+  assert.deepEqual(failoverRun().answers.whileOneServed, 150)
+  assert.deepEqual(failoverRun().benches, { '10.89.0.3:8080': { maxFails: 1, from: 3_100, until: 3_100 } })
+  assert.deepEqual(failoverFailures(failoverRun()), [])
+
+  const fails = (rest, reason) => assert.match(failoverFailures(failoverRun(rest)).join('\n'), reason)
+
+  fails({ answers: answersOf([...answers, probe(5_000, 502)], 3_000, 9_000) }, /1 of 301 answered other than 200/)
+  fails({ answers: answersOf([...answers, probe(5_000, 0)], 3_000, 9_000) }, /\{"0":1,"200":300\}/)
+  fails({ answers: answersOf(answers, 20_000, 20_500) }, /while one backend was stopped/)
+  fails({ benches: benchesOf([{ start: 0, status: [{ address: '10.89.0.3:8080', fails: 0 }] }, { start: 1, status: null }]) }, /never counted a failed dial/)
+  fails({ marks: { stop: 3_000, start: 9_000, ready: 12_000 } }, /served nothing through Caddy within 42000 ms/)
+  fails({ marks: { stop: 3_000, start: 9_000, ready: 12_000, rejoined: 54_001 } }, /within 42000 ms/)
+  fails({ marks: { stop: 3_000, start: 9_000 } }, /never reported ready/)
+  fails({ served: { beforeStop: [80, 0], all: [200, 100] } }, /had served nothing/)
+  fails({ served: { beforeStop: [40, 40], all: [200, 99] } }, /counted 299 of the 300/)
+  fails({ inUse: false }, /not serving/)
+})
+
+test('a restart gap runs from the backend\'s own readiness to Caddy\'s first 200 for good', () => {
+  const inside = [probe(0, 200), probe(1_000, 0), probe(2_000, 0), probe(3_000, 200)]
+  const gapOf = (...through) => restartGap({ through: [probe(0, 200), probe(1_500, 502), ...through], inside }, 500)
+
+  // A 200 sent before the backend's last refusal, or followed by a 503, is not Caddy back.
+  assert.deepEqual(gapOf(probe(1_900, 200), probe(3_200, 503), probe(33_000, 200)), {
+    wentDown: true,
+    readyAt: 3_100,
+    caddyAt: 33_100,
+    gapMs: 30_000,
+  })
+  assert.deepEqual(gapOf(probe(2_500, 200), probe(3_200, 200)).gapMs, 0)
+  assert.deepEqual(gapOf(probe(3_200, 200)).gapMs, 200)
+  assert.deepEqual(gapOf(probe(3_200, 503)).caddyAt, null)
+  assert.deepEqual(restartGap({ through: [], inside: [probe(0, 200), probe(1_000, 200)] }, 500).wentDown, false)
+  assert.deepEqual(restartGap({ through: [], inside: [probe(1_000, 0)] }, 500).readyAt, null)
+})
+
+test('a restart fails past 5 s, on a backend never down, and on more than one backend', () => {
+  const gap = { wentDown: true, readyAt: 3_100, caddyAt: 8_100, gapMs: 5_000 }
+  const fails = (rest) => restartFailures({ inUse: true, backends: 1, gap, ...rest }).join('\n')
+
+  assert.equal(fails(), '')
+  assert.match(fails({ gap: { ...gap, caddyAt: 8_101, gapMs: 5_001 } }), /5001 ms after the backend was ready/)
+  assert.match(fails({ gap: { ...gap, caddyAt: null, gapMs: null } }), /never answered \/health\/ready 200/)
+  assert.match(fails({ gap: { wentDown: false, readyAt: null, caddyAt: null, gapMs: null } }), /^the backend was never seen down/)
+  assert.match(fails({ gap: { wentDown: true, readyAt: null, caddyAt: null, gapMs: null } }), /^the backend never reported ready/)
+  assert.match(fails({ backends: 2 }), /2 backends were running/)
+  assert.match(fails({ inUse: false }), /not serving/)
 })

@@ -856,6 +856,29 @@ jobs:
         working-directory: load
         run: node run.mjs two split ../deploy/staging/Caddyfile even
 
+      # #854 (b): the second backend stopped under three callers, then started.
+      # Every answer 200, a refused dial counted by Caddy's own admin API, and
+      # the started one serving again within refresh plus fail_duration.
+      - name: A stopped backend fails over and rejoins
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        working-directory: load
+        run: node run.mjs two failover ../deploy/staging/Caddyfile
+
+      # #854 (c), the shipped shape: one backend restarted under the readiness
+      # probe, Caddy's 200 within 5 s of the backend's own. These scale to one
+      # backend, so they come last; the control is the bare upstream before #854.
+      - name: The control, one backend restarted behind the bare upstream
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        working-directory: load
+        run: |
+          git show 7a1cd539990181f7b37a5ed19167c6964ebbc1e6:deploy/staging/Caddyfile > "${RUNNER_TEMP}/Caddyfile.before-854"
+          node run.mjs two restart "${RUNNER_TEMP}/Caddyfile.before-854"
+
+      - name: One backend restarted is served again within 5 s
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        working-directory: load
+        run: node run.mjs two restart ../deploy/staging/Caddyfile
+
       - name: Stack logs
         if: failure() && steps.up.outcome != 'skipped'
         run: |
@@ -875,6 +898,8 @@ jobs:
           path: |
             load/.run/*/split-*.json
             load/.run/*/split-*-smoke-*.log
+            load/.run/*/failover-*.json
+            load/.run/*/restart-*.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 90
