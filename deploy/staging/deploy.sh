@@ -258,7 +258,12 @@ for required in KELIR_DB_PASSWORD KELIR_DB_APP_PASSWORD KELIR_JWT_SECRET KELIR_M
 
     case "${value}" in
         change-me|changeme|secret|test-secret|password)
-            die "${required} is a placeholder; generate one with: openssl rand -base64 48"
+            # The signing secret's command gives 64 characters, clear of its
+            # 32-byte floor (#837); the passwords keep -base64 36, as §6.3 and
+            # the provisioner use.
+            bytes=36
+            [[ "${required}" == KELIR_JWT_SECRET ]] && bytes=48
+            die "${required} is a placeholder; generate one with: openssl rand -base64 ${bytes}"
             ;;
     esac
 done

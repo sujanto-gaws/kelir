@@ -24,7 +24,8 @@ While the major version is `0`, the public API may change in any release.
   cannot carry `change-me` past the floor, and the placeholders are compared
   trimmed. `development` and `test` are unchanged, and `change-me` still works
   there. Check the length before upgrading (on the staging-shape host of
-  Installation guide §6; the line strips one pair of surrounding quotes), and
+  Installation guide §6; the line strips one pair of surrounding quotes, and
+  does not catch surrounding whitespace, which startup also refuses), and
   generate a new secret if it is short:
 
   ```bash
