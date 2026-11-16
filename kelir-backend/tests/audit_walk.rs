@@ -11,8 +11,12 @@
 //! # The two tables, and the doors
 //!
 //! - [`CELLS`] lists the operations that write an audit row. [`setup`] holds
-//!   each one's cell: it creates the cell's subject through the API, and says
-//!   which request to send, as whom, and which row it must write.
+//!   each one's cell: it creates the cell's subject, through the API where a
+//!   route makes one and through `common::fixtures` for users, roles and
+//!   tenants, and says which request to send, as whom, and which row it must
+//!   write.
+//! - [`VARIANTS`] lists a second branch of a route that already has a cell,
+//!   where the branch writes a row nothing else asserts: today a rejection.
 //! - [`EXEMPT`] lists the operations that write none, each with its reason and
 //!   its ruling. **The product owner ruled all four on 2026-11-16** on #960.
 //!
@@ -23,8 +27,14 @@
 //! - so a new mutating route that is in neither fails here, by name.
 //!
 //! `no_token_walk.rs`'s `every_served_method_is_in_the_document` holds the
-//! document equal to what `src/` serves, so a route left out of the document
-//! cannot stand outside this walk either.
+//! **count** of method handlers `src/` serves equal to the document's count of
+//! operations. It compares counts, not `(METHOD, path)` pairs, so an
+//! undocumented route served in place of a documented one that is not served
+//! would pass it; `router::tests::every_annotated_route_reaches_the_document`
+//! holds the paths.
+//!
+//! `each_door_refuses_what_it_is_for` shows every door failing on tables made
+//! for it.
 //!
 //! # What a cell asserts
 //!
@@ -40,13 +50,21 @@
 //! The cells run one at a time, and a failed cell does not stop the walk: every
 //! failure is listed at the end. Each exempt operation is sent too, must answer
 //! 2xx, and must write **no** row: a row that is now written is an exemption to
-//! delete. Last, the whole chain is verified with the verifier
-//! `audit_hash_chain.rs` uses ([`common::audit_chain`]).
+//! delete, and must have done what it is for (the notifications it marks are
+//! read). Last, the whole chain is verified by [`common::audit_chain`]'s
+//! `chain_breaks`, which `audit_hash_chain.rs` shows finding a rewritten row.
 //!
 //! **Role ids are live ones** ([#996]): a user is given a role that exists, so
 //! a cell cannot answer 500 for the foreign key.
 //!
 //! # What a cell does not assert, and where it is
+//!
+//! **One branch per route.** A cell sends one request, so a route with several
+//! branches is walked down one of them; [`VARIANTS`] adds the ones listed
+//! there and no others. **GET handlers are not swept** for a write they should
+//! not make. **A lost row is not provoked**: every row is written after the
+//! commit by `record_or_warn`, which logs a failed insert and loses the row,
+//! and no test here injects that failure.
 //!
 //! **Content.** A cell asserts that the row exists and whom it names, not what
 //! its `old_value` and `new_value` say. Two rows are known to say the wrong
@@ -279,29 +297,52 @@ const CELLS: [&str; 78] = [
     "POST /api/v1/workflow/tasks/{id}/reassign",
 ];
 
+/// **A second branch of a route that already has a cell**, named `METHOD
+/// template VARIANT`. A cell sends one request, so it walks one branch of its
+/// route; a branch whose row differs, and that nothing else asserts, is listed
+/// here and has a cell of its own in [`setup`].
+const VARIANTS: [&str; 1] = [
+    // `Workflow.TaskCompleted` carries the decided action, and no other test
+    // reads a rejection back from the trail.
+    "POST /api/v1/workflow/tasks/{id}/decision REJECT",
+];
+
 // ---------------------------------------------------------------------------
 // The doors
 // ---------------------------------------------------------------------------
 
-/// What keeps the document, [`CELLS`] and [`EXEMPT`] from disagreeing: each
-/// failure names its row.
-fn door_failures(operations: &[Operation]) -> Vec<String> {
+/// What keeps the document, [`CELLS`], [`VARIANTS`] and [`EXEMPT`] from
+/// disagreeing: each failure names its row. The tables are parameters so that
+/// `each_door_refuses_what_it_is_for` can show every door failing.
+fn door_failures(
+    operations: &[Operation],
+    cell_table: &[&str],
+    variant_table: &[&str],
+    exempt_table: &[(&str, &str, &str)],
+) -> Vec<String> {
     let documented: BTreeSet<String> = operations.iter().map(Operation::name).collect();
     let mutating: BTreeSet<String> = operations
         .iter()
         .filter(|operation| operation.is_mutating())
         .map(Operation::name)
         .collect();
-    let cells: BTreeSet<&str> = CELLS.iter().copied().collect();
-    let exempt: BTreeSet<&str> = EXEMPT.iter().map(|(name, _, _)| *name).collect();
+    let cells: BTreeSet<&str> = cell_table.iter().copied().collect();
+    let exempt: BTreeSet<&str> = exempt_table.iter().map(|(name, _, _)| *name).collect();
 
     let mut failures = Vec::new();
 
-    if cells.len() != CELLS.len() {
+    if cells.len() != cell_table.len() {
         failures.push("CELLS lists an operation more than once".to_owned());
     }
-    if exempt.len() != EXEMPT.len() {
+    if exempt.len() != exempt_table.len() {
         failures.push("EXEMPT lists an operation more than once".to_owned());
+    }
+
+    for variant in variant_table {
+        let operation = operation_of(variant);
+        if operation == *variant || !cells.contains(operation) {
+            failures.push(format!("{variant} is a variant of no operation in CELLS"));
+        }
     }
 
     for name in &mutating {
@@ -328,13 +369,23 @@ fn door_failures(operations: &[Operation]) -> Vec<String> {
         }
     }
 
-    for (name, reason, ruled) in EXEMPT {
+    for (name, reason, ruled) in exempt_table {
         if reason.trim().is_empty() || ruled.trim().is_empty() {
             failures.push(format!("{name} is exempt with no reason or no ruling"));
         }
     }
 
     failures
+}
+
+/// The `METHOD template` a cell's name walks: the name itself, or the name
+/// with its variant's last word taken off.
+fn operation_of(name: &str) -> &str {
+    let (method, rest) = name.split_once(' ').unwrap_or((name, ""));
+    match rest.split_once(' ') {
+        Some((template, _)) => &name[..method.len() + 1 + template.len()],
+        None => name,
+    }
 }
 
 /// Whether `path` is `template` with each `{capture}` filled.
@@ -383,6 +434,8 @@ struct Cell {
     event_type: &'static str,
     object_type: &'static str,
     object: Subject,
+    /// The action the row must carry, where the cell names one.
+    action: Option<&'static str>,
 }
 
 fn cell(
@@ -400,12 +453,23 @@ fn cell(
         event_type,
         object_type,
         object,
+        action: None,
+    }
+}
+
+impl Cell {
+    /// The row must carry `APPROVE`.
+    fn approving(self) -> Self {
+        Cell {
+            action: Some("APPROVE"),
+            ..self
+        }
     }
 }
 
 /// The method of a `METHOD template` name, and its template.
 fn parts(name: &str) -> (Method, &str) {
-    let (method, template) = name.split_once(' ').expect("METHOD template");
+    let (method, template) = operation_of(name).split_once(' ').expect("METHOD template");
     (
         Method::from_bytes(method.as_bytes()).expect("a method"),
         template,
@@ -523,6 +587,11 @@ async fn walk_cell(walk: &mut Walk, name: &str) -> Result<(), String> {
     if row.action.trim().is_empty() {
         wrong.push("its action is empty".to_owned());
     }
+    if let Some(action) = cell.action {
+        if row.action != action {
+            wrong.push(format!("its action is {}, not {action}", row.action));
+        }
+    }
     if !(from..=to).contains(&row.created_at) {
         wrong.push(format!(
             "it was written at {}, outside the request's window {from} to {to}",
@@ -547,7 +616,7 @@ async fn walk_cell(walk: &mut Walk, name: &str) -> Result<(), String> {
 async fn walk_exempt(walk: &mut Walk, name: &str) -> Result<(), String> {
     let (method, template) = parts(name);
 
-    let Some((caller, path, body)) = exempt_setup(walk, name).await else {
+    let Some((caller, path, body, afterwards)) = exempt_setup(walk, name).await else {
         return Err("EXEMPT names it and `exempt_setup` has no request for it".to_owned());
     };
 
@@ -568,14 +637,55 @@ async fn walk_exempt(walk: &mut Walk, name: &str) -> Result<(), String> {
     }
 
     let written = rows_since(&walk.app, &before).await;
-    if written.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !written.is_empty() {
+        return Err(format!(
             "is exempt, and wrote {}: delete the exemption and give it a cell",
             listed(&written)
-        ))
+        ));
     }
+
+    // What the request was for, so the silence is not a request that did
+    // nothing.
+    match afterwards {
+        Afterwards::Nothing => Ok(()),
+        Afterwards::NoneUnreadFor(user) => match unread(&walk.app, user).await {
+            0 => Ok(()),
+            left => Err(format!("answered 2xx and left {left} unread")),
+        },
+        Afterwards::Read(notification) => {
+            let read: bool =
+                sqlx::query_scalar("SELECT read_at IS NOT NULL FROM notifications WHERE id = $1")
+                    .bind(notification)
+                    .fetch_one(&walk.app.pool)
+                    .await
+                    .expect("the notification");
+            if read {
+                Ok(())
+            } else {
+                Err("answered 2xx and left the notification unread".to_owned())
+            }
+        }
+    }
+}
+
+/// What an exempt request must have done, besides writing no audit row.
+enum Afterwards {
+    Nothing,
+    /// The user has no unread notification left.
+    NoneUnreadFor(Uuid),
+    /// The notification is read.
+    Read(Uuid),
+}
+
+/// How many notifications `user` has not read.
+async fn unread(app: &TestApp, user: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM notifications WHERE recipient_user_id = $1 AND read_at IS NULL",
+    )
+    .bind(user)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the unread count")
 }
 
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
@@ -594,12 +704,62 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 // The walk
 // ---------------------------------------------------------------------------
 
+fn synthetic(method: Method, template: &str) -> Operation {
+    Operation {
+        method,
+        template: template.to_owned(),
+        path: template.to_owned(),
+        declares_bearer: true,
+    }
+}
+
+/// **Each door, seen to fail.** A door that never refuses anything is not a
+/// door, so each is fed a table made to trip it, and must name what it found.
+/// The real tables pass the same doors, with no database.
+#[test]
+fn each_door_refuses_what_it_is_for() {
+    let operations = [
+        synthetic(Method::POST, "/a"),
+        synthetic(Method::PUT, "/a/{id}"),
+        synthetic(Method::DELETE, "/a/{id}"),
+        synthetic(Method::GET, "/a"),
+    ];
+    let cells = ["POST /a", "DELETE /a/{id}", "GET /a", "POST /gone"];
+    let variants = ["POST /a REJECT", "PUT /nowhere REJECT"];
+    let exempt = [
+        ("DELETE /a/{id}", "a reason", "a ruling"),
+        ("POST /b", " ", ""),
+    ];
+
+    let mut failures = door_failures(&operations, &cells, &variants, &exempt);
+    failures.sort();
+    let mut expected = [
+        "PUT /a/{id} is a mutating operation in neither CELLS nor EXEMPT: \
+         give it a cell, or a ruling and its reason"
+            .to_owned(),
+        "DELETE /a/{id} is in CELLS and in EXEMPT: one of the two is wrong".to_owned(),
+        "POST /gone is listed, and is not in the document".to_owned(),
+        "POST /b is listed, and is not in the document".to_owned(),
+        "GET /a is listed, and changes nothing".to_owned(),
+        "PUT /nowhere REJECT is a variant of no operation in CELLS".to_owned(),
+        "POST /b is exempt with no reason or no ruling".to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(failures, expected);
+
+    let twice = door_failures(&operations[..1], &["POST /a", "POST /a"], &[], &[]);
+    assert_eq!(twice, ["CELLS lists an operation more than once"]);
+
+    let real = door_failures(&every_operation(), &CELLS, &VARIANTS, &EXEMPT);
+    assert!(real.is_empty(), "{real:?}");
+}
+
 /// **The walk.**
 #[tokio::test]
 async fn every_mutating_operation_writes_its_audit_row_unless_it_is_ruled_exempt() {
     let operations = every_operation();
 
-    let failures = door_failures(&operations);
+    let failures = door_failures(&operations, &CELLS, &VARIANTS, &EXEMPT);
     assert!(
         failures.is_empty(),
         "the document, CELLS and EXEMPT disagree:\n{}",
@@ -619,7 +779,7 @@ async fn every_mutating_operation_writes_its_audit_row_unless_it_is_ruled_exempt
     let mut walk = Walk::start().await;
     let mut failures = Vec::new();
 
-    for name in CELLS {
+    for name in CELLS.iter().chain(VARIANTS.iter()) {
         match AssertUnwindSafe(walk_cell(&mut walk, name))
             .catch_unwind()
             .await
@@ -651,7 +811,7 @@ async fn every_mutating_operation_writes_its_audit_row_unless_it_is_ruled_exempt
         failures.is_empty(),
         "{} of {} cells failed:\n{}",
         failures.len(),
-        mutating,
+        mutating + VARIANTS.len(),
         failures.join("\n")
     );
     assert!(
@@ -2202,6 +2362,22 @@ async fn setup(walk: &mut Walk, name: &str) -> Option<Cell> {
                 "WORKFLOW_TASK",
                 Known(task),
             )
+            .approving()
+        }
+        "POST /api/v1/workflow/tasks/{id}/decision REJECT" => {
+            let approver = walk.approver().await;
+            let (_, task) = walk.awaiting_approval().await;
+            Cell {
+                action: Some("REJECT"),
+                ..cell(
+                    approver,
+                    format!("/api/v1/workflow/tasks/{task}/decision"),
+                    Body::Json(json!({ "action": "REJECT" })),
+                    "Workflow.TaskCompleted",
+                    "WORKFLOW_TASK",
+                    Known(task),
+                )
+            }
         }
         "POST /api/v1/workflow/tasks/{id}/delegation" => {
             let holder = walk.approver().await;
@@ -2246,7 +2422,7 @@ async fn setup(walk: &mut Walk, name: &str) -> Option<Cell> {
 }
 
 /// Each exempt operation's request: who sends it, where, and with what.
-async fn exempt_setup(walk: &mut Walk, name: &str) -> Option<(Caller, String, Body)> {
+async fn exempt_setup(walk: &mut Walk, name: &str) -> Option<(Caller, String, Body, Afterwards)> {
     let request = match name {
         "POST /api/v1/auth/refresh" => {
             let (_, refresh) = walk.session().await;
@@ -2257,15 +2433,22 @@ async fn exempt_setup(walk: &mut Walk, name: &str) -> Option<(Caller, String, Bo
                 },
                 "/api/v1/auth/refresh".to_owned(),
                 Body::Json(json!({ "refreshToken": refresh })),
+                Afterwards::Nothing,
             )
         }
         "POST /api/v1/notifications/read" => {
             let approver = walk.approver().await;
             walk.awaiting_approval().await;
+            let user = approver.actor.expect("a user");
+            assert!(
+                unread(&walk.app, user).await > 0,
+                "the approver has something to mark read"
+            );
             (
                 approver,
                 "/api/v1/notifications/read".to_owned(),
                 Body::Json(json!({})),
+                Afterwards::NoneUnreadFor(user),
             )
         }
         "POST /api/v1/notifications/{id}/read" => {
@@ -2283,6 +2466,7 @@ async fn exempt_setup(walk: &mut Walk, name: &str) -> Option<(Caller, String, Bo
                 approver,
                 format!("/api/v1/notifications/{notification}/read"),
                 Body::Json(json!({})),
+                Afterwards::Read(notification),
             )
         }
         "POST /api/v1/integration/external-systems/{id}/endpoints/{endpointId}/test-call" => {
@@ -2310,6 +2494,7 @@ async fn exempt_setup(walk: &mut Walk, name: &str) -> Option<(Caller, String, Bo
                     "/api/v1/integration/external-systems/{system}/endpoints/{endpoint}/test-call"
                 ),
                 Body::Json(json!({})),
+                Afterwards::Nothing,
             )
         }
         _ => return None,
@@ -3104,6 +3289,13 @@ async fn an_approval_is_read_back_from_the_audit_trail_one_decision_at_a_time() 
             &finance_name
         };
         assert_eq!(step["actorUsername"], json!(name), "{step}");
+
+        if index == 0 {
+            assert_eq!(
+                new_value["documentStatus"], "PENDING_APPROVAL",
+                "the manager's approval leaves the document awaiting finance"
+            );
+        }
 
         last_status = new_value["documentStatus"].clone();
     }
