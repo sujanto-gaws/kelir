@@ -1122,6 +1122,16 @@ async function split(ctx, [file, expect]) {
  * through Caddy within 5 s of its own readiness, as it was before #854.
  */
 export const REJOIN_LIMIT_MS = (10 + 2 + 2) * 1000
+
+/**
+ * How many requests must be sent while one backend is stopped for a failover
+ * run to count. It only shows that traffic flowed through the outage: what
+ * shows a retry was exercised is Caddy's own count of a failed dial, checked
+ * beside it. The number that lands in the ~4 s outage follows the runner's
+ * speed (CI read 225, 115, 110 and 46), so a floor of 50 failed a run whose
+ * every request was answered 200; 10 still refuses a run that sent nothing.
+ */
+export const MIN_REQUESTS_WHILE_STOPPED = 10
 export const RESTART_GAP_LIMIT_MS = 5_000
 
 const now = () => Date.now()
@@ -1227,7 +1237,7 @@ export function failoverFailures({ inUse, answers, benches, marks, served }) {
   const checks = [
     [inUse, 'Caddy is not serving the file under test'],
     [ok === answers.total, `${answers.total - ok} of ${answers.total} answered other than 200: ${JSON.stringify(answers.byStatus)}`],
-    [answers.whileOneServed >= 50, `${answers.whileOneServed} requests were sent while one backend was stopped`],
+    [answers.whileOneServed >= MIN_REQUESTS_WHILE_STOPPED, `${answers.whileOneServed} requests were sent while one backend was stopped, fewer than ${MIN_REQUESTS_WHILE_STOPPED}`],
     [served.beforeStop[1] > 0, 'the backend stopped had served nothing before it was, so nothing failed over'],
     [Object.values(benches).some(({ maxFails }) => maxFails > 0), 'Caddy never counted a failed dial, so no retry was exercised'],
     [marks.ready !== undefined, 'the started backend never reported ready'],

@@ -145,6 +145,8 @@ test('a failover passes on 200s alone, a counted refusal and a rejoin in time, a
   fails({ answers: answersOf([...answers, probe(5_000, 502)], 3_000, 9_000) }, /1 of 301 answered other than 200/)
   fails({ answers: answersOf([...answers, probe(5_000, 0)], 3_000, 9_000) }, /\{"0":1,"200":300\}/)
   fails({ answers: answersOf(answers, 20_000, 20_500) }, /while one backend was stopped/)
+  fails({ answers: { ...failoverRun().answers, whileOneServed: 9 } }, /9 requests were sent while one backend was stopped, fewer than 10/)
+  assert.deepEqual(failoverFailures(failoverRun({ answers: { ...failoverRun().answers, whileOneServed: 10 } })), [])
   fails({ benches: benchesOf([{ start: 0, status: [{ address: '10.89.0.3:8080', fails: 0 }] }, { start: 1, status: null }]) }, /never counted a failed dial/)
   fails({ marks: { stop: 3_000, start: 9_000, ready: 12_000 } }, /served nothing through Caddy within 14000 ms/)
   fails({ marks: { stop: 3_000, start: 9_000, ready: 12_000, rejoined: 26_001 } }, /within 14000 ms/)
