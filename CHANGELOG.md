@@ -1185,6 +1185,27 @@ While the major version is `0`, the public API may change in any release.
   owner's connection, not up to two. The connections are now named in
   `pg_stat_activity`: `kelir-migrate` for the owner's, `kelir` for the
   serving role's, unless the URL names them itself.
+- **The shipped Caddyfile spreads traffic across backends**
+  ([#854](https://github.com/sujanto-gaws/kelir/issues/854)). Its
+  upstream is now `dynamic a` on `backend`, re-read every 10 seconds, in
+  round robin, so with the backend scaled each instance gets every other
+  request. A connection an instance refuses, as it does while starting
+  or stopping, is retried on another for up to 5 seconds, and benches it
+  for 2: CI's failover step stopped one of two under traffic and all
+  454 requests answered 200, 115 of them while it was down, the retry
+  counted by Caddy's admin API. A lone backend restarted was served
+  again 1.9 seconds after it was ready (CI's restart step requires 5). Caddy runs no active health
+  check on a dynamic upstream, so a backend that is listening and
+  failing still gets its share; that, and writes during a stop, are
+  unmeasured. Before, `reverse_proxy
+  backend:8080` sent each new connection wherever the name resolved and
+  kept the split in its pool, so 300 requests sent one at a time all
+  reached one instance. CI's `Caddy spreads two backends` job runs two
+  behind the file as shipped and fails unless the split is even within
+  5 %. With one backend, as the shipped compose file starts, the one change
+  is that a restarted backend is served about 2 seconds after it is
+  ready, where the old file served it at once. A deployment that edited its Caddyfile carries the change
+  over by hand.
 
 - **A stop finishes the work in hand**
   ([#856](https://github.com/sujanto-gaws/kelir/issues/856)). On
