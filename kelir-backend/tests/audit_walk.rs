@@ -2585,7 +2585,7 @@ async fn a_governed_change_writes_no_audit_row_on_the_party_issue_1002() {
         .collect();
     assert_eq!(
         events,
-        vec!["Party.Created"],
+        ["Party.Created"],
         "issue #1002: the raise and the settle write nothing on the party"
     );
 }
@@ -2638,7 +2638,7 @@ async fn a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003() {
         .collect();
     assert_eq!(
         seen,
-        vec![("Security.SignInFailed", Some("incorrect password")); 5],
+        [("Security.SignInFailed", Some("incorrect password")); 5],
         "issue #1003: the lock has no row of its own"
     );
     assert!(rows.iter().all(|row| row.object_id == user));
@@ -2655,16 +2655,11 @@ async fn scripted_clamd(reply: &'static str) -> u16 {
         while let Ok((mut socket, _)) = listener.accept().await {
             tokio::spawn(async move {
                 let mut sink = [0_u8; 8192];
-                loop {
-                    match socket.read(&mut sink).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let _ = socket.write_all(reply.as_bytes()).await;
-                            let _ = socket.write_all(b"\0").await;
-                            let _ = socket.shutdown().await;
-                            return;
-                        }
-                    }
+                // The first bytes of the stream are enough: the reply is
+                // scripted, so nothing past them is read.
+                if matches!(socket.read(&mut sink).await, Ok(read) if read > 0) {
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                    let _ = socket.write_all(b"\0").await;
                 }
                 let _ = socket.shutdown().await;
             });
@@ -3052,7 +3047,7 @@ async fn an_approval_is_read_back_from_the_audit_trail_one_decision_at_a_time() 
         assert_eq!(row["objectId"], json!(task.to_string()));
         assert_eq!(row["actorUserId"], json!(actor.to_string()), "who decided");
         assert_eq!(row["action"], "APPROVE", "what was decided");
-        assert_eq!(row["valuesWithheld"], false, "{row}");
+        assert_eq!(row["valuesWithheld"], json!(false), "{row}");
 
         let occurred: DateTime<Utc> = row["occurredAt"]
             .as_str()
