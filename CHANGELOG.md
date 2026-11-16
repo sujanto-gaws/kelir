@@ -1177,9 +1177,9 @@ While the major version is `0`, the public API may change in any release.
   the last `REVOKE` of the narrowing, stayed open, idle, for as long as
   the backend served. The owner migrated through a pool, whose close
   could return with a connection that was still being handed back
-  (launchbadge/sqlx#3217), and since
-  [#856](https://github.com/sujanto-gaws/kelir/issues/856) nothing
-  dropped the closed pool before the server stopped. The owner now has no
+  (sqlx 0.8.6, launchbadge/sqlx#3217), and since
+  [#856](https://github.com/sujanto-gaws/kelir/issues/856)'s fix (#987)
+  nothing dropped the closed pool before the server stopped. The owner now has no
   pool: startup opens one connection as the owner, migrates and narrows
   on it, and closes it before the server binds, so a start takes one
   owner's connection, not up to two. The connections are now named in
