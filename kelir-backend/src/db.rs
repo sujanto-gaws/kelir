@@ -829,7 +829,7 @@ impl StartupPools {
         match &self.owner {
             Some(owner) => {
                 let prepared = migrate_and_narrow(owner, &self.serving).await;
-                owner.close().await;
+                close_pool(owner, "the owner's").await;
                 prepared?;
             }
             None => {
@@ -853,14 +853,51 @@ impl StartupPools {
         Ok(())
     }
 
-    /// Closes both pools: for a stop that ended [`Self::prepare`] part way
-    /// (#856). Closing a pool twice is harmless.
+    /// Closes both pools, through [`close_pool`]: for a stop that ended
+    /// [`Self::prepare`] part way (#856). Closing a pool twice is harmless.
     pub async fn close(&self) {
         if let Some(owner) = &self.owner {
-            owner.close().await;
+            close_pool(owner, "the owner's").await;
         }
 
-        self.serving.close().await;
+        close_pool(&self.serving, "the serving").await;
+    }
+}
+
+/// Closes `pool` and returns once it counts no connection (#991).
+///
+/// **One `close()` is not enough in sqlx-core 0.8.6** (launchbadge/sqlx#3217;
+/// `tests/pool_close.rs` reproduces it). `PoolInner::close` marks the pool
+/// closed, then for each permit count up to `max_connections` drains the idle
+/// queue, breaks if `size()` is 0, and otherwise waits for that many permits,
+/// dropping them at the end of the pass. It returns after the last wait
+/// without draining again. A connection whose return (spawned when a
+/// `PoolConnection` drops) passed `is_closed()` before the close, and whose
+/// ping is answered after the last drain, is pushed onto the idle queue then,
+/// and left there: the pool says it is closed and still counts it, and its
+/// backend stays open until the last handle to the pool drops.
+/// `StartupPools` keeps the owner's handle for the server's whole life
+/// (#987), so that backend was the owner's connection held while serving.
+///
+/// **A second `close()` finds it and cannot hang.** The first returned
+/// holding all `max_connections` permits at once, so at that moment no
+/// connection was checked out or mid-return: each of those holds a permit,
+/// and an idle one does not. A closed pool hands out no connection after
+/// that (`acquire` and `try_acquire` refuse, and the idle reaper uses
+/// `try_acquire`), so whatever it still counts is idle. The second close's
+/// first pass drains and closes it, sees `size()` at 0, and breaks before
+/// waiting on any permit.
+pub async fn close_pool(pool: &PgPool, which: &str) {
+    pool.close().await;
+
+    let left = pool.size();
+    if left > 0 {
+        tracing::warn!(
+            left,
+            "{which} pool still held {left} idle connection(s) after close(), the sqlx 0.8 \
+             race launchbadge/sqlx#3217; closing it again (#991)"
+        );
+        pool.close().await;
     }
 }
 

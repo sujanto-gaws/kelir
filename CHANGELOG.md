@@ -1169,6 +1169,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **The backend holds no connection as the schema's owner while it
+  serves** ([#991](https://github.com/sujanto-gaws/kelir/issues/991),
+  ADR-0051). Sometimes one of the owner's connections, the one that ran
+  the last `REVOKE` of the narrowing, stayed open, idle, for as long as
+  the backend served. The pool's close could return with a connection
+  that was still being handed back (launchbadge/sqlx#3217), and since
+  [#856](https://github.com/sujanto-gaws/kelir/issues/856) nothing
+  dropped the closed pool before the server stopped. The pool is now
+  closed again when it still counts a connection, with a warning in the
+  log. The two pools' connections are now named in `pg_stat_activity`:
+  `kelir-migrate` for the owner's, `kelir` for the serving role's,
+  unless the URL names them itself.
+
 - **A stop finishes the work in hand**
   ([#856](https://github.com/sujanto-gaws/kelir/issues/856)). On
   SIGTERM, which `docker stop` sends, or on Ctrl-C, the backend stops

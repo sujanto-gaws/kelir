@@ -128,8 +128,9 @@ async fn round(app: &TestApp, server: &mut PgConnection, yield_first: bool) -> b
 /// #645 shape, reproduced on demand, with `size() == 1` and the backend idle.
 ///
 /// **When this goes red after a sqlx upgrade, `close()` drains after its last
-/// permit, and the workaround in `common::deadlocks_once_settled`, ending
-/// idle backends the closed pool left, is to be removed.** Up to five rounds,
+/// permit, and the workarounds are to be removed: `common::deadlocks_once_settled`
+/// ending idle backends the closed pool left, and `db::close_pool`'s second
+/// `close()` (#991).** Up to five rounds,
 /// and at least one must leak; the module's note gives the rates.
 #[tokio::test]
 async fn a_connection_returning_while_the_pool_closes_outlives_close() {
