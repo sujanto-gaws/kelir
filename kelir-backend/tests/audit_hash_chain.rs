@@ -39,7 +39,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::audit_chain::{stored_rows, GENESIS};
+use common::audit_chain::{chain_breaks, stored_rows, GENESIS};
 use common::{fixtures, TestApp};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -190,6 +190,10 @@ async fn rewriting_what_a_stored_record_says_it_changed_no_longer_verifies() {
         target.current_hash,
         "the row should verify before it is tampered with"
     );
+    // The shared verifier `audit_walk.rs` runs agrees, before and after: a
+    // verifier never seen to find a break would prove nothing at the walk's end.
+    let breaks = chain_breaks(&stored_rows(&app).await);
+    assert!(breaks.is_empty(), "the untouched chain: {breaks:?}");
 
     fixtures::write_past_the_audit_trigger(
         &app.pool,
@@ -210,6 +214,18 @@ async fn rewriting_what_a_stored_record_says_it_changed_no_longer_verifies() {
         tampered.recomputed(),
         tampered.current_hash,
         "rewriting what the record says it changed left the chain intact"
+    );
+
+    let breaks = chain_breaks(&stored_rows(&app).await);
+    assert_eq!(
+        breaks.len(),
+        1,
+        "the shared verifier finds the one rewritten row: {breaks:?}"
+    );
+    assert!(
+        breaks[0].contains(&target.object_id.to_string())
+            && breaks[0].contains("does not recompute"),
+        "{breaks:?}"
     );
 }
 
