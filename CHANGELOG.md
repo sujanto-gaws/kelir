@@ -1197,6 +1197,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A role's creation, edit and delete audit the row that was stored**
+  ([#1000](https://github.com/sujanto-gaws/kelir/issues/1000),
+  NFR-AUD-001 and 002, FR-AUD-002). Every `Role.*` event held only the
+  permission ids the request sent, so an edit that renamed a role audited
+  `PERMISSION_CHANGE` with no permissions, and a delete audited none.
+  `Role.Created`'s new value, both halves of `Role.Updated` and
+  `Role.Deleted`'s old value now hold `name`, `description` and
+  `permissionIds` as stored. `Role.Updated` is `PERMISSION_CHANGE` only
+  when the set of permissions changed, and `UPDATE` otherwise. Its
+  "before" is read after the edit locks the role's row. Rows written
+  before the fix keep their old shape. The keys are listed in the
+  Database Schema §10.2, "Audit events".
+
 - **A user's creation and edit audit the row that was stored**
   ([#795](https://github.com/sujanto-gaws/kelir/issues/795),
   NFR-AUD-001 and 002, FR-AUD-002). `User.Updated` built its new value
