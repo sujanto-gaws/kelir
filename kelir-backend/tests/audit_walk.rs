@@ -67,11 +67,12 @@
 //! and no test here injects that failure.
 //!
 //! **Content.** A cell asserts that the row exists and whom it names, not what
-//! its `old_value` and `new_value` say. Two rows are known to say the wrong
-//! thing, and each is pinned below by a test named for today's behaviour,
-//! asserting the exact wrong value. **Each passes today. The row that fixes it
-//! inverts the test and renames it**; it is not `#[ignore]`d, and nothing is
-//! weakened to make it pass. Their route cells assert only what is right today.
+//! its `old_value` and `new_value` say. Five findings are pinned below. Each
+//! open one is pinned by a test named for today's behaviour, asserting the
+//! exact wrong value, and passes today. **The row that fixes a finding
+//! inverts its test and renames it**; it is not `#[ignore]`d, and nothing is
+//! weakened to make it pass. A is fixed, and its test asserts the corrected
+//! row. Their route cells assert only what is right today.
 //!
 //! | Finding | Issue | Pinned by |
 //! |---|---|---|
@@ -82,7 +83,7 @@
 //! | E: a scan result writes no row | [#1004] | `a_scan_result_writes_no_audit_row_issue_1004` |
 //!
 //! [#795]'s shape, the request audited for the stored row, was fixed for users
-//! by #994 (row 23). A is the same shape on roles.
+//! by #795's fix (#994, row 23). A was the same shape on roles.
 //!
 //! # The mutations that are not routes
 //!

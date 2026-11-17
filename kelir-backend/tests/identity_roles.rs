@@ -10,7 +10,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{fixtures, TestApp};
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 const PASSWORD: &str = "correct horse battery";
@@ -1168,32 +1168,36 @@ fn sorted(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
-/// The one row of `event_type` on the role, read back through
-/// `GET /api/v1/audit` (FR-AUD-004), with its two halves sorted.
-async fn audited(app: &TestApp, token: &str, role: &str, event_type: &str) -> serde_json::Value {
-    let read = app
-        .get(
-            &format!("/api/v1/audit?objectType=ROLE&objectId={role}&eventType={event_type}"),
-            Some(token),
-        )
-        .await;
+/// Every row of `event_type` on the role, read back through
+/// `GET /api/v1/audit` (FR-AUD-004), each checked for its object, actor and
+/// time, with its two halves sorted.
+async fn audit_rows(app: &TestApp, token: &str, role: &str, event_type: &str) -> Vec<Value> {
+    let uri = format!("/api/v1/audit?objectType=ROLE&objectId={role}&eventType={event_type}");
+    let read = app.get(&uri, Some(token)).await;
     assert_eq!(read.status, StatusCode::OK, "{}", read.body);
-    let rows = read.data().as_array().expect("a page").clone();
-    assert_eq!(rows.len(), 1, "one {event_type} row: {}", read.body);
-    let mut row = rows[0].clone();
-    assert_eq!(row["objectType"], "ROLE");
     let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
         .bind(common::ADMIN_USERNAME)
         .fetch_one(&app.pool)
         .await
         .expect("the administrator");
-    assert_eq!(row["actorUserId"], admin.to_string(), "the actor");
-    assert!(row["occurredAt"].is_string(), "a timestamp: {row}");
-    assert_eq!(row["valuesWithheld"], json!(false), "{row}");
-    for half in ["oldValue", "newValue"] {
-        row[half] = sorted(row[half].take());
+    let mut rows = read.data().as_array().expect("a page").clone();
+    for row in &mut rows {
+        assert_eq!(row["objectType"], "ROLE");
+        assert_eq!(row["actorUserId"], admin.to_string(), "the actor");
+        assert!(row["occurredAt"].is_string(), "a timestamp: {row}");
+        assert_eq!(row["valuesWithheld"], json!(false), "{row}");
+        for half in ["oldValue", "newValue"] {
+            row[half] = sorted(row[half].take());
+        }
     }
-    row
+    rows
+}
+
+/// The one row of `event_type` on the role, as [`audit_rows`] reads it.
+async fn audited(app: &TestApp, token: &str, role: &str, event_type: &str) -> Value {
+    let rows = audit_rows(app, token, role, event_type).await;
+    assert_eq!(rows.len(), 1, "one {event_type} row: {rows:?}");
+    rows[0].clone()
 }
 
 /// **[#1000]: each of a role's events audits the role as stored.** The
@@ -1257,20 +1261,14 @@ async fn a_roles_creation_edits_and_delete_audit_the_stored_row() {
         .await;
     assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
     let third = stored_role(&app, &token, &role).await;
-    let rows = app
-        .get(
-            &format!("/api/v1/audit?objectType=ROLE&objectId={role}&eventType=Role.Updated"),
-            Some(&token),
-        )
-        .await;
-    let rows = rows.data().as_array().expect("a page").clone();
+    let rows = audit_rows(&app, &token, &role, "Role.Updated").await;
     assert_eq!(rows.len(), 2, "one row per edit: {rows:?}");
     let latest = rows
         .iter()
         .find(|row| row["action"] == "PERMISSION_CHANGE")
         .expect("the permission change");
-    assert_eq!(sorted(latest["oldValue"].clone()), second);
-    assert_eq!(sorted(latest["newValue"].clone()), third);
+    assert_eq!(latest["oldValue"], second);
+    assert_eq!(latest["newValue"], third);
     assert_eq!(third["name"], "Senior buyers");
     assert_eq!(third["description"], "Buys things");
 
@@ -1311,7 +1309,8 @@ async fn a_role_edit_resending_its_permissions_is_an_update() {
         .put(
             &format!("/api/v1/identity/roles/{role}"),
             Some(&token),
-            json!({ "permissionIds": [list, read] }),
+            // Stored by code as [list, read]: the request's order differs.
+            json!({ "permissionIds": [read, list] }),
         )
         .await;
     assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
@@ -1320,4 +1319,81 @@ async fn a_role_edit_resending_its_permissions_is_an_update() {
     assert_eq!(row["action"], "UPDATE");
     assert_eq!(row["oldValue"], before);
     assert_eq!(row["newValue"], before);
+}
+
+/// How many requests wait on a row lock of `roles` now.
+async fn waiting_on_roles(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'
+           AND query ~* '\\mroles\\M'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("read pg_stat_activity")
+}
+
+/// **[#1000]: two edits of one role at once audit one history.** The test
+/// holds the role's row `FOR SHARE` until both edits wait on it. The edit
+/// that goes first audits the original row as its "before"; the other audits
+/// the row the first committed. A "before" read ahead of the edit's lock
+/// gives both edits the original.
+///
+/// [#1000]: https://github.com/sujanto-gaws/kelir/issues/1000
+#[tokio::test]
+async fn two_edits_of_one_role_at_once_audit_one_history() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let id = fixtures::create_role_with_permissions(
+        &app.pool,
+        fixtures::SYSTEM_TENANT_ID,
+        "ROLE-AUD-1000-RACE",
+        &[],
+    )
+    .await;
+    let role = id.to_string();
+    let original = stored_role(&app, &token, &role).await;
+
+    let mut holder = app.pool.begin().await.expect("begin the holder");
+    sqlx::query("SELECT 1 FROM roles WHERE id = $1 FOR SHARE")
+        .bind(id)
+        .execute(&mut *holder)
+        .await
+        .expect("hold the role's row");
+    let edits = ["Raced X", "Raced Y"].map(|name| {
+        let (app, token, role) = (std::sync::Arc::clone(&app), token.clone(), role.clone());
+        tokio::spawn(async move {
+            let uri = format!("/api/v1/identity/roles/{role}");
+            app.put(&uri, Some(&token), json!({ "name": name })).await
+        })
+    });
+    let deadline = tokio::time::Instant::now() + common::gate::PATIENCE;
+    while waiting_on_roles(&app).await < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both edits should wait on the row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    holder.rollback().await.expect("release the role's row");
+    for edit in edits {
+        let answered = tokio::time::timeout(common::gate::PATIENCE, edit)
+            .await
+            .expect("an edit never answered")
+            .expect("an edit panicked");
+        assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    }
+
+    let rows = audit_rows(&app, &token, &role, "Role.Updated").await;
+    assert_eq!(rows.len(), 2, "each edit writes one row: {rows:?}");
+    let earlier = rows
+        .iter()
+        .position(|row| row["oldValue"] == original)
+        .expect("one edit's before is the original row");
+    let later = &rows[1 - earlier];
+    assert_eq!(
+        later["oldValue"], rows[earlier]["newValue"],
+        "the later before is the earlier after"
+    );
+    assert_eq!(later["newValue"], stored_role(&app, &token, &role).await);
 }
