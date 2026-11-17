@@ -540,21 +540,25 @@ pub async fn create_role(
 
     repo::replace_role_permissions(&mut transaction, tenant_id, id, &request.permission_ids)
         .await?;
+
+    // What was stored, not what was asked for (#1000): read in the
+    // transaction, as `update_role` reads back (#787).
+    let role = repo::find_role_in(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Role"))?;
     transaction.commit().await?;
 
-    audit_permission_change(
+    audit_role(
         state,
         caller,
         id,
-        "Role.Created",
-        "CREATE",
-        &request.permission_ids,
+        ("Role.Created", "CREATE"),
+        None,
+        Some(&role),
     )
     .await;
 
-    repo::find_role(&state.pool, tenant_id, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Role"))
+    Ok(role)
 }
 
 pub async fn update_role(
@@ -570,6 +574,15 @@ pub async fn update_role(
 
     let tenant_id = caller.tenant_id();
     let mut transaction = state.pool.begin().await?;
+
+    // Locked before it is read, so the "before" this edit audits is the row
+    // its `UPDATE` changes: a second edit waits here for this one (#1000).
+    if !repo::lock_role_for_edit(&mut *transaction, tenant_id, id).await? {
+        return Err(AppError::not_found("Role"));
+    }
+    let before = repo::find_role_in(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Role"))?;
 
     let updated = repo::update_role_fields(
         &mut *transaction,
@@ -599,13 +612,19 @@ pub async fn update_role(
 
     transaction.commit().await?;
 
-    audit_permission_change(
+    // One row, named for what changed (product owner, 2026-11-16, #1000).
+    let action = if before.permissions_differ(&role) {
+        "PERMISSION_CHANGE"
+    } else {
+        "UPDATE"
+    };
+    audit_role(
         state,
         caller,
         id,
-        "Role.Updated",
-        "PERMISSION_CHANGE",
-        request.permission_ids.as_deref().unwrap_or(&[]),
+        ("Role.Updated", action),
+        Some(&before),
+        Some(&role),
     )
     .await;
 
@@ -631,6 +650,11 @@ pub async fn delete_role(
             "System roles cannot be deleted; a tenant would be left unable to grant permissions",
         ));
     }
+
+    // The row the delete removes, read under its lock (#1000).
+    let before = repo::find_role_in(&mut transaction, tenant_id, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Role"))?;
 
     // **D-89** (#487): a role an open task still needs is not deleted. Deleting
     // it would leave the task open and holding its document, and either offered
@@ -682,20 +706,29 @@ pub async fn delete_role(
 
     transaction.commit().await?;
 
-    audit_permission_change(state, caller, id, "Role.Deleted", "DELETE", &[]).await;
+    audit_role(
+        state,
+        caller,
+        id,
+        ("Role.Deleted", "DELETE"),
+        Some(&before),
+        None,
+    )
+    .await;
 
     Ok(())
 }
 
 /// Permission grants are the changes most worth being able to reconstruct
-/// later (SRS FR-AUD-002), so they are always audited with their new set.
-async fn audit_permission_change(
+/// later (SRS FR-AUD-002). Each half is [`Role::audit_value`] of a stored row,
+/// never the request, so it holds the full set of permissions (#1000).
+async fn audit_role(
     state: &AppState,
     caller: &Authenticated,
     role_id: Uuid,
-    event_type: &str,
-    action: &str,
-    permission_ids: &[Uuid],
+    (event_type, action): (&str, &str),
+    before: Option<&Role>,
+    after: Option<&Role>,
 ) {
     audit::record_or_warn(
         &state.pool,
@@ -708,8 +741,8 @@ async fn audit_permission_change(
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
             reason: None,
-            old_value: None,
-            new_value: Some(serde_json::json!({ "permissionIds": permission_ids })),
+            old_value: before.map(Role::audit_value),
+            new_value: after.map(Role::audit_value),
         },
     )
     .await;

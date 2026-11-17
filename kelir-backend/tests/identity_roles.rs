@@ -1136,3 +1136,188 @@ async fn a_caller_without_the_permission_is_refused_before_the_body_is_validated
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1000: a role's creation, edit and delete audit the stored row
+// ---------------------------------------------------------------------------
+
+/// The role as `GET /identity/roles/{id}` answers it, in the keys a `Role.*`
+/// audit half holds: `name`, `description` and every permission id, sorted.
+async fn stored_role(app: &TestApp, token: &str, role: &str) -> serde_json::Value {
+    let read = app
+        .get(&format!("/api/v1/identity/roles/{role}"), Some(token))
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    let role = read.data();
+    let ids = role["permissions"].as_array().expect("permissions");
+    sorted(json!({
+        "name": role["name"],
+        "description": role["description"],
+        "permissionIds": ids.iter().map(|p| p["id"].clone()).collect::<Vec<_>>(),
+    }))
+}
+
+/// `value` with its `permissionIds` sorted, so the order is not compared.
+fn sorted(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(ids) = value
+        .get_mut("permissionIds")
+        .and_then(|i| i.as_array_mut())
+    {
+        ids.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    value
+}
+
+/// The one row of `event_type` on the role, read back through
+/// `GET /api/v1/audit` (FR-AUD-004), with its two halves sorted.
+async fn audited(app: &TestApp, token: &str, role: &str, event_type: &str) -> serde_json::Value {
+    let read = app
+        .get(
+            &format!("/api/v1/audit?objectType=ROLE&objectId={role}&eventType={event_type}"),
+            Some(token),
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    let rows = read.data().as_array().expect("a page").clone();
+    assert_eq!(rows.len(), 1, "one {event_type} row: {}", read.body);
+    let mut row = rows[0].clone();
+    assert_eq!(row["objectType"], "ROLE");
+    let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(common::ADMIN_USERNAME)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the administrator");
+    assert_eq!(row["actorUserId"], admin.to_string(), "the actor");
+    assert!(row["occurredAt"].is_string(), "a timestamp: {row}");
+    assert_eq!(row["valuesWithheld"], json!(false), "{row}");
+    for half in ["oldValue", "newValue"] {
+        row[half] = sorted(row[half].take());
+    }
+    row
+}
+
+/// **[#1000]: each of a role's events audits the role as stored.** The
+/// creation's new value, and both halves of each edit, are the stored row:
+/// a partial edit audits the name and permissions it did not send as they
+/// are, and a padded name trimmed. An edit that changes the permission set is
+/// `PERMISSION_CHANGE`, any other `UPDATE`. The delete audits the row it
+/// removed. Built from the request, every assertion here fails.
+///
+/// [#1000]: https://github.com/sujanto-gaws/kelir/issues/1000
+#[tokio::test]
+async fn a_roles_creation_edits_and_delete_audit_the_stored_row() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let read = permission_id(&app, "identity:user:read").await;
+    let list = permission_id(&app, "identity:role:read").await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-AUD-1000", "name": "  Buyers  ",
+                    "description": "Buys things", "permissionIds": [read] }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let role = created.data()["id"].as_str().expect("an id").to_owned();
+    let first = stored_role(&app, &token, &role).await;
+    assert_eq!(first["name"], "Buyers");
+
+    let row = audited(&app, &token, &role, "Role.Created").await;
+    assert_eq!(row["action"], "CREATE");
+    assert_eq!(row["oldValue"], serde_json::Value::Null);
+    assert_eq!(row["newValue"], first, "the created row as stored");
+
+    // A partial edit: the name only, padded.
+    let edit = app
+        .put(
+            &format!("/api/v1/identity/roles/{role}"),
+            Some(&token),
+            json!({ "name": "  Senior buyers  " }),
+        )
+        .await;
+    assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
+    let second = stored_role(&app, &token, &role).await;
+    let row = audited(&app, &token, &role, "Role.Updated").await;
+    assert_eq!(row["action"], "UPDATE", "the permissions did not change");
+    assert_eq!(row["oldValue"], first);
+    assert_eq!(
+        row["newValue"], second,
+        "the description and permissions it did not send, as stored"
+    );
+
+    // The permission set changes: one row, PERMISSION_CHANGE, both halves whole.
+    let edit = app
+        .put(
+            &format!("/api/v1/identity/roles/{role}"),
+            Some(&token),
+            json!({ "permissionIds": [list, read] }),
+        )
+        .await;
+    assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
+    let third = stored_role(&app, &token, &role).await;
+    let rows = app
+        .get(
+            &format!("/api/v1/audit?objectType=ROLE&objectId={role}&eventType=Role.Updated"),
+            Some(&token),
+        )
+        .await;
+    let rows = rows.data().as_array().expect("a page").clone();
+    assert_eq!(rows.len(), 2, "one row per edit: {rows:?}");
+    let latest = rows
+        .iter()
+        .find(|row| row["action"] == "PERMISSION_CHANGE")
+        .expect("the permission change");
+    assert_eq!(sorted(latest["oldValue"].clone()), second);
+    assert_eq!(sorted(latest["newValue"].clone()), third);
+    assert_eq!(third["name"], "Senior buyers");
+    assert_eq!(third["description"], "Buys things");
+
+    let deleted = app
+        .delete(&format!("/api/v1/identity/roles/{role}"), Some(&token))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    let row = audited(&app, &token, &role, "Role.Deleted").await;
+    assert_eq!(row["action"], "DELETE");
+    assert_eq!(row["oldValue"], third, "the row the delete removed");
+    assert_eq!(row["newValue"], serde_json::Value::Null);
+}
+
+/// **[#1000]: the same permission set sent again, in another order, is an
+/// `UPDATE`.** The action says whether the stored set changed, not whether
+/// the request named permissions.
+///
+/// [#1000]: https://github.com/sujanto-gaws/kelir/issues/1000
+#[tokio::test]
+async fn a_role_edit_resending_its_permissions_is_an_update() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let read = permission_id(&app, "identity:user:read").await;
+    let list = permission_id(&app, "identity:role:read").await;
+
+    let created = app
+        .post(
+            "/api/v1/identity/roles",
+            Some(&token),
+            json!({ "roleCode": "ROLE-AUD-1000-SAME", "name": "Same", "permissionIds": [read, list] }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let role = created.data()["id"].as_str().expect("an id").to_owned();
+    let before = stored_role(&app, &token, &role).await;
+
+    let edit = app
+        .put(
+            &format!("/api/v1/identity/roles/{role}"),
+            Some(&token),
+            json!({ "permissionIds": [list, read] }),
+        )
+        .await;
+    assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
+
+    let row = audited(&app, &token, &role, "Role.Updated").await;
+    assert_eq!(row["action"], "UPDATE");
+    assert_eq!(row["oldValue"], before);
+    assert_eq!(row["newValue"], before);
+}

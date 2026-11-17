@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id FROM roles\n        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL\n        FOR NO KEY UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fce3af72d5c2f91a3b982944b368b81de45d969dcd496ba41bec1da25d122d86"
+}

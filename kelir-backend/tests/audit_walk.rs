@@ -75,7 +75,7 @@
 //!
 //! | Finding | Issue | Pinned by |
 //! |---|---|---|
-//! | A: a role edit audits the request, not the stored row | [#1000] | `a_role_edit_audits_permission_ids_it_was_not_sent_issue_1000` |
+//! | A: a role edit audited the request, not the stored row; fixed | [#1000] | `a_role_edit_audits_the_stored_role_before_and_after` |
 //! | B: a tenant edit audits the request, not the stored row | [#1001] | `a_tenant_status_edit_audits_a_name_it_was_not_sent_issue_1001` |
 //! | C: a change master-data governance applies writes no row on the record | [#1002] | `a_governed_change_writes_no_audit_row_on_the_party_issue_1002` |
 //! | D: a lockout engaging writes no row of its own | [#1003] | `a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003` |
@@ -1740,9 +1740,9 @@ async fn setup(walk: &mut Walk, name: &str) -> Option<Cell> {
             )
         }
         "PUT /api/v1/identity/roles/{id}" => {
-            // What #1000 gets wrong is the row's content, which
-            // `a_role_edit_audits_permission_ids_it_was_not_sent_issue_1000`
-            // pins. This cell sends the ids, and asserts only the row.
+            // The row's content, the stored role (#1000), is
+            // `a_role_edit_audits_the_stored_role_before_and_after`'s.
+            // This cell sends the ids, and asserts only the row.
             let role = walk.role().await;
             let permission = walk.permission("identity:user:read").await;
             cell(
@@ -2526,18 +2526,15 @@ fn the_one<'a>(rows: &'a [StoredRow], event_type: &str) -> &'a StoredRow {
     matching[0]
 }
 
-/// **A, [#1000].** A role edit that sends only a name audits
-/// `PERMISSION_CHANGE`, with `{permissionIds: []}` as its new value and no old
-/// value, while the role keeps the permission it held: the row reads as "every
-/// permission removed" for an edit that removed none.
-///
-/// **Today's behaviour, pinned. The fix inverts this test and renames it**: the
-/// row then carries the stored role before and after, and says nothing of the
-/// permissions this edit did not send.
+/// **A, [#1000], fixed.** A role edit that sends only a name audits `UPDATE`,
+/// not `PERMISSION_CHANGE`, and both halves are the stored role: the name
+/// before and after, and the description and the permission it kept. Until
+/// #1000 the row held `{permissionIds: []}` and no old value, which read as
+/// "every permission removed" for an edit that removed none.
 ///
 /// [#1000]: https://github.com/sujanto-gaws/kelir/issues/1000
 #[tokio::test]
-async fn a_role_edit_audits_permission_ids_it_was_not_sent_issue_1000() {
+async fn a_role_edit_audits_the_stored_role_before_and_after() {
     let mut walk = Walk::start().await;
     let permission = walk.permission("identity:user:read").await;
     let code = format!("ROLE-WALK-A-{}", walk.next());
@@ -2574,13 +2571,19 @@ async fn a_role_edit_audits_permission_ids_it_was_not_sent_issue_1000() {
 
     let row = the_one(&rows, "Role.Updated");
     assert_eq!(row.object_id, role);
-    assert_eq!(row.action, "PERMISSION_CHANGE", "issue #1000: always this");
+    assert_eq!(row.action, "UPDATE", "the permissions did not change");
+    let held =
+        |name: &str| json!({ "name": name, "description": null, "permissionIds": [permission] });
+    assert_eq!(
+        row.old_value,
+        Some(held("Buyers")),
+        "the role before the edit"
+    );
     assert_eq!(
         row.new_value,
-        Some(json!({ "permissionIds": [] })),
-        "issue #1000: the ids it was not sent, as none"
+        Some(held("Senior buyers")),
+        "the role as stored, keeping the permission it was not sent"
     );
-    assert_eq!(row.old_value, None, "issue #1000: no old value");
 }
 
 /// **B, [#1001].** A tenant edit that sends only a status audits `name: null`
