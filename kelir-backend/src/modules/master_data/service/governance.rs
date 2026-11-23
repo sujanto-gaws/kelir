@@ -29,17 +29,108 @@
 //! A record parked at `PENDING_APPROVAL` by a submit that then rolled back
 //! would be a record nobody can edit and no approver can see a document for.
 //!
+//! Each returns the [`GovernedAudit`] its record is owed ([#1002]), for the
+//! caller to write after the commit.
+//!
 //! [#255]: https://github.com/sujanto-gaws/kelir/issues/255
 //! [#322]: https://github.com/sujanto-gaws/kelir/issues/322
+//! [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
 //! [ADR-0033]: ../../../../docs/architectures/adr/0033.%20A%20Governed%20Record%20Parks%20at%20Pending%20Approval.md
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::domain::{self, GovernedEntity, RecordStatus};
 use super::repository as repo;
 use crate::error::AppError;
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::state::AppState;
+
+/// The audit row a governed change owes its record ([#1002]), built in the
+/// transaction that made the change and written after it commits.
+///
+/// **Written by the caller, not here**: the audit chain has one writer,
+/// `audit::record` on the pool ([#995]), and a row inserted in the engine's
+/// transaction would be a second. A rollback then leaves no row either.
+///
+/// [#995]: https://github.com/sujanto-gaws/kelir/issues/995
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[derive(Debug)]
+#[must_use = "a governed change is audited only when this is recorded after the commit"]
+pub struct GovernedAudit {
+    tenant_id: Uuid,
+    entity: GovernedEntity,
+    entity_id: Uuid,
+    actor: Option<Uuid>,
+    step: Step,
+}
+
+/// What happened to the change.
+#[derive(Debug)]
+enum Step {
+    /// Raised: the record parked, from the status it held.
+    Requested { from: RecordStatus },
+    /// Approved and applied: the fields that moved, as stored before and after.
+    Approved { old_value: Value, new_value: Value },
+    /// Refused: nothing was written to the record, so there are no values.
+    Rejected { reason: String },
+}
+
+impl GovernedAudit {
+    /// Writes the row, logging rather than propagating a failure: the change
+    /// has committed, and the caller's answer stands whether or not it lands.
+    pub async fn record(self, pool: &PgPool, ip_address: Option<&str>) {
+        audit::record_or_warn(pool, self.entry(ip_address)).await;
+    }
+
+    fn entry<'a>(&'a self, ip_address: Option<&'a str>) -> AuditEntry<'a> {
+        let (old_value, new_value, reason) = match &self.step {
+            Step::Requested { from } => (
+                Some(json!({ "recordStatusId": from.as_db() })),
+                Some(json!({ "recordStatusId": RecordStatus::PendingApproval.as_db() })),
+                None,
+            ),
+            Step::Approved {
+                old_value,
+                new_value,
+            } => (Some(old_value.clone()), Some(new_value.clone()), None),
+            Step::Rejected { reason } => (None, None, Some(reason.as_str())),
+        };
+
+        AuditEntry {
+            tenant_id: self.tenant_id,
+            event_type: self.event_type(),
+            action: match self.step {
+                Step::Requested { .. } => "CHANGE_REQUEST",
+                Step::Approved { .. } => "APPROVE",
+                Step::Rejected { .. } => "REJECT",
+            },
+            object_type: match self.entity {
+                GovernedEntity::Party => ObjectType::Party,
+                GovernedEntity::Facility => ObjectType::Facility,
+            },
+            object_id: self.entity_id,
+            actor_user_id: self.actor,
+            ip_address,
+            reason,
+            old_value,
+            new_value,
+        }
+    }
+
+    /// The product owner's names, 2026-11-16 (#1002).
+    fn event_type(&self) -> &'static str {
+        match (self.entity, &self.step) {
+            (GovernedEntity::Party, Step::Requested { .. }) => "Party.ChangeRequested",
+            (GovernedEntity::Party, Step::Approved { .. }) => "Party.ChangeApproved",
+            (GovernedEntity::Party, Step::Rejected { .. }) => "Party.ChangeRejected",
+            (GovernedEntity::Facility, Step::Requested { .. }) => "Facility.ChangeRequested",
+            (GovernedEntity::Facility, Step::Approved { .. }) => "Facility.ChangeApproved",
+            (GovernedEntity::Facility, Step::Rejected { .. }) => "Facility.ChangeRejected",
+        }
+    }
+}
 
 /// Whether this document type governs a master-data entity, and which.
 ///
@@ -70,6 +161,8 @@ pub fn governed_entity(target_entity_type: Option<&str>) -> Option<GovernedEntit
 ///    change raised through some other route.
 /// 3. **A change is already in flight** — the partial unique index, which is
 ///    what makes the answer true when two submissions arrive at once.
+///
+/// Returns the `CHANGE_REQUEST` row the caller writes after the commit.
 pub async fn raise(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
@@ -78,7 +171,7 @@ pub async fn raise(
     document_id: Uuid,
     form_data: &Value,
     actor: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<GovernedAudit, AppError> {
     // The change itself, checked at the moment it is proposed rather than at
     // the moment it is approved. See `domain::governance`'s header.
     let _change = domain::read_change(entity, form_data)?;
@@ -140,7 +233,13 @@ pub async fn raise(
         });
     }
 
-    Ok(())
+    Ok(GovernedAudit {
+        tenant_id,
+        entity,
+        entity_id,
+        actor,
+        step: Step::Requested { from: current },
+    })
 }
 
 /// Applies or refuses the change a document was carrying, **in the transaction
@@ -193,26 +292,27 @@ pub async fn raise(
 /// what has been proposed for a record and how each attempt ended, which is the
 /// record's own history rather than the document's.
 ///
-/// **No audit row is written here, and that is a constraint rather than a
-/// choice.** `audit::record` takes a `&PgPool` — the hash chain is written on
-/// its own connection, deliberately, because an audit row is a control over an
-/// action rather than part of it — and this function runs inside a transaction
-/// the workflow engine owns, which holds no pool. Threading `AppState` through
-/// `engine::enter` to reach one would put an application handle into the one
-/// module in this codebase that is written entirely against a transaction.
-/// The document's own approval is audited by the workflow, where the pool is.
+/// **The audit row is returned, not written** ([#1002]); see
+/// [`GovernedAudit`]. An approval's carries the fields that moved, read under
+/// this transaction's lock before and after; a refusal's carries the document
+/// and `ended_as` in `reason`, and no values. A document whose change is
+/// already settled, or that carried none, returns `None`, so a second settle
+/// writes no second row.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
 pub async fn settle(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     document_id: Uuid,
     approved: bool,
+    ended_as: &str,
     form_data: &Value,
     actor: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<Option<GovernedAudit>, AppError> {
     let Some(change) =
         repo::lock_open_change_for_document(transaction, tenant_id, document_id).await?
     else {
-        return Ok(());
+        return Ok(None);
     };
 
     // **Where the record actually is, read under `FOR UPDATE` before anything
@@ -223,7 +323,17 @@ pub async fn settle(
         repo::lock_record_status(transaction, tenant_id, change.entity, change.entity_id).await?;
 
     if !current.is_some_and(RecordStatus::is_parked) {
-        return moved_on(transaction, tenant_id, &change, approved, current, actor).await;
+        return moved_on(
+            transaction,
+            tenant_id,
+            &change,
+            approved,
+            ended_as,
+            current,
+            actor,
+        )
+        .await
+        .map(Some);
     }
 
     let target = if approved {
@@ -232,9 +342,15 @@ pub async fn settle(
         change.previous_record_status
     };
 
-    if approved {
+    // The record as stored before the approval writes it, read under the lock
+    // taken above.
+    let before = if approved {
+        let before = stored(transaction, tenant_id, &change).await?;
         apply(transaction, tenant_id, &change, form_data, actor).await?;
-    }
+        Some(before)
+    } else {
+        None
+    };
 
     let moved = repo::move_record_status_in(
         transaction,
@@ -270,7 +386,93 @@ pub async fn settle(
     )
     .await?;
 
-    Ok(())
+    let step = match before {
+        Some(before) => {
+            let (old_value, new_value) =
+                approved_values(transaction, tenant_id, &change, before).await?;
+            Step::Approved {
+                old_value,
+                new_value,
+            }
+        }
+        None => Step::Rejected {
+            reason: format!(
+                "document {document_id} ended {ended_as}; the change it carried was not applied"
+            ),
+        },
+    };
+
+    Ok(Some(GovernedAudit {
+        tenant_id,
+        entity: change.entity,
+        entity_id: change.entity_id,
+        actor,
+        step,
+    }))
+}
+
+/// A governed record as stored, for an approval's two halves.
+enum Stored {
+    Party(repo::PartyRow),
+    Facility(Box<domain::Facility>),
+}
+
+/// Reads the record this transaction holds locked.
+async fn stored(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    change: &domain::ChangeRequest,
+) -> Result<Stored, AppError> {
+    let read = match change.entity {
+        GovernedEntity::Party => repo::find_party(&mut **transaction, tenant_id, change.entity_id)
+            .await?
+            .map(Stored::Party),
+        GovernedEntity::Facility => {
+            repo::find_facility(&mut **transaction, tenant_id, change.entity_id)
+                .await?
+                .map(|facility| Stored::Facility(Box::new(facility)))
+        }
+    };
+
+    // Unreachable: the row is locked by this transaction, read at
+    // `PENDING_APPROVAL`, and nothing here deletes it.
+    read.ok_or_else(|| AppError::Internal {
+        source: anyhow::anyhow!(
+            "record {} was locked for its approval and then not read",
+            change.entity_id
+        ),
+    })
+}
+
+/// The fields an approval moved, as stored before it and after, in the same
+/// vocabulary as the record's own `*.Updated` rows, with `recordStatusId`.
+async fn approved_values(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    tenant_id: Uuid,
+    change: &domain::ChangeRequest,
+    before: Stored,
+) -> Result<(Value, Value), AppError> {
+    let after = stored(transaction, tenant_id, change).await?;
+
+    let (mut changes, statuses) = match (before, after) {
+        (Stored::Party(before), Stored::Party(after)) => (
+            super::party::party_changes(&before, &after),
+            (before.record_status, after.record_status),
+        ),
+        (Stored::Facility(before), Stored::Facility(after)) => (
+            super::facility::facility_changes(&before, &after),
+            (before.record_status_id, after.record_status_id),
+        ),
+        // Unreachable: both reads are of `change.entity`.
+        _ => {
+            return Err(AppError::Internal {
+                source: anyhow::anyhow!("record {} read as two kinds of record", change.entity_id),
+            })
+        }
+    };
+    changes.field("recordStatusId", &statuses.0, &statuses.1);
+
+    Ok(changes.halves())
 }
 
 /// Settles a change whose record is no longer parked where it left it
@@ -292,22 +494,36 @@ pub async fn settle(
 /// migration to widen the `CHECK` and would tell the record's history something
 /// its reader — `GET /master-data/parties/{id}/change-requests` — has no column
 /// to show. What the document's own status says, and this row does not, is
-/// *why*.
+/// *why*, and the rejection's audit row names it.
 async fn moved_on(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     change: &super::domain::ChangeRequest,
     approved: bool,
+    ended_as: &str,
     current: Option<RecordStatus>,
     actor: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<GovernedAudit, AppError> {
     if approved {
         return Err(domain::moved_since_parked(current));
     }
 
     repo::resolve_change_request(transaction, tenant_id, change.id, "REFUSED", actor).await?;
 
-    Ok(())
+    Ok(GovernedAudit {
+        tenant_id,
+        entity: change.entity,
+        entity_id: change.entity_id,
+        actor,
+        step: Step::Rejected {
+            reason: format!(
+                "document {} ended {ended_as} while the record was {}; the change it carried \
+                 was not applied",
+                change.document_id,
+                current.map_or("gone", RecordStatus::as_db)
+            ),
+        },
+    })
 }
 
 /// What has been proposed for a record, newest first ([#255] AC4).
@@ -441,4 +657,57 @@ fn in_flight_or_else(error: sqlx::Error) -> AppError {
     }
 
     AppError::from(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The product owner's names (#1002), for both entities. Each step's
+    /// values are asserted through the API in `master_data_governance.rs`.
+    #[test]
+    fn each_step_is_named_as_ruled_for_both_entities() {
+        for (entity, object_type) in [
+            (GovernedEntity::Party, ObjectType::Party),
+            (GovernedEntity::Facility, ObjectType::Facility),
+        ] {
+            let steps = [
+                Step::Requested {
+                    from: RecordStatus::Draft,
+                },
+                Step::Approved {
+                    old_value: json!({}),
+                    new_value: json!({}),
+                },
+                Step::Rejected {
+                    reason: String::new(),
+                },
+            ];
+            let names: Vec<String> = steps
+                .into_iter()
+                .map(|step| {
+                    let audit = GovernedAudit {
+                        tenant_id: Uuid::nil(),
+                        entity,
+                        entity_id: Uuid::nil(),
+                        actor: None,
+                        step,
+                    };
+                    let entry = audit.entry(None);
+                    assert_eq!(entry.object_type, object_type);
+                    format!("{} {}", entry.event_type, entry.action)
+                })
+                .collect();
+            let prefix = entity.missing();
+
+            assert_eq!(
+                names,
+                [
+                    format!("{prefix}.ChangeRequested CHANGE_REQUEST"),
+                    format!("{prefix}.ChangeApproved APPROVE"),
+                    format!("{prefix}.ChangeRejected REJECT"),
+                ]
+            );
+        }
+    }
 }

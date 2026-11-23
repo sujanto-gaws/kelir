@@ -71,14 +71,14 @@
 //! open one is pinned by a test named for today's behaviour, asserting the
 //! exact wrong value, and passes today. **The row that fixes a finding
 //! inverts its test and renames it**; it is not `#[ignore]`d, and nothing is
-//! weakened to make it pass. A and B are fixed, and their tests assert the
+//! weakened to make it pass. A, B and C are fixed, and their tests assert the
 //! corrected rows. Their route cells assert only what is right today.
 //!
 //! | Finding | Issue | Pinned by |
 //! |---|---|---|
 //! | A: a role edit audited the request, not the stored row; fixed | [#1000] | `a_role_edit_audits_the_stored_role_before_and_after` |
 //! | B: a tenant edit audited the request, not the stored row; fixed | [#1001] | `a_tenant_status_edit_audits_the_stored_tenant_before_and_after` |
-//! | C: a change master-data governance applies writes no row on the record | [#1002] | `a_governed_change_writes_no_audit_row_on_the_party_issue_1002` |
+//! | C: a change master-data governance applied wrote no row on the record; fixed | [#1002] | `a_governed_change_audits_the_party_when_raised_and_when_settled` |
 //! | D: a lockout engaging writes no row of its own | [#1003] | `a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003` |
 //! | E: a scan result writes no row | [#1004] | `a_scan_result_writes_no_audit_row_issue_1004` |
 //!
@@ -95,7 +95,7 @@
 //! | Tenant provisioning | audited as `Tenant.Created` | the `POST /api/v1/organization/tenants` cell |
 //! | Automatic transitions and system-raised tasks | the triggering decision's row only | `an_automatic_step_writes_no_audit_row_of_its_own_issue_1005` |
 //! | The attachment scan worker | nothing | E above |
-//! | Master-data governance's raise, and its settle | nothing on the record | C above |
+//! | Master-data governance's raise, and its settle | one row each on the record | C above |
 //! | The lockout | nothing of its own | D above |
 //! | The notification worker, the outbox worker | nothing; **ruled exempt** | `the_notification_and_outbox_workers_write_no_audit_row_as_ruled` |
 //! | The permission grants in migrations | nothing; **ruled exempt** (I): the migration history is their trace | no test: a migration runs before any tenant has a chain to write to, and `_sqlx_migrations` records each one with its checksum |
@@ -2657,18 +2657,16 @@ async fn change_form(walk: &mut Walk) -> Uuid {
     form
 }
 
-/// **C, [#1002].** A change master-data governance raises parks the party,
-/// and the approval that settles it applies its fields; **neither writes an
-/// audit row on the party.** Its trail holds `Party.Created` and nothing after,
-/// though its status moved twice and its fields once.
-///
-/// **Today's behaviour, pinned. The fix inverts this test and renames it**: the
-/// raise and the settle each write a row on the party, read back through
-/// `GET /api/v1/audit`.
+/// **C, [#1002], fixed.** A change master-data governance raises parks the
+/// party, and the approval that settles it applies its fields; each writes one
+/// row on the party. Until #1002 neither did, and the trail held
+/// `Party.Created` and nothing after, though the party's status moved twice and
+/// its fields once. `master_data_governance.rs` reads the same rows back
+/// through `GET /api/v1/audit`, with a rejection's and a facility's.
 ///
 /// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
 #[tokio::test]
-async fn a_governed_change_writes_no_audit_row_on_the_party_issue_1002() {
+async fn a_governed_change_audits_the_party_when_raised_and_when_settled() {
     let mut walk = Walk::start().await;
     let reviewer = walk.approver().await;
     let reviewer_id = reviewer.actor.expect("a user");
@@ -2781,14 +2779,37 @@ async fn a_governed_change_writes_no_audit_row_on_the_party_issue_1002() {
         .into_iter()
         .filter(|row| row.object_id == party)
         .collect();
-    let events: Vec<&str> = on_the_party
+    let events: Vec<(&str, &str)> = on_the_party
         .iter()
-        .map(|row| row.event_type.as_str())
+        .map(|row| (row.event_type.as_str(), row.action.as_str()))
         .collect();
     assert_eq!(
         events,
-        ["Party.Created"],
-        "issue #1002: the raise and the settle write nothing on the party"
+        [
+            ("Party.Created", "CREATE"),
+            ("Party.ChangeRequested", "CHANGE_REQUEST"),
+            ("Party.ChangeApproved", "APPROVE"),
+        ],
+        "the raise and the settle each write one row on the party"
+    );
+    assert_eq!(
+        on_the_party[1].actor_user_id,
+        Some(walk.admin_id),
+        "the submitter"
+    );
+    assert_eq!(
+        on_the_party[2].actor_user_id,
+        Some(reviewer_id),
+        "the approver"
+    );
+    assert_eq!(
+        on_the_party[2].new_value,
+        Some(json!({
+            "externalId": "SUP-9002",
+            "description": "approved by the manager",
+            "recordStatusId": "ACTIVE",
+        })),
+        "the party as stored after the approval"
     );
 }
 

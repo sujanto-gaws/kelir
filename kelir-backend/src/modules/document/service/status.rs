@@ -43,6 +43,7 @@ use super::super::DOCUMENT_TRANSITION;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
+use crate::modules::master_data::service::governance::GovernedAudit;
 use crate::state::AppState;
 
 /// Moves one document to a new status, or refuses and says why.
@@ -299,26 +300,32 @@ pub struct StatusHistoryEntry {
 ///
 /// **Most documents carry no change**, and for them this is one status write and
 /// one indexed read that finds nothing.
+///
+/// # What it returns is written after the commit ([#1002])
+///
+/// A settled change owes its record an audit row, and the engine's transaction
+/// holds no pool to write one on. The row comes back as an [`AfterCommit`],
+/// which the engine carries out without opening, and the caller that commits
+/// records it.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
 pub async fn project_from_workflow(
     transaction: &mut sqlx::PgTransaction<'_>,
     tenant_id: Uuid,
     document_id: Uuid,
     status: DocumentStatus,
     actor: Option<Uuid>,
-) -> Result<u64, AppError> {
-    let affected = super::super::repository::set_status_from_workflow(
-        transaction,
-        tenant_id,
-        document_id,
-        status,
-    )
-    .await?;
+) -> Result<AfterCommit, AppError> {
+    super::super::repository::set_status_from_workflow(transaction, tenant_id, document_id, status)
+        .await?;
 
     let settlement = match status {
         DocumentStatus::Approved | DocumentStatus::Completed => Some(true),
         DocumentStatus::Rejected | DocumentStatus::Cancelled => Some(false),
         _ => None,
     };
+
+    let mut after_commit = AfterCommit::default();
 
     if let Some(approved) = settlement {
         // The payload the approver saw, read here rather than carried: it is
@@ -328,16 +335,52 @@ pub async fn project_from_workflow(
                 .await?
                 .unwrap_or_else(|| serde_json::json!({}));
 
-        crate::modules::master_data::service::governance::settle(
+        let settled = crate::modules::master_data::service::governance::settle(
             transaction,
             tenant_id,
             document_id,
             approved,
+            status.as_db(),
             &form_data,
             actor,
         )
         .await?;
+
+        after_commit.audits.extend(settled);
     }
 
-    Ok(affected)
+    Ok(after_commit)
+}
+
+/// What a projection leaves to be written once its transaction has committed
+/// ([#1002]): the audit row of a governed change it settled. **Opaque to the
+/// engine**, which carries it to its caller and learns nothing about master
+/// data from it; whoever commits calls [`AfterCommit::record`].
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[derive(Debug, Default)]
+#[must_use = "a settled change is audited only when this is recorded after the commit"]
+pub struct AfterCommit {
+    audits: Vec<GovernedAudit>,
+}
+
+impl AfterCommit {
+    /// The raise of a governed change, which the submit makes itself.
+    pub fn raised(raised: Option<GovernedAudit>) -> Self {
+        Self {
+            audits: raised.into_iter().collect(),
+        }
+    }
+
+    /// Adds what a later projection in the same transaction left.
+    pub fn absorb(&mut self, other: AfterCommit) {
+        self.audits.extend(other.audits);
+    }
+
+    /// Writes each row, in the order the transaction made them.
+    pub async fn record(self, pool: &sqlx::PgPool, ip_address: Option<&str>) {
+        for audit in self.audits {
+            audit.record(pool, ip_address).await;
+        }
+    }
 }

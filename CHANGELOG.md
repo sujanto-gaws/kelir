@@ -1197,6 +1197,18 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A master-data change routed through approval is audited on its record**
+  ([#1002](https://github.com/sujanto-gaws/kelir/issues/1002),
+  NFR-AUD-001, 003 and 004, FR-MDM-009). Raising a governed change parked a
+  Party or Facility at `PENDING_APPROVAL`, and the decision that settled it
+  applied or refused it, with no audit row on the record. A submit now writes
+  `Party.ChangeRequested` (or `Facility.`), and the settling decision
+  `Party.ChangeApproved`, with the fields that moved before and after, or
+  `Party.ChangeRejected`, with the reason and no values. The values are read
+  in the settling transaction; the rows are written after it commits, by the
+  audit chain's one writer. A change already settled writes no second row.
+  The events are listed in the Database Schema §10.2, "Audit events".
+
 - **A tenant edit audits the row that was stored**
   ([#1001](https://github.com/sujanto-gaws/kelir/issues/1001),
   NFR-AUD-001 and 002, FR-AUD-002). `Tenant.Updated` built its new value

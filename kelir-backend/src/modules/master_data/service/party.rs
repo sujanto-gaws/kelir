@@ -495,7 +495,7 @@ pub async fn update_party(
 /// the record, and putting them there is a wider question than the one #135
 /// asks — what a *replacement* of a list even means as a before and an after.
 /// `partyId` and `partyTypeId` are absent because no update can move them.
-fn party_changes(before: &PartyRow, after: &PartyRow) -> ChangeSet {
+pub(super) fn party_changes(before: &PartyRow, after: &PartyRow) -> ChangeSet {
     let mut changes = ChangeSet::new();
 
     changes.field("statusId", &before.status, &after.status);

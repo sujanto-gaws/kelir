@@ -323,6 +323,9 @@ pub struct Started {
     pub instance_id: Uuid,
     pub instance_ref: String,
     pub document_status: DocumentStatus,
+    /// What the projection left for the caller to write after its commit
+    /// ([#1002](https://github.com/sujanto-gaws/kelir/issues/1002)).
+    pub after_commit: document_status_service::AfterCommit,
 }
 
 /// Starts an instance of a published definition, in the caller's transaction.
@@ -501,7 +504,7 @@ pub async fn start(
     )
     .await?;
 
-    let document_status = enter(
+    let (document_status, after_commit) = enter(
         transaction,
         request.tenant_id,
         instance_id,
@@ -518,6 +521,7 @@ pub async fn start(
         instance_id,
         instance_ref,
         document_status,
+        after_commit,
     })
 }
 
@@ -626,6 +630,9 @@ pub struct Fired {
     pub to_state: String,
     pub document_status: DocumentStatus,
     pub outcome: Option<InstanceOutcome>,
+    /// What the projection left for the caller to write after its commit
+    /// ([#1002](https://github.com/sujanto-gaws/kelir/issues/1002)).
+    pub after_commit: document_status_service::AfterCommit,
 }
 
 /// Fires a transition on a locked instance.
@@ -857,7 +864,7 @@ pub async fn fire(
     )
     .await?;
 
-    let document_status = enter(
+    let (document_status, after_commit) = enter(
         transaction,
         tenant_id,
         instance_id,
@@ -875,6 +882,7 @@ pub async fn fire(
         to_state: chosen.to.clone(),
         document_status,
         outcome,
+        after_commit,
     })
 }
 
@@ -900,9 +908,9 @@ async fn enter(
     actor: Option<Uuid>,
     context: AssignmentContext,
     evaluation: &EvaluationContext,
-) -> Result<DocumentStatus, AppError> {
+) -> Result<(DocumentStatus, document_status_service::AfterCommit), AppError> {
     let mut current = state;
-    let mut status = enter_once(
+    let (mut status, mut after_commit) = enter_once(
         transaction,
         tenant_id,
         instance_id,
@@ -944,7 +952,7 @@ async fn enter(
         };
 
         current = next;
-        status = enter_once(
+        let (next_status, left) = enter_once(
             transaction,
             tenant_id,
             instance_id,
@@ -955,6 +963,8 @@ async fn enter(
             context,
         )
         .await?;
+        status = next_status;
+        after_commit.absorb(left);
 
         if step + 1 == MAX_AUTOMATIC_STEPS {
             // **A loop of service states is refused, not run forever.** S6
@@ -971,7 +981,7 @@ async fn enter(
         }
     }
 
-    Ok(status)
+    Ok((status, after_commit))
 }
 
 /// How many `AUTO` transitions one entry may take before the definition is
@@ -1421,7 +1431,7 @@ async fn enter_once(
     state: &State,
     actor: Option<Uuid>,
     context: AssignmentContext,
-) -> Result<DocumentStatus, AppError> {
+) -> Result<(DocumentStatus, document_status_service::AfterCommit), AppError> {
     // **A service task writes no task row** ([#339] AC2), which is the defect
     // this issue is really about: before it, a `SERVICE_TASK` generated a human
     // task that sat in somebody's inbox waiting for a person who was not
@@ -1685,7 +1695,7 @@ async fn project_document_status(
     maps_to: &str,
     graph: &Graph,
     actor: Option<Uuid>,
-) -> Result<DocumentStatus, AppError> {
+) -> Result<(DocumentStatus, document_status_service::AfterCommit), AppError> {
     let status = parse_document_status(maps_to).ok_or_else(|| AppError::Internal {
         source: anyhow::anyhow!(
             "workflow `{}` maps a state to `{maps_to}`, which is not a document status",
@@ -1699,7 +1709,7 @@ async fn project_document_status(
     // that carries a master-data change settles it there, in this transaction;
     // nothing here knows that master data exists, and no `match` on entity type
     // is reachable from this module.
-    document_status_service::project_from_workflow(
+    let after_commit = document_status_service::project_from_workflow(
         transaction,
         tenant_id,
         document_id,
@@ -1708,7 +1718,7 @@ async fn project_document_status(
     )
     .await?;
 
-    Ok(status)
+    Ok((status, after_commit))
 }
 
 /// Computes and stores the instance's variables (FR-WF-014, [#175] AC2).

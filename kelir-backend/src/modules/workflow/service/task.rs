@@ -1217,6 +1217,14 @@ pub async fn decide(
     )
     .await;
 
+    // **And the record a governed change settled** (#1002), after the
+    // decision's own row: built in the transaction, written now it has
+    // committed, by the chain's one writer.
+    fired
+        .after_commit
+        .record(&state.pool, caller.ip_address())
+        .await;
+
     Ok(DecisionResult {
         task_id: id,
         workflow_instance_id: instance.id,
