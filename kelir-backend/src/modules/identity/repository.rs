@@ -1125,6 +1125,34 @@ pub async fn update_role_fields(
     .map(|result| result.rows_affected())
 }
 
+/// Locks a live role's row for an edit, before the edit reads it, so the role
+/// it audits as "before" is the one its `UPDATE` changes ([#1000]). `false`
+/// when there is no live role by that id in the tenant.
+///
+/// `FOR NO KEY UPDATE`, the lock the edit's own `UPDATE` takes, a statement
+/// earlier. It does not conflict with the `FOR KEY SHARE` a transition or a
+/// publish holds on a role (**D-89**, **D-111**), as the edit never did.
+///
+/// [#1000]: https://github.com/sujanto-gaws/kelir/issues/1000
+pub async fn lock_role_for_edit(
+    executor: impl PgExecutor<'_>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let locked = sqlx::query_scalar!(
+        r#"
+        SELECT id FROM roles
+        WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR NO KEY UPDATE
+        "#,
+        tenant_id,
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(locked.is_some())
+}
+
 /// Locks a live role's row for a delete, answering whether it is a system role.
 ///
 /// `FOR UPDATE` rather than the `FOR NO KEY UPDATE` the delete's own `UPDATE`

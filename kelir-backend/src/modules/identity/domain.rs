@@ -375,6 +375,35 @@ pub struct Role {
     pub open_tasks: Option<i64>,
 }
 
+impl Role {
+    /// The fields a role edit can change, as this row holds them: the value of
+    /// every `Role.*` audit half ([#1000]). Built from a stored row, never a
+    /// request, which holds nothing for a field it did not send.
+    ///
+    /// [#1000]: https://github.com/sujanto-gaws/kelir/issues/1000
+    pub fn audit_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "permissionIds": self.permission_ids(),
+        })
+    }
+
+    /// Whether `other` holds a different set of permissions, whatever order
+    /// each was read in: `Role.Updated`'s `PERMISSION_CHANGE`, else `UPDATE`.
+    pub fn permissions_differ(&self, other: &Role) -> bool {
+        let mut mine = self.permission_ids();
+        let mut theirs = other.permission_ids();
+        mine.sort_unstable();
+        theirs.sort_unstable();
+        mine != theirs
+    }
+
+    fn permission_ids(&self) -> Vec<Uuid> {
+        self.permissions.iter().map(|p| p.id).collect()
+    }
+}
+
 /// Fills each role's `liveHolders` and `openTasks` from the two counts, keyed
 /// by role id ([#508]). A role absent from a map has none, and reads `0`: each
 /// count leaves out a role it found nothing for.
@@ -896,6 +925,41 @@ mod tests {
 
     /// #795: the audit value is the row's five fields, with a department
     /// the user is not in as `null` and the roles as their ids.
+    fn role_holding(permission_ids: &[Uuid]) -> Role {
+        Role {
+            id: Uuid::now_v7(),
+            role_code: "ROLE-X".to_owned(),
+            name: "X".to_owned(),
+            description: None,
+            is_system: false,
+            permissions: permission_ids
+                .iter()
+                .map(|&id| Permission {
+                    id,
+                    permission_code: id.to_string(),
+                    module: "identity".to_owned(),
+                    description: None,
+                })
+                .collect(),
+            live_holders: None,
+            open_tasks: None,
+        }
+    }
+
+    /// #1000: a role's audit value is its three fields, the description as
+    /// `null` when it has none, and the action compares sets.
+    #[test]
+    fn a_roles_audit_value_is_its_stored_fields_and_sets_are_compared() {
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        assert_eq!(
+            role_holding(&[a]).audit_value(),
+            serde_json::json!({ "name": "X", "description": null, "permissionIds": [a] })
+        );
+        assert!(!role_holding(&[a, b]).permissions_differ(&role_holding(&[b, a])));
+        assert!(role_holding(&[a, b]).permissions_differ(&role_holding(&[a])));
+        assert!(role_holding(&[a]).permissions_differ(&role_holding(&[])));
+    }
+
     #[test]
     fn a_users_audit_value_is_its_stored_fields() {
         let department = Uuid::now_v7();
