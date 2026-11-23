@@ -328,7 +328,7 @@ impl TestApp {
             .router()
             .oneshot(request)
             .await
-            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+            .unwrap_or_else(|never| match never {});
 
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX)
@@ -490,7 +490,7 @@ impl TestApp {
             .router()
             .oneshot(request)
             .await
-            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+            .unwrap_or_else(|never| match never {});
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -535,7 +535,7 @@ impl TestApp {
             .router()
             .oneshot(request)
             .await
-            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+            .unwrap_or_else(|never| match never {});
 
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX)
@@ -589,7 +589,7 @@ impl TestApp {
             .router()
             .oneshot(request)
             .await
-            .unwrap_or_else(|error| harness_failure("drive the router", &error.to_string(), uri));
+            .unwrap_or_else(|never| match never {});
 
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX)
