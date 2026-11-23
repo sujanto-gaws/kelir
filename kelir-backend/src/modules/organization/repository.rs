@@ -22,6 +22,14 @@ pub struct TenantRecord {
     pub created_at: DateTime<Utc>,
 }
 
+impl TenantRecord {
+    /// The fields a tenant edit can change, as this stored row holds them:
+    /// each half of `Tenant.Updated`, never built from the request (#1001).
+    pub fn audit_value(&self) -> serde_json::Value {
+        serde_json::json!({ "name": self.name, "status": self.status })
+    }
+}
+
 /// Looks a tenant up by its canonical code.
 ///
 /// The one query in the system that does not filter `tenant_id`: `tenants` is
@@ -262,6 +270,20 @@ pub async fn insert(
     .execute(executor)
     .await
     .map(|_| ())
+}
+
+/// Locks a live tenant's row before an edit reads it, so its audited "before"
+/// is the row its `UPDATE` changes (#1001); `false` when there is none. The
+/// `UPDATE`'s own lock, a statement early: no conflict with the `FOR KEY SHARE`
+/// a row inserted under the tenant takes. No `tenant_id` filter, as [`find`].
+pub async fn lock_for_edit(executor: impl PgExecutor<'_>, id: Uuid) -> Result<bool, sqlx::Error> {
+    let locked = sqlx::query_scalar!(
+        "SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR NO KEY UPDATE",
+        id
+    )
+    .fetch_optional(executor)
+    .await?;
+    Ok(locked.is_some())
 }
 
 /// Applies the fields an update actually carries, leaving the rest alone.

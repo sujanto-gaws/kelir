@@ -464,10 +464,6 @@ pub async fn update_tenant(
 
     validate_update_tenant(&request)?;
 
-    let before = repository::find(&state.pool, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Tenant"))?;
-
     // Suspending the tenant the request came from would stop the session making
     // the request being renewed, and there would then be nobody able to undo it
     // — the same refusal `deactivate_user` gives for your own account, for the
@@ -484,6 +480,15 @@ pub async fn update_tenant(
     // between the two, which answered 500 for a change that committed (#787).
     let mut transaction = state.pool.begin().await?;
 
+    // Locked before it is read, so the "before" this edit audits is the row
+    // its `UPDATE` changes: a second edit waits here for this one (#1001).
+    if !repository::lock_for_edit(&mut *transaction, id).await? {
+        return Err(AppError::not_found("Tenant"));
+    }
+    let before = repository::find(&mut *transaction, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Tenant"))?;
+
     let updated = repository::update_fields(
         &mut *transaction,
         id,
@@ -499,7 +504,6 @@ pub async fn update_tenant(
 
     let after = repository::find(&mut *transaction, id)
         .await?
-        .map(|record| view(record, administering.id))
         .ok_or_else(|| AppError::Internal {
             source: anyhow::anyhow!("tenant {id} vanished between writing and reading it"),
         })?;
@@ -532,19 +536,14 @@ pub async fn update_tenant(
             actor_user_id: Some(caller.user_id()),
             ip_address: caller.ip_address(),
             reason: None,
-            old_value: Some(serde_json::json!({
-                "name": before.name,
-                "status": before.status,
-            })),
-            new_value: Some(serde_json::json!({
-                "name": request.name,
-                "status": request.status,
-            })),
+            // Both halves stored rows, never the request (#1001).
+            old_value: Some(before.audit_value()),
+            new_value: Some(after.audit_value()),
         },
     )
     .await;
 
-    Ok(after)
+    Ok(view(after, administering.id))
 }
 
 /// Soft-deletes a tenant and revokes its refresh tokens.
