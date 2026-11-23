@@ -1197,6 +1197,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A tenant edit audits the row that was stored**
+  ([#1001](https://github.com/sujanto-gaws/kelir/issues/1001),
+  NFR-AUD-001 and 002, FR-AUD-002). `Tenant.Updated` built its new value
+  from the request, so an edit that sent only a status audited the name as
+  `null`. Both halves now hold `name` and `status` as stored, and "before" is
+  read after the edit locks the tenant's row, so two concurrent edits audit
+  one history. Rows written before the fix keep their old shape. The keys
+  are listed in the Database Schema §10.2, "Audit events".
+
 - **A role's creation, edit and delete audit the row that was stored**
   ([#1000](https://github.com/sujanto-gaws/kelir/issues/1000),
   NFR-AUD-001 and 002, FR-AUD-002). Every `Role.*` event held only the

@@ -71,19 +71,19 @@
 //! open one is pinned by a test named for today's behaviour, asserting the
 //! exact wrong value, and passes today. **The row that fixes a finding
 //! inverts its test and renames it**; it is not `#[ignore]`d, and nothing is
-//! weakened to make it pass. A is fixed, and its test asserts the corrected
-//! row. Their route cells assert only what is right today.
+//! weakened to make it pass. A and B are fixed, and their tests assert the
+//! corrected rows. Their route cells assert only what is right today.
 //!
 //! | Finding | Issue | Pinned by |
 //! |---|---|---|
 //! | A: a role edit audited the request, not the stored row; fixed | [#1000] | `a_role_edit_audits_the_stored_role_before_and_after` |
-//! | B: a tenant edit audits the request, not the stored row | [#1001] | `a_tenant_status_edit_audits_a_name_it_was_not_sent_issue_1001` |
+//! | B: a tenant edit audited the request, not the stored row; fixed | [#1001] | `a_tenant_status_edit_audits_the_stored_tenant_before_and_after` |
 //! | C: a change master-data governance applies writes no row on the record | [#1002] | `a_governed_change_writes_no_audit_row_on_the_party_issue_1002` |
 //! | D: a lockout engaging writes no row of its own | [#1003] | `a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003` |
 //! | E: a scan result writes no row | [#1004] | `a_scan_result_writes_no_audit_row_issue_1004` |
 //!
 //! [#795]'s shape, the request audited for the stored row, was fixed for users
-//! by #795's fix (#994, row 23). A was the same shape on roles.
+//! by #795's fix (#994, row 23). A was the same shape on roles, B on tenants.
 //!
 //! # The mutations that are not routes
 //!
@@ -2096,9 +2096,9 @@ async fn setup(walk: &mut Walk, name: &str) -> Option<Cell> {
             )
         }
         "PUT /api/v1/organization/tenants/{id}" => {
-            // What #1001 gets wrong is the row's content, which
-            // `a_tenant_status_edit_audits_a_name_it_was_not_sent_issue_1001`
-            // pins. This cell asserts only the row.
+            // The row's content, the stored tenant (#1001), is
+            // `a_tenant_status_edit_audits_the_stored_tenant_before_and_after`'s.
+            // This cell asserts only the row.
             let tenant = walk.tenant().await;
             cell(
                 walk.admin(),
@@ -2587,15 +2587,13 @@ async fn a_role_edit_audits_the_stored_role_before_and_after() {
     );
 }
 
-/// **B, [#1001].** A tenant edit that sends only a status audits `name: null`
-/// as its new value: `Tenant.Updated` is built from the request.
-///
-/// **Today's behaviour, pinned. The fix inverts this test and renames it**: the
-/// row then carries the stored tenant, and no null for the name it kept.
+/// **B, [#1001], fixed.** A tenant edit that sends only a status audits the
+/// stored tenant before and after: the name it kept, not `null`. Until #1001
+/// the new value was the request, `{name: null, status: "SUSPENDED"}`.
 ///
 /// [#1001]: https://github.com/sujanto-gaws/kelir/issues/1001
 #[tokio::test]
-async fn a_tenant_status_edit_audits_a_name_it_was_not_sent_issue_1001() {
+async fn a_tenant_status_edit_audits_the_stored_tenant_before_and_after() {
     let mut walk = Walk::start().await;
     let tenant = walk.tenant().await;
 
@@ -2622,8 +2620,8 @@ async fn a_tenant_status_edit_audits_a_name_it_was_not_sent_issue_1001() {
     );
     assert_eq!(
         row.new_value,
-        Some(json!({ "name": null, "status": "SUSPENDED" })),
-        "issue #1001: the name it was not sent, as null"
+        Some(json!({ "name": "A walked tenant", "status": "SUSPENDED" })),
+        "the tenant as stored, keeping the name it was not sent"
     );
 }
 

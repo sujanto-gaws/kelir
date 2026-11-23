@@ -1399,6 +1399,114 @@ async fn creating_a_tenant_is_recorded_against_the_tenant_that_created_it() {
     );
 }
 
+/// The tenant's audited keys, as `GET` reads it back.
+async fn stored_tenant(app: &TestApp, token: &str, tenant: &str) -> serde_json::Value {
+    let read = app.get(&format!("{TENANTS}/{tenant}"), Some(token)).await;
+    json!({ "name": read.data()["name"], "status": read.data()["status"] })
+}
+
+/// Every `Tenant.Updated` row on the tenant, read back through
+/// `GET /api/v1/audit` (FR-AUD-004) by a holder of `organization:tenant:read`.
+async fn tenant_updates(app: &TestApp, token: &str, tenant: &str) -> Vec<serde_json::Value> {
+    let uri = format!("/api/v1/audit?objectType=TENANT&objectId={tenant}&eventType=Tenant.Updated");
+    let read = app.get(&uri, Some(token)).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    read.data().as_array().expect("a page").clone()
+}
+
+/// **#1001: a partial tenant edit audits the stored tenant.** A status-only
+/// edit audits the name it kept, not `null`; a name-only edit the status it
+/// kept and the name as stored, trimmed. Each "before" is the row replaced.
+#[tokio::test]
+async fn a_partial_tenant_edit_audits_the_stored_tenant_before_and_after() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let tenant = created(&app, &token, "ACME").await.to_string();
+
+    let mut history = vec![stored_tenant(&app, &token, &tenant).await];
+    for edit in [
+        json!({ "status": "SUSPENDED" }),
+        json!({ "name": " Acme Renamed " }),
+    ] {
+        let edited = app
+            .put(&format!("{TENANTS}/{tenant}"), Some(&token), edit)
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        history.push(stored_tenant(&app, &token, &tenant).await);
+    }
+    assert_eq!(
+        history[2],
+        json!({ "name": "Acme Renamed", "status": "SUSPENDED" })
+    );
+
+    let rows = tenant_updates(&app, &token, &tenant).await;
+    assert_eq!(rows.len(), 2, "one row per edit: {rows:?}");
+    for step in history.windows(2) {
+        let row = rows.iter().find(|row| row["oldValue"] == step[0]);
+        assert_eq!(row.map(|row| &row["newValue"]), Some(&step[1]), "{rows:?}");
+    }
+}
+
+/// **#1001: two edits of one tenant at once audit one history.** The row is
+/// held `FOR SHARE` until both edits wait on it. The later edit's "before" is
+/// the earlier's "after"; read ahead of the lock, both are the original.
+#[tokio::test]
+async fn two_edits_of_one_tenant_at_once_audit_one_history() {
+    let app = std::sync::Arc::new(TestApp::spawn().await);
+    let token = app.administrator_token().await;
+    let id = created(&app, &token, "ACME").await;
+    let (tenant, uri) = (id.to_string(), format!("{TENANTS}/{id}"));
+    let original = stored_tenant(&app, &token, &tenant).await;
+
+    let mut holder = app.pool.begin().await.expect("begin the holder");
+    sqlx::query("SELECT 1 FROM tenants WHERE id = $1 FOR SHARE")
+        .bind(id)
+        .execute(&mut *holder)
+        .await
+        .expect("hold the tenant's row");
+    let edits = ["Raced X", "Raced Y"].map(|name| {
+        let (app, token, uri) = (std::sync::Arc::clone(&app), token.clone(), uri.clone());
+        tokio::spawn(async move { app.put(&uri, Some(&token), json!({ "name": name })).await })
+    });
+    let deadline = tokio::time::Instant::now() + common::gate::PATIENCE;
+    while sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+         AND wait_event_type = 'Lock' AND query ~* '\\mtenants\\M'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("read pg_stat_activity")
+        < 2
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both edits wait on the row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    holder.rollback().await.expect("release the tenant's row");
+    for edit in edits {
+        let answered = edit.await.expect("an edit panicked");
+        assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    }
+
+    let rows = tenant_updates(&app, &token, &tenant).await;
+    assert_eq!(rows.len(), 2, "each edit writes one row: {rows:?}");
+    let earlier = rows
+        .iter()
+        .position(|row| row["oldValue"] == original)
+        .expect("one edit's before is the original row");
+    let later = &rows[1 - earlier];
+    assert_eq!(
+        later["oldValue"], rows[earlier]["newValue"],
+        "the later before is the earlier after"
+    );
+    assert_eq!(
+        later["newValue"],
+        stored_tenant(&app, &token, &tenant).await
+    );
+}
+
 #[tokio::test]
 async fn a_single_tenant_deployment_still_ignores_a_supplied_tenant_code() {
     // The property that keeps the flag worth having, asserted end to end rather
