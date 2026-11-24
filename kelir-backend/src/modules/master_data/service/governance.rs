@@ -136,7 +136,7 @@ impl GovernedAudit {
         }
     }
 
-    /// The product owner's names, 2026-11-16 (#1002).
+    /// The product owner's names, 2026-11-16, and `ChangeWithdrawn`, 2026-11-24 (#1002).
     fn event_type(&self) -> &'static str {
         match (self.entity, &self.step) {
             (GovernedEntity::Party, Step::Requested { .. }) => "Party.ChangeRequested",
@@ -684,6 +684,7 @@ fn in_flight_or_else(error: sqlx::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::document::domain::status::DocumentStatus;
 
     /// The product owner's names (#1002, and `CANCELLED` 2026-11-24), for both
     /// entities. Each step's
@@ -702,8 +703,8 @@ mod tests {
                     old_value: json!({}),
                     new_value: json!({}),
                 },
-                Step::refused("REJECTED", String::new()),
-                Step::refused("CANCELLED", String::new()),
+                Step::refused(DocumentStatus::Rejected.as_db(), String::new()),
+                Step::refused(DocumentStatus::Cancelled.as_db(), String::new()),
             ];
             let names: Vec<String> = steps
                 .into_iter()
