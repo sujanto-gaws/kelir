@@ -418,6 +418,7 @@ async fn a_stream_the_scanner_refuses_is_recorded_failed_and_not_clean() {
         .expect("a pass");
 
     assert_eq!(status_of(&app, attachment).await, "FAILED");
+    assert_scanned(&scan_rows(&app, &token, attachment).await, "FAILED");
 }
 
 /// **A reply this binary does not understand is not a pass.**
@@ -440,6 +441,7 @@ async fn a_reply_nothing_recognises_is_recorded_failed() {
         .expect("a pass");
 
     assert_eq!(status_of(&app, attachment).await, "FAILED");
+    assert_scanned(&scan_rows(&app, &token, attachment).await, "FAILED");
 }
 
 // ---------------------------------------------------------------------------
