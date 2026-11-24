@@ -71,7 +71,7 @@
 //! open one is pinned by a test named for today's behaviour, asserting the
 //! exact wrong value, and passes today. **The row that fixes a finding
 //! inverts its test and renames it**; it is not `#[ignore]`d, and nothing is
-//! weakened to make it pass. A, B and C are fixed, and their tests assert the
+//! weakened to make it pass. A to D are fixed, and their tests assert the
 //! corrected rows. Their route cells assert only what is right today.
 //!
 //! | Finding | Issue | Pinned by |
@@ -79,7 +79,7 @@
 //! | A: a role edit audited the request, not the stored row; fixed | [#1000] | `a_role_edit_audits_the_stored_role_before_and_after` |
 //! | B: a tenant edit audited the request, not the stored row; fixed | [#1001] | `a_tenant_status_edit_audits_the_stored_tenant_before_and_after` |
 //! | C: a change master-data governance applied wrote no row on the record; fixed | [#1002] | `a_governed_change_audits_the_party_when_raised_and_when_settled` |
-//! | D: a lockout engaging writes no row of its own | [#1003] | `a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003` |
+//! | D: a lockout engaging wrote no row of its own; fixed | [#1003] | `a_lockout_engaging_audits_the_lock_on_the_user_with_no_actor` |
 //! | E: a scan result writes no row | [#1004] | `a_scan_result_writes_no_audit_row_issue_1004` |
 //!
 //! [#795]'s shape, the request audited for the stored row, was fixed for users
@@ -96,7 +96,7 @@
 //! | Automatic transitions and system-raised tasks | the triggering decision's row only | `an_automatic_step_writes_no_audit_row_of_its_own_issue_1005` |
 //! | The attachment scan worker | nothing | E above |
 //! | Master-data governance's raise, and its settle | one row each on the record | C above |
-//! | The lockout | nothing of its own | D above |
+//! | The lockout | one row on the user, with no actor | D above |
 //! | The notification worker, the outbox worker | nothing; **ruled exempt** | `the_notification_and_outbox_workers_write_no_audit_row_as_ruled` |
 //! | The permission grants in migrations | nothing; **ruled exempt** (I): the migration history is their trace | no test: a migration runs before any tenant has a chain to write to, and `_sqlx_migrations` records each one with its checksum |
 //!
@@ -2813,16 +2813,16 @@ async fn a_governed_change_audits_the_party_when_raised_and_when_settled() {
     );
 }
 
-/// **D, [#1003].** The fifth wrong password locks the account, and the trail
-/// holds five `Security.SignInFailed` rows, each `incorrect password`, and no
-/// row of the lockout's own.
-///
-/// **Today's behaviour, pinned. The fix inverts this test and renames it**: the
-/// lockout engaging then writes one row on the user, with its `locked_until`.
+/// **D, [#1003], fixed.** The fifth wrong password locks the account, and the
+/// trail holds five `Security.SignInFailed` rows, each `incorrect password`,
+/// and one `Security.AccountLocked` row on the user: no actor, the address,
+/// `lockedUntil`. Until #1003 the lock had no row of its own.
+/// `auth_lockout.rs` reads the row back through `GET /api/v1/audit`, with a
+/// burst's and a lock a success cleared.
 ///
 /// [#1003]: https://github.com/sujanto-gaws/kelir/issues/1003
 #[tokio::test]
-async fn a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003() {
+async fn a_lockout_engaging_audits_the_lock_on_the_user_with_no_actor() {
     let mut walk = Walk::start().await;
     let (user, username) = walk.user(&[]).await;
     // An address of its own, so the rate limiter's bucket is this test's.
@@ -2859,12 +2859,19 @@ async fn a_lockout_engaging_writes_no_audit_row_of_its_own_issue_1003() {
         .iter()
         .map(|row| (row.event_type.as_str(), row.reason.as_deref()))
         .collect();
-    assert_eq!(
-        seen,
-        [("Security.SignInFailed", Some("incorrect password")); 5],
-        "issue #1003: the lock has no row of its own"
-    );
+    let mut expected = vec![("Security.SignInFailed", Some("incorrect password")); 5];
+    expected.insert(4, ("Security.AccountLocked", None));
+    assert_eq!(seen, expected, "the fifth failure writes the lock's row");
     assert!(rows.iter().all(|row| row.object_id == user));
+    let lock = &rows[4];
+    assert_eq!(
+        (lock.action.as_str(), lock.object_type.as_str()),
+        ("LOCK", "USER")
+    );
+    assert_eq!(lock.actor_user_id, None, "the system locks");
+    assert_eq!(lock.ip_address.as_deref(), Some("192.0.2.103"));
+    assert_eq!(lock.old_value, None);
+    assert_eq!(lock.new_value, Some(json!({ "lockedUntil": locked })));
 }
 
 /// A listener that speaks INSTREAM and answers `reply` once the stream is in.
