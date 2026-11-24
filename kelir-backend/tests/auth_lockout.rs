@@ -1483,3 +1483,131 @@ async fn a_late_success_reset_after_a_password_write_erases_no_guess() {
          the lock; NFR-SEC-008 allows 5"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1003 — the lock is audited on the account it locks
+// ---------------------------------------------------------------------------
+
+/// The account's `Security.AccountLocked` rows, oldest first, read back
+/// through `GET /api/v1/audit` (FR-AUD-004) as the administrator, who may read
+/// a USER row's values: each row's action, object, actor and `lockedUntil`.
+async fn lock_rows(app: &TestApp, user_id: Uuid) -> Vec<serde_json::Value> {
+    let token = app.administrator_token().await;
+    let uri = format!(
+        "/api/v1/audit?objectType=USER&objectId={user_id}&eventType=Security.AccountLocked"
+    );
+    let read = app.get(&uri, Some(&token)).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    let rows = read.body["data"].as_array().expect("a page").iter().rev();
+    let fields = ["action", "objectType", "objectId", "actorUserId"];
+    rows.map(|row| json!([fields.map(|f| &row[f]), row["newValue"]["lockedUntil"]]))
+        .collect()
+}
+
+/// `times` wrong passwords, each refused.
+async fn fail(app: &TestApp, from: SocketAddr, username: &str, times: usize) {
+    for _ in 0..times {
+        let refused = attempt(app, from, username, WRONG_PASSWORD).await;
+        assert_eq!(refused, StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// The row a lock writes: on the user, by the system, with `locked_until`.
+async fn lock_row(app: &TestApp, user_id: Uuid) -> serde_json::Value {
+    let until = stored_lockout(app, user_id).await.expect("locked");
+    json!([["LOCK", "USER", user_id, null], until])
+}
+
+/// #1003: the failure that engages the lock writes one row on the user, with
+/// no actor and the stored `locked_until`, and fills no reserved column.
+/// Guesses during the lock write none and keep their `LOGIN_FAILED` refusal; a
+/// fresh lock after expiry writes a second.
+#[tokio::test]
+async fn the_locking_failure_audits_the_lock_once_with_no_actor() {
+    let app = TestApp::spawn().await;
+    let username = "user.lock.audited";
+    let user_id = lock_out(&app, username, peer(241)).await;
+    let first = lock_row(&app, user_id).await;
+    assert_eq!(lock_rows(&app, user_id).await, std::slice::from_ref(&first));
+
+    let reserved: bool = sqlx::query_scalar(
+        "SELECT bool_and(entity_type IS NULL AND entity_id IS NULL AND actor_role_id IS NULL)
+         FROM audit_events WHERE object_id = $1 AND event_type = 'Security.AccountLocked'",
+    )
+    .bind(user_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("the row");
+    assert!(
+        reserved,
+        "entity_type, entity_id and actor_role_id are not filled"
+    );
+
+    fail(&app, peer(242), username, 3).await;
+    assert_eq!(
+        lock_rows(&app, user_id).await,
+        std::slice::from_ref(&first),
+        "none in the lock"
+    );
+    assert_eq!(refusals(&app, user_id).await, (5, 3), "the refusals stay");
+
+    expire_lockout(&app, user_id).await;
+    fail(&app, peer(243), username, 5).await;
+    let second = lock_row(&app, user_id).await;
+    assert_eq!(lock_rows(&app, user_id).await, [first, second]);
+}
+
+/// #1003: the right password as the fifth attempt puts the lock on at its
+/// count and clears it at its success: no lock stood, so no row. The success
+/// resets the count, and only a fresh fifth failure writes one.
+#[tokio::test]
+async fn a_lock_a_success_clears_writes_no_lock_row() {
+    let app = TestApp::spawn().await;
+    let username = "user.lock.cleared";
+    let user_id = create_user(&app, username).await;
+
+    fail(&app, peer(244), username, 4).await;
+    assert_eq!(
+        attempt(&app, peer(245), username, PASSWORD).await,
+        StatusCode::OK
+    );
+    assert!(
+        lock_rows(&app, user_id).await.is_empty(),
+        "the lock was cleared"
+    );
+
+    fail(&app, peer(246), username, 4).await;
+    assert!(
+        lock_rows(&app, user_id).await.is_empty(),
+        "the success reset the count"
+    );
+    fail(&app, peer(246), username, 1).await;
+    assert_eq!(
+        lock_rows(&app, user_id).await,
+        [lock_row(&app, user_id).await]
+    );
+}
+
+/// #1003: eight wrong guesses in flight at once through two backends lock the
+/// account once, so the trail holds one lock row.
+#[tokio::test]
+async fn a_burst_that_locks_writes_one_lock_row() {
+    let app = TestApp::spawn().await;
+    let username = "user.lock.burst";
+    let user_id = create_user(&app, username).await;
+    let backends = [Backend::beside(&app), Backend::beside(&app)];
+
+    let gate = RowGate::close(&app, user_id).await;
+    let guesses = burst_held_at_the_row(&app, &backends, username).await;
+    gate.open().await;
+    assert_eq!(answers(guesses).await, [StatusCode::UNAUTHORIZED; 8]);
+    assert_eq!(refusals(&app, user_id).await, (5, 3));
+    assert_eq!(
+        lock_rows(&app, user_id).await,
+        [lock_row(&app, user_id).await]
+    );
+
+    for backend in &backends {
+        backend.close().await;
+    }
+}

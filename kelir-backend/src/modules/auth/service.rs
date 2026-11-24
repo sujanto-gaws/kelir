@@ -237,13 +237,34 @@ pub async fn sign_in(
         })?;
 
     if !verified {
-        // Already counted, above.
+        // Already counted, above. **The lock is audited here, where it stands**
+        // (#1003, NFR-AUD-001): the count put it on before the check, and a
+        // password that verifies clears it, so a row at the count would record
+        // a lock that never held. Only the attempt whose count locked sees
+        // `locked()`, so a burst writes one row. The system locks, not the
+        // caller: no actor (the product owner, 2026-11-16).
         if let Some(locked_until) = counted.locked() {
             tracing::warn!(
                 user_id = %credentials.id,
                 %locked_until,
                 "account locked out after repeated failures"
             );
+            audit::record_or_warn(
+                &state.pool,
+                AuditEntry {
+                    tenant_id,
+                    event_type: "Security.AccountLocked",
+                    action: "LOCK",
+                    object_type: ObjectType::User,
+                    object_id: credentials.id,
+                    actor_user_id: None,
+                    ip_address,
+                    reason: None,
+                    old_value: None,
+                    new_value: Some(serde_json::json!({ "lockedUntil": locked_until })),
+                },
+            )
+            .await;
         }
 
         return Err(refuse_sign_in(
