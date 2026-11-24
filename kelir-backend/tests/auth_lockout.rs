@@ -1159,6 +1159,7 @@ async fn a_deactivated_accounts_sign_ins_are_refused_uncounted_and_never_lock() 
         (7, (0, 0)),
         "each refusal says the account is not active, and none checked a password"
     );
+    assert!(lock_rows(&app, user_id).await.is_empty(), "no lock row");
 
     execute(
         &app,
@@ -1512,14 +1513,14 @@ async fn fail(app: &TestApp, from: SocketAddr, username: &str, times: usize) {
     }
 }
 
-/// The row a lock writes: on the user, by the system, with `locked_until`.
+/// The row a lock writes: on the user, by the system, with `lockedUntil`.
 async fn lock_row(app: &TestApp, user_id: Uuid) -> serde_json::Value {
     let until = stored_lockout(app, user_id).await.expect("locked");
     json!([["LOCK", "USER", user_id, null], until])
 }
 
 /// #1003: the failure that engages the lock writes one row on the user, with
-/// no actor and the stored `locked_until`, and fills no reserved column.
+/// no actor and the stored `lockedUntil`, and fills no reserved column.
 /// Guesses during the lock write none and keep their `LOGIN_FAILED` refusal; a
 /// fresh lock after expiry writes a second.
 #[tokio::test]
@@ -1554,7 +1555,28 @@ async fn the_locking_failure_audits_the_lock_once_with_no_actor() {
     expire_lockout(&app, user_id).await;
     fail(&app, peer(243), username, 5).await;
     let second = lock_row(&app, user_id).await;
-    assert_eq!(lock_rows(&app, user_id).await, [first, second]);
+    let both = [first, second];
+    assert_eq!(lock_rows(&app, user_id).await, both);
+    expire_lockout(&app, user_id).await;
+    let signed_in = attempt(&app, peer(247), username, PASSWORD).await;
+    assert_eq!(signed_in, StatusCode::OK);
+    assert_eq!(lock_rows(&app, user_id).await, both);
+}
+
+/// #1003: the row is filed under the locked user's tenant, not the system's.
+#[tokio::test]
+async fn a_lock_is_audited_in_the_users_tenant() {
+    let app = TestApp::spawn_with(|config| config.multi_tenant = true).await;
+    let tenant = fixtures::create_tenant(&app.pool, "LOCKCO", "Lock Co").await;
+    fixtures::create_user(&app.pool, tenant, "user.t", "t@kelir.test", PASSWORD, &[]).await;
+    let body = json!({ "username": "user.t", "password": WRONG_PASSWORD, "tenantCode": "LOCKCO" });
+    for _ in 0..5 {
+        let refused = app.post("/api/v1/auth/login", None, body.clone()).await;
+        assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+    }
+    let q = "SELECT tenant_id FROM audit_events WHERE action = 'LOCK'";
+    let filed: Option<Vec<Uuid>> = sqlx::query_scalar(q).fetch_all(&app.pool).await.ok();
+    assert_eq!(filed, Some(vec![tenant]), "filed under the user's tenant");
 }
 
 /// #1003: the right password as the fifth attempt puts the lock on at its

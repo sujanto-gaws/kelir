@@ -1201,8 +1201,8 @@ While the major version is `0`, the public API may change in any release.
   ([#1003](https://github.com/sujanto-gaws/kelir/issues/1003),
   NFR-AUD-001 and 002, NFR-SEC-008). The fifth failed sign-in locked the
   account with no audit row of its own: the lock reached only the log. It now
-  writes `Security.AccountLocked` (`LOCK`) on the user, with no actor and the
-  `locked_until` stored. A lock the right password clears at once writes
+  writes `Security.AccountLocked` (`LOCK`) on the user, with no actor and
+  `lockedUntil`, the value stored in `users.locked_until`. A lock the right password clears at once writes
   none, a sign-in refused during the lock writes only its refusal, and a
   burst of guesses writes one. The event is listed in the Database Schema
   §10.2, "Audit events".

@@ -2815,8 +2815,8 @@ async fn a_governed_change_audits_the_party_when_raised_and_when_settled() {
 
 /// **D, [#1003], fixed.** The fifth wrong password locks the account, and the
 /// trail holds five `Security.SignInFailed` rows, each `incorrect password`,
-/// and one `Security.AccountLocked` row on the user, with no actor and its
-/// `locked_until`. Until #1003 the lock had no row of its own.
+/// and one `Security.AccountLocked` row on the user: no actor, the address,
+/// `lockedUntil`. Until #1003 the lock had no row of its own.
 /// `auth_lockout.rs` reads the row back through `GET /api/v1/audit`, with a
 /// burst's and a lock a success cleared.
 ///
@@ -2869,6 +2869,8 @@ async fn a_lockout_engaging_audits_the_lock_on_the_user_with_no_actor() {
         ("LOCK", "USER")
     );
     assert_eq!(lock.actor_user_id, None, "the system locks");
+    assert_eq!(lock.ip_address.as_deref(), Some("192.0.2.103"));
+    assert_eq!(lock.old_value, None);
     assert_eq!(lock.new_value, Some(json!({ "lockedUntil": locked })));
 }
 
