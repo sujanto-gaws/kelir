@@ -1280,4 +1280,311 @@ async fn a_rejection_closes_the_task_the_refused_approval_left_open() {
         "the rejection put the record back to where the change had parked it from, overwriting a \
          status somebody else had set"
     );
+
+    // And the trail (#1002): the refused approval wrote no row, and the
+    // rejection's names the status the record was found at.
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows)[2..],
+        [
+            "Party.ChangeRequested CHANGE_REQUEST",
+            "Party.ChangeRejected REJECT"
+        ]
+    );
+    assert_eq!(rows[2]["oldValue"], json!({ "recordStatusId": "ACTIVE" }));
+    assert_eq!(rows[3]["actorUserId"], json!(reviewer.id));
+    assert_eq!(rows[3]["oldValue"], Value::Null);
+    let reason = rows[3]["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("ended REJECTED") && reason.contains("SUSPENDED"),
+        "{reason}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1002 — the raise and the settle are audited on the record
+// ---------------------------------------------------------------------------
+
+/// The record's trail, oldest first, read back through `GET /api/v1/audit`
+/// (FR-AUD-004) as the administrator, who may read the record's values.
+async fn trail(app: &TestApp, token: &str, object_type: &str, id: Uuid) -> Vec<Value> {
+    let read = app
+        .get(
+            &format!("/api/v1/audit?objectType={object_type}&objectId={id}"),
+            Some(token),
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+
+    let mut rows = read.body["data"].as_array().expect("a page").clone();
+    rows.sort_by_key(|row| {
+        let at = row["occurredAt"].as_str().expect("a time");
+        at.parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("RFC 3339")
+    });
+    rows
+}
+
+fn events(rows: &[Value]) -> Vec<String> {
+    rows.iter()
+        .map(|row| format!("{} {}", row["eventType"], row["action"]).replace('"', ""))
+        .collect()
+}
+
+/// A party change raised through `workflow`, submitted by the administrator.
+async fn raised(app: &TestApp, token: &str, code: &str, workflow: Value) -> (Uuid, Uuid) {
+    let workflow = publish_workflow(app, token, workflow).await;
+    let type_id = governed_type(app, token, code, workflow, Some("PARTY")).await;
+    let supplier = party(app, token, &code.replace('_', "-")).await;
+    let form_data = json!({ "externalId": "SUP-1002", "description": "audited" });
+    let document = change_document(app, token, type_id, supplier, form_data).await;
+    let submitted = submit(app, token, document).await;
+    assert_eq!(submitted.status, StatusCode::OK, "{}", submitted.body);
+    (supplier, document)
+}
+
+/// **The raise is audited on the party, and the approval with the stored
+/// values before and after** ([#1002]): "before" is the record parked at
+/// `PENDING_APPROVAL`, and only the fields that moved are on either side.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[tokio::test]
+async fn a_governed_change_is_audited_on_the_party_when_raised_and_approved() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-audit-approver").await;
+    let workflow = approval_workflow("wf_mdm_audit_approve", reviewer.id);
+    let (supplier, document) = raised(&app, &token, "MDM_AUDIT_APPROVE", workflow).await;
+
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows),
+        [
+            "Party.Created CREATE",
+            "Party.ChangeRequested CHANGE_REQUEST"
+        ]
+    );
+    let administrator: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(common::ADMIN_USERNAME)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the administrator");
+    assert_eq!(rows[1]["actorUserId"], json!(administrator));
+    assert_eq!(rows[1]["oldValue"], json!({ "recordStatusId": "DRAFT" }));
+    assert_eq!(
+        rows[1]["newValue"],
+        json!({ "recordStatusId": "PENDING_APPROVAL" })
+    );
+
+    decide(&app, &reviewer, document, "APPROVE").await;
+
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows)[2..],
+        ["Party.ChangeApproved APPROVE"],
+        "one settle row, and no update row"
+    );
+    assert_eq!(rows[2]["actorUserId"], json!(reviewer.id));
+    assert_eq!(rows[2]["reason"], Value::Null);
+    assert_eq!(
+        rows[2]["oldValue"],
+        json!({ "externalId": null, "description": null, "recordStatusId": "PENDING_APPROVAL" })
+    );
+    assert_eq!(
+        rows[2]["newValue"],
+        json!({ "externalId": "SUP-1002", "description": "audited", "recordStatusId": "ACTIVE" })
+    );
+}
+
+/// **A rejection is audited with its reason and no values** ([#1002]):
+/// nothing was written to the record, so it is not an update.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[tokio::test]
+async fn a_rejected_governed_change_is_audited_with_its_reason_and_no_values() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-audit-rejecter").await;
+    let workflow = approval_workflow("wf_mdm_audit_reject", reviewer.id);
+    let (supplier, document) = raised(&app, &token, "MDM_AUDIT_REJECT", workflow).await;
+
+    decide(&app, &reviewer, document, "REJECT").await;
+
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows)[1..],
+        [
+            "Party.ChangeRequested CHANGE_REQUEST",
+            "Party.ChangeRejected REJECT"
+        ],
+        "one settle row, and no update row"
+    );
+    assert_eq!(rows[2]["actorUserId"], json!(reviewer.id));
+    assert_eq!(rows[2]["oldValue"], Value::Null);
+    assert_eq!(rows[2]["newValue"], Value::Null);
+    assert_eq!(rows[2]["valuesWithheld"], false, "nothing was withheld");
+    let reason = rows[2]["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("ended REJECTED") && reason.contains(&document.to_string()),
+        "the reason names the document and how it ended: {reason}"
+    );
+}
+
+/// **The same events on a facility** ([#1002]).
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[tokio::test]
+async fn a_governed_change_is_audited_on_the_facility_too() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-audit-facility").await;
+    let workflow = approval_workflow("wf_mdm_audit_fac", reviewer.id);
+    let workflow = publish_workflow(&app, &token, workflow).await;
+    let type_id = governed_type(&app, &token, "MDM_AUDIT_FAC", workflow, Some("FACILITY")).await;
+    let site = facility(&app, &token, "MDM-AUDIT-FAC").await;
+    let form_data = json!({ "name": "Renamed" });
+    let document = change_document_for(&app, &token, type_id, "FACILITY", site, form_data).await;
+    assert_eq!(submit(&app, &token, document).await.status, StatusCode::OK);
+
+    decide(&app, &reviewer, document, "APPROVE").await;
+
+    let rows = trail(&app, &token, "FACILITY", site).await;
+    assert_eq!(
+        events(&rows)[1..],
+        [
+            "Facility.ChangeRequested CHANGE_REQUEST",
+            "Facility.ChangeApproved APPROVE"
+        ]
+    );
+    assert_eq!(
+        rows[1]["actorUserId"], rows[0]["actorUserId"],
+        "the submitter"
+    );
+    assert_eq!(rows[2]["actorUserId"], json!(reviewer.id), "the approver");
+    assert_eq!(
+        rows[2]["oldValue"],
+        json!({ "name": "MDM-AUDIT-FAC Works", "recordStatusId": "PENDING_APPROVAL" })
+    );
+    assert_eq!(
+        rows[2]["newValue"],
+        json!({ "name": "Renamed", "recordStatusId": "ACTIVE" })
+    );
+}
+
+/// **A change already settled is not audited twice** ([#1002]). The document
+/// is `APPROVED` at this workflow's second state and `COMPLETED` at its last,
+/// and both settle: the first applies the change, the second finds it settled.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[tokio::test]
+async fn a_change_already_settled_is_not_audited_twice() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-audit-twice").await;
+    let mut workflow = approval_workflow("wf_mdm_audit_twice", reviewer.id);
+    let mut confirm = workflow["states"][0].clone();
+    confirm["code"] = json!("CONFIRM");
+    confirm["mapsToDocumentStatus"] = json!("APPROVED");
+    confirm["task"]["taskDefinitionKey"] = json!("confirm");
+    workflow["states"]
+        .as_array_mut()
+        .expect("states")
+        .push(confirm);
+    let mut onwards = workflow["transitions"][0].clone();
+    workflow["transitions"][0]["to"] = json!("CONFIRM");
+    onwards["from"] = json!("CONFIRM");
+    workflow["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(onwards);
+    let (supplier, document) = raised(&app, &token, "MDM_AUDIT_TWICE", workflow).await;
+
+    decide(&app, &reviewer, document, "APPROVE").await;
+    assert_eq!(record_status(&app, supplier).await, "ACTIVE", "settled");
+    decide(&app, &reviewer, document, "APPROVE").await;
+    assert!(
+        open_task(&app, document).await.is_none(),
+        "the process ended"
+    );
+
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows)[1..],
+        [
+            "Party.ChangeRequested CHANGE_REQUEST",
+            "Party.ChangeApproved APPROVE"
+        ],
+        "the second settle found the change settled and wrote nothing"
+    );
+}
+
+/// **A withdrawn change is audited as withdrawn** ([#1002]; the product owner,
+/// 2026-11-24): a document ending `CANCELLED` writes `ChangeWithdrawn`, with
+/// its end state as the reason and no values, not `ChangeRejected`.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[tokio::test]
+async fn a_cancelled_change_is_audited_as_withdrawn() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-audit-withdrawn").await;
+    let mut workflow = approval_workflow("wf_mdm_audit_withdrawn", reviewer.id);
+    workflow["states"][2]["mapsToDocumentStatus"] = json!("CANCELLED");
+    let (supplier, document) = raised(&app, &token, "MDM_AUDIT_WITHDRAWN", workflow).await;
+
+    decide(&app, &reviewer, document, "REJECT").await;
+
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows)[1..],
+        [
+            "Party.ChangeRequested CHANGE_REQUEST",
+            "Party.ChangeWithdrawn CANCEL"
+        ]
+    );
+    assert_eq!(
+        (&rows[2]["oldValue"], &rows[2]["newValue"]),
+        (&Value::Null, &Value::Null)
+    );
+    let reason = rows[2]["reason"].as_str().expect("a reason");
+    assert!(reason.contains("ended CANCELLED"), "{reason}");
+}
+
+/// **A settle the submit itself reaches is audited** ([#1002]): this workflow
+/// starts at a service task whose `AUTO` step ends it, so the change is raised
+/// and approved in the submit's transaction, through the engine's loop.
+///
+/// [#1002]: https://github.com/sujanto-gaws/kelir/issues/1002
+#[tokio::test]
+async fn a_change_settled_inside_the_submit_is_audited() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let reviewer = approver(&app, "mdm-audit-auto").await;
+    let assignee = json!({ "assigneeType": "USER", "userId": reviewer.id.to_string() });
+    let workflow = json!({
+        "workflowKey": "wf_mdm_audit_auto", "version": "1.0.0", "name": "Stamped",
+        "initialState": "STAMP",
+        "states": [
+            { "code": "STAMP", "name": "Stamp", "mapsToDocumentStatus": "IN_REVIEW",
+              "task": { "taskDefinitionKey": "stamp", "taskName": "Stamp",
+                        "taskType": "SERVICE_TASK", "assignment": assignee } },
+            { "code": "DONE", "name": "Done", "mapsToDocumentStatus": "COMPLETED", "isFinal": true }
+        ],
+        "transitions": [ { "from": "STAMP", "to": "DONE", "action": "AUTO", "guards": [] } ]
+    });
+    let (supplier, _) = raised(&app, &token, "MDM_AUDIT_AUTO", workflow).await;
+
+    assert_eq!(
+        record_status(&app, supplier).await,
+        "ACTIVE",
+        "settled in the submit"
+    );
+    let rows = trail(&app, &token, "PARTY", supplier).await;
+    assert_eq!(
+        events(&rows)[1..],
+        [
+            "Party.ChangeRequested CHANGE_REQUEST",
+            "Party.ChangeApproved APPROVE"
+        ]
+    );
 }

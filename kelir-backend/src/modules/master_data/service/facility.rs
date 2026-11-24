@@ -309,7 +309,7 @@ pub async fn update_facility(
 /// them: the code is fixed at creation, and the lifecycle status moves only
 /// through `POST /facilities/{id}/transition`, which writes its own record with
 /// its own action.
-fn facility_changes(before: &Facility, after: &Facility) -> ChangeSet {
+pub(super) fn facility_changes(before: &Facility, after: &Facility) -> ChangeSet {
     let mut changes = ChangeSet::new();
 
     changes.field("name", &before.name, &after.name);

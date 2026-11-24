@@ -117,6 +117,7 @@ use super::super::domain::{Document, DocumentStatus};
 use super::super::repository::{self as repo, Submission};
 use super::super::DOCUMENT_SUBMIT;
 use super::form;
+use super::status::AfterCommit;
 use crate::error::AppError;
 use crate::middleware::auth::Authenticated;
 use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
@@ -124,7 +125,7 @@ use crate::modules::document_type::numbering::{AllocationContext, GapPolicy};
 use crate::modules::document_type::{
     numbering_repository, numbering_service, repository as document_type_repository,
 };
-use crate::modules::master_data::service::governance;
+use crate::modules::master_data::service::governance::{self, GovernedAudit};
 use crate::modules::rad::service::evaluation::Strictness;
 use crate::modules::workflow::domain::{Graph, TransitionAction};
 use crate::modules::workflow::repository::{
@@ -345,7 +346,12 @@ pub async fn submit_document(
     // document, which is all of them today. `master_data` is where the entity
     // is placed and where the record's table is known; nothing here learns
     // either, and the workflow engine below learns neither (#255 AC6).
-    raise_governed_change(&mut transaction, tenant_id, id, &locked, &form_data, actor).await?;
+    //
+    // Its audit row, and that of any settle the workflow reaches in this same
+    // transaction, is written after the commit (#1002).
+    let mut after_commit = AfterCommit::raised(
+        raise_governed_change(&mut transaction, tenant_id, id, &locked, &form_data, actor).await?,
+    );
 
     // Step 6, in the same transaction. A document cannot end in a state its own
     // history does not explain.
@@ -374,7 +380,7 @@ pub async fn submit_document(
     // anyway would be refused by `uq_workflow_instances_one_live_per_document`
     // after the fact rather than by the code on purpose.
     let started = if resubmission {
-        resubmit_workflow(
+        let left = resubmit_workflow(
             &mut transaction,
             tenant_id,
             id,
@@ -394,6 +400,7 @@ pub async fn submit_document(
             actor,
         )
         .await?;
+        after_commit.absorb(left);
 
         None
     } else {
@@ -443,6 +450,11 @@ pub async fn submit_document(
     )
     .await?;
 
+    let started = started.map(|mut started| {
+        after_commit.absorb(std::mem::take(&mut started.after_commit));
+        started
+    });
+
     transaction.commit().await?;
 
     let submitted = repo::find_document(&state.pool, tenant_id, id)
@@ -487,6 +499,10 @@ pub async fn submit_document(
         },
     )
     .await;
+
+    // The record's rows, after the document's (#1002): the raise, and a settle
+    // when the workflow ended in this transaction.
+    after_commit.record(&state.pool, caller.ip_address()).await;
 
     Ok(submitted)
 }
@@ -608,12 +624,12 @@ async fn resubmit_workflow(
     instance: Option<instance_repo::LockedInstance>,
     evaluation: &engine::EvaluationContext,
     actor: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<AfterCommit, AppError> {
     let Some(instance_id) = subject.workflow_instance_id else {
         // A document returned by the *manual* status route on a type that binds
         // no workflow. `may_move_to` allows `RETURNED -> SUBMITTED`, so this is
         // a real state and not a corruption: there is simply no process to move.
-        return Ok(());
+        return Ok(AfterCommit::default());
     };
 
     // Held since before the document was locked, which is what makes the state
@@ -655,7 +671,7 @@ async fn resubmit_workflow(
     let closed =
         engine::close_open_task_for_resubmit(transaction, tenant_id, instance.id, actor).await?;
 
-    engine::fire(
+    let fired = engine::fire(
         transaction,
         tenant_id,
         instance.id,
@@ -676,7 +692,7 @@ async fn resubmit_workflow(
     )
     .await?;
 
-    Ok(())
+    Ok(fired.after_commit)
 }
 
 /// Starts the approval a submitted document routes into, if its type binds one.
@@ -782,7 +798,7 @@ async fn raise_governed_change(
     locked: &repo::LockedDocument,
     form_data: &Value,
     actor: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<Option<GovernedAudit>, AppError> {
     let configured = document_type_repository::target_entity_type(
         &mut **transaction,
         tenant_id,
@@ -791,7 +807,7 @@ async fn raise_governed_change(
     .await?;
 
     let Some(entity) = governance::governed_entity(configured.as_deref()) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let (Some(linked_type), Some(entity_id)) = (locked.entity_type.as_deref(), locked.entity_id)
@@ -818,4 +834,5 @@ async fn raise_governed_change(
         actor,
     )
     .await
+    .map(Some)
 }
