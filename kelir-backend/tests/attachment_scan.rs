@@ -148,6 +148,59 @@ async fn scripted_clamd(reply: Option<&'static str>) -> u16 {
     port
 }
 
+/// A scanner that answers `reply` only once `callers` scans are in, so each of
+/// them has read the attachment as `PENDING` before any result is written.
+async fn clamd_answering_together(callers: usize, reply: &'static str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    let all_in = std::sync::Arc::new(tokio::sync::Barrier::new(callers));
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let all_in = all_in.clone();
+            tokio::spawn(async move {
+                let mut sink = [0_u8; 8192];
+                if matches!(socket.read(&mut sink).await, Ok(read) if read > 0) {
+                    all_in.wait().await;
+                    let _ = socket.write_all(format!("{reply}\0").as_bytes()).await;
+                }
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    port
+}
+
+/// The `Attachment.ScanCompleted` rows `GET /api/v1/audit` serves for
+/// `attachment` (FR-AUD-004, [#1004]).
+///
+/// [#1004]: https://github.com/sujanto-gaws/kelir/issues/1004
+async fn scan_rows(app: &TestApp, token: &str, attachment: Uuid) -> Vec<Value> {
+    let found = app
+        .get(
+            &format!(
+                "/api/v1/audit?objectType=ATTACHMENT&objectId={attachment}\
+                 &eventType=Attachment.ScanCompleted"
+            ),
+            Some(token),
+        )
+        .await;
+    assert_eq!(found.status, StatusCode::OK, "{}", found.body);
+
+    found.body["data"].as_array().expect("a page").clone()
+}
+
+/// One row, by nobody, from `PENDING` to `outcome`, its values readable.
+fn assert_scanned(rows: &[Value], outcome: &str) {
+    assert_eq!(rows.len(), 1, "one row per result: {rows:?}");
+    assert_eq!(rows[0]["action"], "SCAN_RESULT");
+    assert_eq!(rows[0]["actorUserId"], Value::Null);
+    assert_eq!(rows[0]["valuesWithheld"], false);
+    assert_eq!(rows[0]["oldValue"], json!({ "virusScanStatus": "PENDING" }));
+    assert_eq!(rows[0]["newValue"], json!({ "virusScanStatus": outcome }));
+}
+
 /// The environment's real scanner.
 fn real_clamd() -> (String, u16) {
     (
@@ -240,6 +293,7 @@ async fn an_infected_file_is_recorded_and_never_served() {
         .expect("a pass");
 
     assert_eq!(status_of(&app, attachment).await, "INFECTED");
+    assert_scanned(&scan_rows(&app, &token, attachment).await, "INFECTED");
 
     let refused = app
         .get(
@@ -249,6 +303,46 @@ async fn an_infected_file_is_recorded_and_never_served() {
         .await;
 
     assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+}
+
+/// **#1004: a clean result is audited** on the attachment, by nobody, and
+/// read back through the trail's search.
+#[tokio::test]
+async fn a_clean_result_is_audited_on_the_attachment_with_no_actor() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_SCAN_AUDIT").await;
+    let document = draft(&app, &token, type_id).await;
+    let attachment = attach(&app, &token, document, "q.pdf", PDF).await;
+
+    let port = scripted_clamd(Some("stream: OK")).await;
+    worker::pass(&app.state, "127.0.0.1", port)
+        .await
+        .expect("a pass");
+
+    assert_eq!(status_of(&app, attachment).await, "CLEAN");
+    assert_scanned(&scan_rows(&app, &token, attachment).await, "CLEAN");
+}
+
+/// **#1004: two workers that scan one attachment audit it once.** Both read it
+/// `PENDING`; the second write matches no row and writes no audit row.
+#[tokio::test]
+async fn two_scans_of_one_attachment_audit_it_once() {
+    let app = TestApp::spawn().await;
+    let token = app.administrator_token().await;
+    let type_id = document_type(&app, &token, "PR_SCAN_TWICE").await;
+    let document = draft(&app, &token, type_id).await;
+    let attachment = attach(&app, &token, document, "q.pdf", PDF).await;
+
+    let port = clamd_answering_together(2, "stream: OK").await;
+    let (first, second) = tokio::join!(
+        worker::pass(&app.state, "127.0.0.1", port),
+        worker::pass(&app.state, "127.0.0.1", port)
+    );
+    first.expect("the first pass");
+    second.expect("the second pass");
+
+    assert_scanned(&scan_rows(&app, &token, attachment).await, "CLEAN");
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +379,7 @@ async fn a_scanner_that_cannot_be_reached_leaves_the_file_pending() {
         "PENDING",
         "an unreachable scanner must leave the file unknown, not decided"
     );
+    assert!(scan_rows(&app, &token, attachment).await.is_empty());
 }
 
 #[tokio::test]
@@ -302,6 +397,7 @@ async fn a_scanner_that_accepts_and_says_nothing_leaves_the_file_pending() {
         .expect("a pass that survives a silent scanner");
 
     assert_eq!(status_of(&app, attachment).await, "PENDING");
+    assert!(scan_rows(&app, &token, attachment).await.is_empty());
 }
 
 /// The reply the measurement found and `clamdscan` hides: a stream `clamd`
@@ -423,6 +519,7 @@ async fn a_decided_attachment_is_not_moved_by_a_later_scan() {
         "INFECTED",
         "a decided row was moved by a later scan"
     );
+    assert_scanned(&scan_rows(&app, &token, attachment).await, "INFECTED");
 
     let refused = app
         .get(

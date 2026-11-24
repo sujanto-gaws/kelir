@@ -1197,6 +1197,15 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A scan result is audited on its attachment**
+  ([#1004](https://github.com/sujanto-gaws/kelir/issues/1004),
+  NFR-AUD-001 and 003). The scan worker moved an attachment from `PENDING`
+  to `CLEAN` or `INFECTED` with no audit row. Each result now writes
+  `Attachment.ScanCompleted` (`SCAN_RESULT`) with no actor and
+  `virusScanStatus` before and after, after the status update commits. A
+  second scan of the same attachment, or one that did not finish, writes
+  none. What may be downloaded, and when, is unchanged. The event is listed
+  in the Database Schema §10.2, "Audit events".
 - **A lockout is audited on the account it locks**
   ([#1003](https://github.com/sujanto-gaws/kelir/issues/1003),
   NFR-AUD-001 and 002, NFR-SEC-008). The fifth failed sign-in locked the
