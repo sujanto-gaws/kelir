@@ -1203,8 +1203,10 @@ While the major version is `0`, the public API may change in any release.
   Party or Facility at `PENDING_APPROVAL`, and the decision that settled it
   applied or refused it, with no audit row on the record. A submit now writes
   `Party.ChangeRequested` (or `Facility.`), and the settling decision
-  `Party.ChangeApproved`, with the fields that moved before and after, or
-  `Party.ChangeRejected`, with the reason and no values. The values are read
+  `Party.ChangeApproved`, with the fields that moved before and after,
+  `Party.ChangeRejected`, with the reason and no values, or
+  `Party.ChangeWithdrawn` (`CANCEL`) the same way when the document ends
+  `CANCELLED`. The values are read
   in the settling transaction; the rows are written after it commits, by the
   audit chain's one writer. A change already settled writes no second row.
   The events are listed in the Database Schema §10.2, "Audit events".

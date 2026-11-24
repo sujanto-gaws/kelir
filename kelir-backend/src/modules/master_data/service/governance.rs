@@ -75,6 +75,20 @@ enum Step {
     Approved { old_value: Value, new_value: Value },
     /// Refused: nothing was written to the record, so there are no values.
     Rejected { reason: String },
+    /// Withdrawn: the document ended `CANCELLED`. No values, as a refusal.
+    Withdrawn { reason: String },
+}
+
+impl Step {
+    /// A change not applied: withdrawn if its document ended `CANCELLED`,
+    /// rejected otherwise (the product owner, 2026-11-24).
+    fn refused(ended_as: &str, reason: String) -> Self {
+        if ended_as == "CANCELLED" {
+            Self::Withdrawn { reason }
+        } else {
+            Self::Rejected { reason }
+        }
+    }
 }
 
 impl GovernedAudit {
@@ -95,7 +109,9 @@ impl GovernedAudit {
                 old_value,
                 new_value,
             } => (Some(old_value.clone()), Some(new_value.clone()), None),
-            Step::Rejected { reason } => (None, None, Some(reason.as_str())),
+            Step::Rejected { reason } | Step::Withdrawn { reason } => {
+                (None, None, Some(reason.as_str()))
+            }
         };
 
         AuditEntry {
@@ -105,6 +121,7 @@ impl GovernedAudit {
                 Step::Requested { .. } => "CHANGE_REQUEST",
                 Step::Approved { .. } => "APPROVE",
                 Step::Rejected { .. } => "REJECT",
+                Step::Withdrawn { .. } => "CANCEL",
             },
             object_type: match self.entity {
                 GovernedEntity::Party => ObjectType::Party,
@@ -125,9 +142,11 @@ impl GovernedAudit {
             (GovernedEntity::Party, Step::Requested { .. }) => "Party.ChangeRequested",
             (GovernedEntity::Party, Step::Approved { .. }) => "Party.ChangeApproved",
             (GovernedEntity::Party, Step::Rejected { .. }) => "Party.ChangeRejected",
+            (GovernedEntity::Party, Step::Withdrawn { .. }) => "Party.ChangeWithdrawn",
             (GovernedEntity::Facility, Step::Requested { .. }) => "Facility.ChangeRequested",
             (GovernedEntity::Facility, Step::Approved { .. }) => "Facility.ChangeApproved",
             (GovernedEntity::Facility, Step::Rejected { .. }) => "Facility.ChangeRejected",
+            (GovernedEntity::Facility, Step::Withdrawn { .. }) => "Facility.ChangeWithdrawn",
         }
     }
 }
@@ -295,7 +314,8 @@ pub async fn raise(
 /// **The audit row is returned, not written** ([#1002]); see
 /// [`GovernedAudit`]. An approval's carries the fields that moved, read under
 /// this transaction's lock before and after; a refusal's carries the document
-/// and `ended_as` in `reason`, and no values. A document whose change is
+/// and `ended_as` in `reason`, and no values, and is a withdrawal when
+/// `ended_as` is `CANCELLED`. A document whose change is
 /// already settled, or that carried none, returns `None`, so a second settle
 /// writes no second row.
 ///
@@ -395,11 +415,12 @@ pub async fn settle(
                 new_value,
             }
         }
-        None => Step::Rejected {
-            reason: format!(
+        None => Step::refused(
+            ended_as,
+            format!(
                 "document {document_id} ended {ended_as}; the change it carried was not applied"
             ),
-        },
+        ),
     };
 
     Ok(Some(GovernedAudit {
@@ -515,14 +536,15 @@ async fn moved_on(
         entity: change.entity,
         entity_id: change.entity_id,
         actor,
-        step: Step::Rejected {
-            reason: format!(
+        step: Step::refused(
+            ended_as,
+            format!(
                 "document {} ended {ended_as} while the record was {}; the change it carried \
                  was not applied",
                 change.document_id,
                 current.map_or("gone", RecordStatus::as_db)
             ),
-        },
+        ),
     })
 }
 
@@ -663,7 +685,8 @@ fn in_flight_or_else(error: sqlx::Error) -> AppError {
 mod tests {
     use super::*;
 
-    /// The product owner's names (#1002), for both entities. Each step's
+    /// The product owner's names (#1002, and `CANCELLED` 2026-11-24), for both
+    /// entities. Each step's
     /// values are asserted through the API in `master_data_governance.rs`.
     #[test]
     fn each_step_is_named_as_ruled_for_both_entities() {
@@ -679,9 +702,8 @@ mod tests {
                     old_value: json!({}),
                     new_value: json!({}),
                 },
-                Step::Rejected {
-                    reason: String::new(),
-                },
+                Step::refused("REJECTED", String::new()),
+                Step::refused("CANCELLED", String::new()),
             ];
             let names: Vec<String> = steps
                 .into_iter()
@@ -706,6 +728,7 @@ mod tests {
                     format!("{prefix}.ChangeRequested CHANGE_REQUEST"),
                     format!("{prefix}.ChangeApproved APPROVE"),
                     format!("{prefix}.ChangeRejected REJECT"),
+                    format!("{prefix}.ChangeWithdrawn CANCEL"),
                 ]
             );
         }
