@@ -48,7 +48,7 @@
 //! *who did what, when* without the payloads. Granting the object reads
 //! alongside it is how they see more.
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
@@ -168,8 +168,9 @@ impl ChangeSet {
 /// Each row's `current_hash` covers **every column this function writes** — the
 /// metadata, the two payload halves, and the row's own `created_at` — *and* the
 /// previous row's hash, so altering or removing any row breaks every hash after
-/// it. That makes tampering detectable. Refusing a change is `0052`'s trigger
-/// (FR-AUD-003), which does not stop the table's owner.
+/// it. That makes tampering detectable. Refusing a change is the trigger
+/// `0052_audit_events_append_only.sql` installs (FR-AUD-003), which does not
+/// stop the table's owner.
 ///
 /// The columns outside the hash are the ones nothing writes: `document_id`,
 /// `workflow_instance_id`, `entity_type`, `entity_id`, `actor_role_id` and
@@ -185,13 +186,70 @@ impl ChangeSet {
 /// being the API's clock rather than the database's — which is the honest one
 /// anyway, since it is the moment the event happened.
 ///
+/// **Except where that clock is behind the head's.** The time is the later of
+/// `Utc::now()`, truncated to microseconds, and the head's `created_at` plus one
+/// microsecond ([`chain_time`]), taken under the lock after the head is read. A
+/// verifier walks a tenant's rows by `created_at, id`, so a backend whose clock
+/// runs behind another's would otherwise write a row that chains to the head
+/// and sorts before it. With the clamp, walk order is chain order and no two
+/// rows in a chain share a time. The cost: under skew, a row's time can be
+/// later than the moment it was written, by up to the skew between backends,
+/// and is then not the API's clock but the head's plus one microsecond. The
+/// hash covers the time that is stored either way.
+///
 /// A failure here must not fail the operation being audited — losing a login
 /// because the audit insert failed would be worse than the missing row — so the
-/// caller decides. [`record_or_warn`] is the usual choice.
+/// caller decides. [`record_or_warn`] is the usual choice. A failure rolls the
+/// transaction back as it is dropped, which releases the lock.
+///
+/// # One writer at a time per tenant, and never before its head (ADR-0052)
+///
+/// The append runs in **one short transaction of this function's own**, on one
+/// pooled connection from the lock to the commit:
+///
+/// 1. `pg_advisory_xact_lock(AUDIT_CHAIN_LOCK_CLASS, hashtext(tenant_id::text))`
+///    is its first statement ([`AUDIT_CHAIN_LOCK_CLASS`]);
+/// 2. holding it, the tenant's head is read: its `current_hash` and
+///    `created_at`, or the genesis hash when the chain is empty;
+/// 3. the row's time is taken, the row hashed and inserted, and the commit
+///    releases the lock.
+///
+/// Without the lock, two writers for one tenant could read the same head and
+/// both chain to it: every row whole, and the chain forked ([#995]). The lock
+/// holds across backends and the scan worker, since it is the database's, and
+/// writers for different tenants take different keys and never wait on each
+/// other. It needs nothing `kelir_app` lacks: an advisory lock takes no
+/// privilege, and the role keeps only `SELECT` and `INSERT` on the table
+/// (ADR-0051).
+///
+/// **It is never awaited while the caller holds a transaction open** (coding
+/// standard §2.8). Say a caller's open transaction holds its tenant's
+/// `tenants` row `FOR UPDATE` and awaits this. This waits on the advisory
+/// lock, whose holder's insert waits for that row's key share, which waits on
+/// the caller's commit. That is a cycle PostgreSQL cannot see, because one
+/// edge of it is the application's `await`. Every call site writes after its
+/// commit or outside any transaction.
+///
+/// **Forks stored by an earlier version remain.** Nothing re-chains them, and
+/// a verifier still reports each as a break.
+///
+/// [#995]: https://github.com/sujanto-gaws/kelir/issues/995
 pub async fn record(pool: &PgPool, entry: AuditEntry<'_>) -> Result<Uuid, AppError> {
-    let previous_hash = sqlx::query_scalar!(
+    let mut transaction = pool.begin().await?;
+
+    // The same statement as the tenant-code and hierarchy locks, so it shares
+    // their offline query data.
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock($1, hashtext($2::text))",
+        AUDIT_CHAIN_LOCK_CLASS,
+        entry.tenant_id.to_string()
+    )
+    .execute(&mut *transaction)
+    .await?;
+
+    let head = sqlx::query!(
         r#"
-        SELECT current_hash
+        SELECT current_hash, created_at
         FROM audit_events
         WHERE tenant_id = $1
         ORDER BY created_at DESC, id DESC
@@ -199,15 +257,16 @@ pub async fn record(pool: &PgPool, entry: AuditEntry<'_>) -> Result<Uuid, AppErr
         "#,
         entry.tenant_id
     )
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or_else(genesis_hash);
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    let (previous_hash, head_created_at) = match head {
+        Some(head) => (head.current_hash, Some(head.created_at)),
+        None => (genesis_hash(), None),
+    };
 
     let id = Uuid::now_v7();
-    // Truncated to microseconds because that is `TIMESTAMPTZ`'s resolution: a
-    // nanosecond the column cannot hold is a nanosecond the hash would cover and
-    // no verifier could read back.
-    let created_at = truncate_to_microseconds(Utc::now());
+    let created_at = chain_time(Utc::now(), head_created_at);
     let current_hash = chain_hash(&previous_hash, &id, created_at, &entry);
 
     // The payloads go in as the canonical text the hash was taken over, not as
@@ -246,10 +305,34 @@ pub async fn record(pool: &PgPool, entry: AuditEntry<'_>) -> Result<Uuid, AppErr
         current_hash,
         created_at
     )
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
+
     Ok(id)
+}
+
+/// Lock class for [`record`]'s per-tenant chain lock: the ASCII of `ADCH`.
+/// Distinct from the tenant-code (`TNCD`), department (`DEPT`) and facility
+/// (`FCTY`) classes. `tests/audit_chain_lock.rs` repeats it to see a writer
+/// waiting on the lock.
+const AUDIT_CHAIN_LOCK_CLASS: i32 = 0x4144_4348;
+
+/// The time a new row records: the later of `now`, truncated to microseconds,
+/// and one microsecond after the head's (ADR-0052 §2). An empty chain takes
+/// `now`.
+///
+/// Truncated because microseconds are `TIMESTAMPTZ`'s resolution: a nanosecond
+/// the column cannot hold is a nanosecond the hash would cover and no verifier
+/// could read back.
+fn chain_time(now: DateTime<Utc>, head: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    let now = truncate_to_microseconds(now);
+
+    match head {
+        Some(head) => now.max(head + TimeDelta::microseconds(1)),
+        None => now,
+    }
 }
 
 /// `TIMESTAMPTZ` holds microseconds; `Utc::now()` offers nanoseconds.
@@ -531,6 +614,40 @@ mod tests {
             reason: None,
             old_value: None,
             new_value: None,
+        }
+    }
+
+    #[test]
+    fn a_row_after_a_head_ahead_of_the_clock_is_one_microsecond_after_it() {
+        let head = at() + TimeDelta::seconds(5);
+
+        assert_eq!(
+            chain_time(at(), Some(head)),
+            head + TimeDelta::microseconds(1)
+        );
+        // A tie is not left to the `id` order of two UUIDv7s from two hosts.
+        assert_eq!(
+            chain_time(at(), Some(at())),
+            at() + TimeDelta::microseconds(1)
+        );
+    }
+
+    #[test]
+    fn a_row_after_a_head_behind_the_clock_takes_the_clock_in_microseconds() {
+        let now = at() + TimeDelta::nanoseconds(1_999);
+
+        assert_eq!(
+            chain_time(now, Some(at() - TimeDelta::seconds(5))),
+            at() + TimeDelta::microseconds(1)
+        );
+        assert_eq!(chain_time(now, None), at() + TimeDelta::microseconds(1));
+    }
+
+    #[test]
+    fn the_chain_lock_class_is_adch_and_no_other_class() {
+        assert_eq!(AUDIT_CHAIN_LOCK_CLASS.to_be_bytes(), *b"ADCH");
+        for other in [*b"TNCD", *b"DEPT", *b"FCTY"] {
+            assert_ne!(AUDIT_CHAIN_LOCK_CLASS, i32::from_be_bytes(other));
         }
     }
 
