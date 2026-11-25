@@ -1197,6 +1197,23 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **Concurrent audited writes in one tenant no longer fork its audit chain**
+  ([#995](https://github.com/sujanto-gaws/kelir/issues/995), ADR-0052,
+  FR-AUD-003, NFR-SEC-006). `audit::record` read the tenant's latest row and
+  inserted the next as two separate statements, so two writers, on one
+  backend or two, could read the same head and both chain to it. Every row
+  was whole and the trigger still refused rewrites, but a verifier reported
+  the later sibling as a break, in the words it uses for tampering. Each
+  append now runs in a short transaction of its own under a per-tenant
+  advisory lock, taken before the head is read and released by the commit.
+  A row's time is also never earlier than its head's plus one microsecond,
+  so clock skew between backends no longer breaks the walk by time; under
+  skew a row's time can be later than when it was written, by up to the
+  skew. Writers for different tenants do not wait on each other. No
+  migration, no grant, and no change to the hash format. **Forks stored by an
+  earlier version remain**: nothing re-chains them, and a verifier still
+  reports each as a break. Database Schema §10.2, "How a row is appended".
+
 - **A scan result is audited on its attachment**
   ([#1004](https://github.com/sujanto-gaws/kelir/issues/1004),
   NFR-AUD-001 and 003). The scan worker moved an attachment from `PENDING`
