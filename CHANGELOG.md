@@ -1212,7 +1212,14 @@ While the major version is `0`, the public API may change in any release.
   skew. Writers for different tenants do not wait on each other. No
   migration, no grant, and no change to the hash format. **Forks stored by an
   earlier version remain**: nothing re-chains them, and a verifier still
-  reports each as a break. Database Schema §10.2, "How a row is appended".
+  reports each as a break, which is not tampering. **Known limits**: one
+  tenant's audit writes now run one at a time, and a writer waiting on the
+  lock holds a pooled connection, so a burst of audits for one tenant can
+  delay requests that write none; row 19's load test is the first
+  measurement. Kelir ships no verifier an operator can run, and audits are
+  still written after the change they record commits, so trail order can
+  differ from commit order. Database Schema §10.2, "How a row is appended";
+  Installation and Deployment §9 and §10.2.
 
 - **A scan result is audited on its attachment**
   ([#1004](https://github.com/sujanto-gaws/kelir/issues/1004),
