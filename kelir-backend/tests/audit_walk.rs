@@ -71,7 +71,7 @@
 //! open one is pinned by a test named for today's behaviour, asserting the
 //! exact wrong value, and passes today. **The row that fixes a finding
 //! inverts its test and renames it**; it is not `#[ignore]`d, and nothing is
-//! weakened to make it pass. A to D are fixed, and their tests assert the
+//! weakened to make it pass. A to E are fixed, and their tests assert the
 //! corrected rows. Their route cells assert only what is right today.
 //!
 //! | Finding | Issue | Pinned by |
@@ -80,7 +80,7 @@
 //! | B: a tenant edit audited the request, not the stored row; fixed | [#1001] | `a_tenant_status_edit_audits_the_stored_tenant_before_and_after` |
 //! | C: a change master-data governance applied wrote no row on the record; fixed | [#1002] | `a_governed_change_audits_the_party_when_raised_and_when_settled` |
 //! | D: a lockout engaging wrote no row of its own; fixed | [#1003] | `a_lockout_engaging_audits_the_lock_on_the_user_with_no_actor` |
-//! | E: a scan result writes no row | [#1004] | `a_scan_result_writes_no_audit_row_issue_1004` |
+//! | E: a scan result wrote no row; fixed | [#1004] | `a_scan_result_audits_the_attachment_with_no_actor` |
 //!
 //! [#795]'s shape, the request audited for the stored row, was fixed for users
 //! by #795's fix (#994, row 23). A was the same shape on roles, B on tenants.
@@ -94,7 +94,7 @@
 //! | The bootstrap administrator | audited, with no actor | `the_bootstrap_administrator_is_audited_with_no_actor` |
 //! | Tenant provisioning | audited as `Tenant.Created` | the `POST /api/v1/organization/tenants` cell |
 //! | Automatic transitions and system-raised tasks | the triggering decision's row only | `an_automatic_step_writes_no_audit_row_of_its_own_issue_1005` |
-//! | The attachment scan worker | nothing | E above |
+//! | The attachment scan worker | one row per result on the attachment, with no actor | E above |
 //! | Master-data governance's raise, and its settle | one row each on the record | C above |
 //! | The lockout | one row on the user, with no actor | D above |
 //! | The notification worker, the outbox worker | nothing; **ruled exempt** | `the_notification_and_outbox_workers_write_no_audit_row_as_ruled` |
@@ -2907,16 +2907,14 @@ async fn scan_status(app: &TestApp, attachment: Uuid) -> String {
         .expect("the scan status")
 }
 
-/// **E, [#1004].** The scan worker moves an attachment from `PENDING` to
-/// `CLEAN`, and another to `INFECTED`, and writes no audit row for either.
-///
-/// **Today's behaviour, pinned. The fix inverts this test and renames it**: each
-/// result then writes a row on the attachment, with no actor and the status
-/// before and after.
+/// **E, [#1004], fixed.** The scan worker moves an attachment from `PENDING` to
+/// `CLEAN`, and another, in a second tenant, to `INFECTED`. Each result writes
+/// one `Attachment.ScanCompleted` row on its attachment, under the attachment's
+/// tenant, with no actor and the status before and after.
 ///
 /// [#1004]: https://github.com/sujanto-gaws/kelir/issues/1004
 #[tokio::test]
-async fn a_scan_result_writes_no_audit_row_issue_1004() {
+async fn a_scan_result_audits_the_attachment_with_no_actor() {
     let mut walk = Walk::start().await;
     let document = walk.draft(None).await;
 
@@ -2930,6 +2928,13 @@ async fn a_scan_result_writes_no_audit_row_issue_1004() {
     let after_clean = rows_since(&walk.app, &before).await;
 
     let infected = walk.attachment(document).await;
+    let other = fixtures::create_tenant(&walk.app.pool, "WALK-SCAN", "Scanned").await;
+    sqlx::query("UPDATE attachments SET tenant_id = $1 WHERE id = $2")
+        .bind(other)
+        .bind(infected)
+        .execute(&walk.app.pool)
+        .await
+        .expect("the attachment moved to another tenant");
     let before = audit_ids(&walk.app).await;
     let port = scripted_clamd("stream: Eicar-Test-Signature FOUND").await;
     worker::pass(&walk.app.state, "127.0.0.1", port)
@@ -2938,16 +2943,21 @@ async fn a_scan_result_writes_no_audit_row_issue_1004() {
     assert_eq!(scan_status(&walk.app, infected).await, "INFECTED");
     let after_infected = rows_since(&walk.app, &before).await;
 
-    assert!(
-        after_clean.is_empty(),
-        "issue #1004: a clean result writes nothing; it wrote {}",
-        listed(&after_clean)
-    );
-    assert!(
-        after_infected.is_empty(),
-        "issue #1004: an infected result writes nothing; it wrote {}",
-        listed(&after_infected)
-    );
+    for (rows, attachment, tenant, outcome) in [
+        (after_clean, clean, SYSTEM_TENANT_ID, "CLEAN"),
+        (after_infected, infected, other, "INFECTED"),
+    ] {
+        assert_eq!(rows.len(), 1, "one row per result: {}", listed(&rows));
+        let row = &rows[0];
+        assert_eq!(
+            (&*row.event_type, &*row.action, &*row.object_type),
+            ("Attachment.ScanCompleted", "SCAN_RESULT", "ATTACHMENT")
+        );
+        assert_eq!((row.object_id, row.tenant_id), (attachment, tenant));
+        assert_eq!(row.actor_user_id, None, "the system scanned it");
+        assert_eq!(row.old_value, Some(json!({ "virusScanStatus": "PENDING" })));
+        assert_eq!(row.new_value, Some(json!({ "virusScanStatus": outcome })));
+    }
 }
 
 // ---------------------------------------------------------------------------

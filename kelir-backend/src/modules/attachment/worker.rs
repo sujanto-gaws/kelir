@@ -27,19 +27,26 @@
 //! 3. [`super::repository::record_scan_result`] writes only over `PENDING`, so
 //!    no result can overwrite a decided one.
 //!
+//! **A result is audited after its update commits, once** ([#1004]): only an
+//! update that moved the row writes `Attachment.ScanCompleted`, through the
+//! chain's one writer (#995), so a second scan of the row writes none.
+//!
 //! **There is no configuration that turns scanning off.** A deployment with no
 //! reachable scanner has every attachment `PENDING` and every attachment
 //! undownloadable, which is loud and safe. A switch saying *skip the scan* would
 //! be a switch saying *serve unscanned bytes*.
 //!
 //! [#246]: https://github.com/sujanto-gaws/kelir/issues/246
+//! [#1004]: https://github.com/sujanto-gaws/kelir/issues/1004
 
 use std::time::Duration;
 
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::repository as repo;
 use super::scanner::{self, ScanOutcome};
+use crate::modules::audit::{self, domain::ObjectType, AuditEntry};
 use crate::state::AppState;
 
 /// How many attachments one pass looks at.
@@ -131,9 +138,14 @@ async fn scan_one(state: &AppState, host: &str, port: u16, attachment: &repo::Pe
             // The tenant comes from the row `pending_scans` returned rather than
             // from anything this loop decides (#294 AC1): the read is
             // deliberately cross-tenant, and the write is not.
-            match repo::record_scan_result(&state.pool, attachment.tenant_id, attachment.id, status)
-                .await
-            {
+            let moved =
+                repo::record_scan_result(&state.pool, attachment.tenant_id, attachment.id, status)
+                    .await;
+            if matches!(moved, Ok(1..)) {
+                audit_result(state, attachment, status).await;
+            }
+
+            match moved {
                 Ok(0) => tracing::debug!(
                     attachment = %attachment.id,
                     %status,
@@ -175,4 +187,26 @@ async fn scan_one(state: &AppState, host: &str, port: u16, attachment: &repo::Pe
             "the scan did not finish; the attachment stays pending and will be retried"
         ),
     }
+}
+
+/// The result's audit row: on the attachment, under its tenant, by nobody.
+///
+/// Written only when the update moved the row, which it moved from `PENDING`.
+async fn audit_result(state: &AppState, attachment: &repo::PendingScan, status: &str) {
+    audit::record_or_warn(
+        &state.pool,
+        AuditEntry {
+            tenant_id: attachment.tenant_id,
+            event_type: "Attachment.ScanCompleted",
+            action: "SCAN_RESULT",
+            object_type: ObjectType::Attachment,
+            object_id: attachment.id,
+            actor_user_id: None,
+            ip_address: None,
+            reason: None,
+            old_value: Some(json!({ "virusScanStatus": "PENDING" })),
+            new_value: Some(json!({ "virusScanStatus": status })),
+        },
+    )
+    .await;
 }
