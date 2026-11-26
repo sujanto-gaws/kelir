@@ -525,6 +525,16 @@ While the major version is `0`, the public API may change in any release.
 
 ### Added
 
+- **Every shell page shows where it sits** ([#968](https://github.com/sujanto-gaws/kelir/issues/968),
+  NFR-USE-002). A trail above the page reads from Dashboard down, such as
+  *Dashboard › Administration › Forms › Purchase requisition*. Each earlier
+  crumb is a link back up, unless it is the sidebar's *Administration* heading,
+  which is not a page, or a page you may not open. A record's crumb shows the
+  title or name its page loaded, never its id, and the route's own label while
+  it loads or if it cannot be read. The hierarchy is declared on each route, so
+  a page opened from a bookmark reads the same as one reached by clicking. The
+  dashboard and the pages outside the signed-in shell have none.
+
 - **Attachments and backups are encrypted at rest**
   ([#778](https://github.com/sujanto-gaws/kelir/issues/778), NFR-SEC-009,
   ADR-0049). MinIO encrypts every object under its own key (SSE-S3), the

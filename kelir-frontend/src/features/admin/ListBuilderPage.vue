@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { toApiError } from '@/api/client'
 import { getList, getRenderableList, updateList } from '@/api/rad'
 import FormUnplacedErrors from '@/components/FormUnplacedErrors.vue'
@@ -122,6 +123,10 @@ const STATUS_CHOICES = choices(['ACTIVE', 'DEPRECATED'])
 const DIRECTIONS = choices(['asc', 'desc'])
 
 const definition = ref<ListDefinition | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(
+  () => definition.value && { key: definition.value.id, name: definition.value.title },
+)
 const title = ref('')
 const status = ref('ACTIVE')
 const pageSize = ref('20')

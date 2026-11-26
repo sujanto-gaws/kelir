@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, h, onMounted, provide, reactive, ref, w
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Redo2, Undo2 } from '@lucide/vue'
 
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { toApiError } from '@/api/client'
 import { ApiError } from '@/api/error'
 import {
@@ -79,6 +80,8 @@ const canDeprecate = computed(() => auth.can('workflow:definition:deprecate'))
 
 /** The revision as the server holds it, or `null` for a workflow not yet saved. */
 const record = ref<WorkflowDefinition | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(() => record.value && { key: record.value.id, name: record.value.name })
 const draft = useWorkflowDraft(starterDefinition())
 const definition = draft.definition
 

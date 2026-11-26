@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { listUsers } from '@/api/identity'
 import { claimTask, decideTask, delegateTask, getTask } from '@/api/tasks'
 import { ApiError } from '@/api/error'
@@ -72,6 +73,8 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const task = ref<TaskDetail | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(() => task.value && { key: task.value.id, name: task.value.taskName })
 const loading = ref(true)
 const failed = ref(false)
 const busy = ref(false)

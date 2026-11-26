@@ -75,7 +75,7 @@ describe('AppLayout', () => {
     router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/', name: 'dashboard', component: blank },
+        { path: '/', name: 'dashboard', component: blank, meta: { title: 'Dashboard' } },
         { path: '/login', name: 'login', component: blank },
         // Real as of #101: the entry is a link now rather than a disabled
         // label, and `RouterLink` cannot resolve a name the router has never
@@ -85,7 +85,12 @@ describe('AppLayout', () => {
           name: 'master-data',
           component: blank,
         },
-        { path: '/admin/users', name: 'admin-users', component: blank },
+        {
+          path: '/admin/users',
+          name: 'admin-users',
+          component: blank,
+          meta: { title: 'Users', breadcrumb: { section: 'Administration' } },
+        },
         { path: '/admin/roles', name: 'admin-roles', component: blank },
         { path: '/admin/external-systems', name: 'admin-external-systems', component: blank },
         { path: '/admin/integration-logs', name: 'admin-integration-logs', component: blank },
@@ -111,6 +116,23 @@ describe('AppLayout', () => {
 
     return mount(AppLayout, { global: { plugins: [router] } })
   }
+
+  it('draws the breadcrumb trail beside the main navigation, each landmark named (#968)', async () => {
+    permissions = ['identity:user:read']
+    await useAuthStore().signIn('ana', 'correct horse')
+    await router.push('/admin/users')
+    await router.isReady()
+    const wrapper = mount(AppLayout, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.find('nav[aria-label="Main navigation"]').exists()).toBe(true)
+    const trail = wrapper.get('nav[aria-label="Breadcrumb"]')
+    expect(trail.findAll('li').map((item) => item.text())).toEqual([
+      'Dashboard',
+      'Administration',
+      'Users',
+    ])
+  })
 
   it('hides a destination the user has no permission for', async () => {
     const wrapper = await renderSignedIn()

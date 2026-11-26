@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { toApiError } from '@/api/client'
 import { createFormRevision, getForm, publishForm, updateForm } from '@/api/rad'
 import { Alert } from '@/components/ui/alert'
@@ -73,6 +74,8 @@ const canUpdate = computed(() => auth.can('rad:form:update'))
 const canPublish = computed(() => auth.can('rad:form:publish'))
 
 const form = ref<Form | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(() => form.value && { key: form.value.id, name: form.value.title })
 const title = ref('')
 const definition = ref<JfssDefinition | null>(null)
 

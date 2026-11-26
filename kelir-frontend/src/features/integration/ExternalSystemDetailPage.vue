@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { toApiError } from '@/api/client'
 import {
   activateExternalSystem,
@@ -48,6 +49,8 @@ const canCall = computed(() => auth.can('integration:endpoint:call'))
 const systemId = computed(() => String(route.params.id ?? ''))
 
 const system = ref<ExternalSystem | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(() => system.value && { key: system.value.id, name: system.value.systemName })
 const isLoading = ref(true)
 const loadError = ref('')
 const isNotFound = ref(false)

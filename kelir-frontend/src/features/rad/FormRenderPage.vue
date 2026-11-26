@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import JfssForm from './JfssForm.vue'
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { getForm, submitForm } from '@/api/rad'
 import { Alert } from '@/components/ui/alert'
 import { ApiError } from '@/api/error'
@@ -32,6 +33,8 @@ import type { Form, FormSubmission } from '@/types/rad'
 const route = useRoute()
 
 const form = ref<Form | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(() => form.value && { key: form.value.id, name: form.value.title })
 const loading = ref(true)
 const failed = ref(false)
 

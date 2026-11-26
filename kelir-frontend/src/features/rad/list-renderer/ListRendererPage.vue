@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import { getRenderableList, listActions, listRenderedRows } from '@/api/rad'
 import { toApiError } from '@/api/client'
 import { Alert } from '@/components/ui/alert'
@@ -62,6 +63,15 @@ const router = useRouter()
 
 /** The definition, once it has loaded. */
 const definition = ref<RenderableList | null>(null)
+// The list's title, as its heading shows it. A blank one falls back to the key
+// the URL carries, which the user typed — never to an id (#968 AC5).
+useBreadcrumbName(
+  () =>
+    definition.value && {
+      key: definition.value.listKey,
+      name: definition.value.title.trim() || definition.value.listKey,
+    },
+)
 /** Why the definition could not be rendered, empty when it could. */
 const refusal = ref('')
 const isLoadingDefinition = ref(true)
