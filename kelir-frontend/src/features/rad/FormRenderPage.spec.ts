@@ -13,6 +13,7 @@ import {
   type FakeReply,
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 /**
  * Submitting a rendered form, and what the page does with the answer (#164).
@@ -142,6 +143,12 @@ describe('FormRenderPage, submitting', () => {
     await button?.trigger('click')
     await flushPromises()
   }
+
+  it('publishes the loaded record as its breadcrumb name, under the route param (#968)', async () => {
+    await render()
+
+    expect(useBreadcrumbStore().published).toEqual({ key: FORM_ID, name: 'Purchase requisition' })
+  })
 
   it('posts every data key, hidden ones included (JFSS S10.1)', async () => {
     const wrapper = await render()

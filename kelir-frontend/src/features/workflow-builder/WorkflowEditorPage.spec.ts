@@ -20,6 +20,7 @@ import { press, tabTo } from '@/lib/testing/keyboard'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
 import type { JwssDefinition } from '@/types/workflow'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 /**
  * The workflow editor (#426 AC1–AC5, and the two criteria row 6 inherits from
@@ -308,6 +309,12 @@ describe('WorkflowEditorPage', () => {
     await page.get('[data-testid="save-workflow"]').trigger('click')
     await settle()
   }
+
+  it('publishes the loaded record as its breadcrumb name, under the route param (#968)', async () => {
+    await render()
+
+    expect(useBreadcrumbStore().published).toEqual({ key: ID, name: 'Purchase approval' })
+  })
 
   describe('editing a draft (AC1, AC2)', () => {
     it('draws each state with the transitions out of it under it', async () => {

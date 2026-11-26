@@ -3,9 +3,9 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { registerGuards } from './guards'
 
 /**
- * The sidebar's heading over the administration screens, as a crumb (#968).
- * Not a route: it is plain text in the trail, the way it is a heading in the
- * sidebar — there is no `/admin` page (product owner, 2026-11-26).
+ * The label over the Configuration and Administration screens, as a crumb
+ * (#968). Not a route: it is plain text in the trail, since there is no
+ * `/admin` page (product owner, 2026-11-26).
  */
 const ADMINISTRATION = { section: 'Administration' }
 

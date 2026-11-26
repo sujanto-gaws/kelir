@@ -15,8 +15,9 @@ export interface BreadcrumbMeta {
   /** The route above this one; the dashboard when omitted. */
   parent?: string
   /**
-   * A heading above this route that is not a place — "Administration", as the
-   * sidebar groups it. Plain text: there is no page to link to.
+   * A heading above this route that is not a place — "Administration", the
+   * label over the Configuration (§10) and Administration (§11) screens of the
+   * User Manual. Plain text: there is no page to link to.
    */
   section?: string
   /**

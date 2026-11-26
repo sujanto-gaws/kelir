@@ -5,6 +5,7 @@ import { defineComponent, h, ref, watch } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, useRoute, type Router } from 'vue-router'
 
 import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
+import { useAuthStore } from '@/stores/auth'
 
 import AppBreadcrumbs from './AppBreadcrumbs.vue'
 
@@ -57,6 +58,20 @@ const blank = { render: () => h('div') }
 
 let router: Router
 
+/** Signs the store in with these grants; `can` reads them, as the guard does. */
+function grant(permissions: string[]): void {
+  useAuthStore().$patch({
+    user: {
+      id: 'u-1',
+      username: 'ana',
+      displayName: 'Ana Putri',
+      email: 'ana@example.com',
+      roles: [],
+      permissions,
+    },
+  })
+}
+
 async function open(path: string): Promise<VueWrapper> {
   await router.push(path)
   await router.isReady()
@@ -76,6 +91,7 @@ function current(wrapper: VueWrapper): string | undefined {
 beforeEach(() => {
   setActivePinia(createPinia())
   loads = new Map()
+  grant(['document:read', 'document:create'])
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -84,7 +100,25 @@ beforeEach(() => {
         path: '/documents',
         name: 'documents',
         component: blank,
-        meta: { title: 'Documents', breadcrumb: {} },
+        meta: { title: 'Documents', permission: 'document:read', breadcrumb: {} },
+      },
+      {
+        path: '/documents/new',
+        name: 'new-document',
+        component: blank,
+        meta: {
+          title: 'New document',
+          permission: 'document:create',
+          breadcrumb: { parent: 'documents' },
+        },
+      },
+      {
+        // A path that does not spell its parent: only the declared chain
+        // gives Documents here, so a trail split from the URL would not.
+        path: '/inbox/settings/archive',
+        name: 'archive',
+        component: blank,
+        meta: { title: 'Archive', breadcrumb: { parent: 'documents' } },
       },
       {
         path: '/documents/:id',
@@ -125,6 +159,24 @@ describe('AppBreadcrumbs markup (AC4, AC6)', () => {
     for (const separator of separators) {
       expect(separator.attributes('aria-hidden')).toBe('true')
     }
+  })
+
+  it('shows a parent the user may not open as plain text (AC4)', async () => {
+    // The page needs `document:create`; its parent needs `document:read`.
+    grant(['document:create'])
+    const wrapper = await open('/documents/new')
+    const items = wrapper.findAll('li')
+
+    expect(crumbs(wrapper)).toEqual(['Dashboard', 'Documents', 'New document'])
+    expect(items[1]?.find('a').exists()).toBe(false)
+    expect(items[0]?.get('a').attributes('href')).toBe('/')
+  })
+
+  it('follows the declared parent, not the URL (AC2)', async () => {
+    const wrapper = await open('/inbox/settings/archive')
+
+    expect(crumbs(wrapper)).toEqual(['Dashboard', 'Documents', 'Archive'])
+    expect(wrapper.findAll('li')[1]?.get('a').attributes('href')).toBe('/documents')
   })
 
   it('draws nothing where there is no trail', async () => {

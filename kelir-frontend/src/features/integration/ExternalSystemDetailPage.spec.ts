@@ -14,6 +14,7 @@ import {
 } from '@/lib/testing/fake-backend'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 /**
  * One external system's page (#520).
@@ -197,6 +198,12 @@ describe('ExternalSystemDetailPage', () => {
   function has(wrapper: VueWrapper, testId: string): boolean {
     return wrapper.find(`[data-testid="${testId}"]`).exists()
   }
+
+  it('publishes the loaded record as its breadcrumb name, under the route param (#968)', async () => {
+    await render(SYSTEM_ALL)
+
+    expect(useBreadcrumbStore().published).toEqual({ key: ID, name: 'Corporate ERP' })
+  })
 
   it('shows the system the API returned', async () => {
     const wrapper = await render(SYSTEM_ALL)
