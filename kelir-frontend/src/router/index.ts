@@ -3,11 +3,23 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { registerGuards } from './guards'
 
 /**
+ * The label over the Configuration and Administration screens, as a crumb
+ * (#968). Not a route: it is plain text in the trail, since there is no
+ * `/admin` page (product owner, 2026-11-26).
+ */
+const ADMINISTRATION = { section: 'Administration' }
+
+/**
  * Route table.
  *
  * Route meta is the only thing the guard reads: `requiresAuth` for a session
  * and `permission` for a specific grant. A route opts into protection by
  * declaring them, and `guards.ts` needs no edit to follow.
+ *
+ * `breadcrumb` places a shell route in the trail (`layouts/breadcrumbs.ts`):
+ * its parent, a section heading, and the param of a record whose page names it.
+ * Every shell route but the dashboard and `forbidden` declares one, and
+ * `layouts/breadcrumbs.spec.ts` fails for a new route that does not.
  */
 export const routes: RouteRecordRaw[] = [
   {
@@ -57,6 +69,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'master-data:party:read',
           title: 'Master data',
+          breadcrumb: {},
         },
       },
       {
@@ -71,7 +84,12 @@ export const routes: RouteRecordRaw[] = [
         // reasoning #97 and D-12 have applied before. A caller who may read
         // forms and not suppliers gets the form with one chooser that reports
         // it could not load, not a route that refuses the whole form.
-        meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Form' },
+        meta: {
+          requiresAuth: true,
+          permission: 'rad:form:read',
+          title: 'Form',
+          breadcrumb: { record: 'id' },
+        },
       },
       {
         // The list, with its search and filters in the query string beside it
@@ -79,7 +97,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'documents',
         name: 'documents',
         component: () => import('@/features/documents/DocumentListPage.vue'),
-        meta: { requiresAuth: true, permission: 'document:read', title: 'Documents' },
+        meta: {
+          requiresAuth: true,
+          permission: 'document:read',
+          title: 'Documents',
+          breadcrumb: {},
+        },
       },
       {
         // **The traversal Sprint 8's exit was missing.** That sprint could open
@@ -95,7 +118,12 @@ export const routes: RouteRecordRaw[] = [
         // enforced where it belongs — on `/document-types`, so a caller with
         // one and not the other gets a page that says the types could not be
         // loaded rather than a route that refuses.
-        meta: { requiresAuth: true, permission: 'document:create', title: 'New document' },
+        meta: {
+          requiresAuth: true,
+          permission: 'document:create',
+          title: 'New document',
+          breadcrumb: { parent: 'documents' },
+        },
       },
       {
         // Declared **after** `documents/new`, which is not cosmetic: a param
@@ -109,7 +137,12 @@ export const routes: RouteRecordRaw[] = [
         // on `/documents/{id}/linked-entity` — a caller who may read documents
         // and not suppliers gets the document with one field that says the name
         // could not be loaded, not a route that refuses the whole workspace.
-        meta: { requiresAuth: true, permission: 'document:read', title: 'Document' },
+        meta: {
+          requiresAuth: true,
+          permission: 'document:read',
+          title: 'Document',
+          breadcrumb: { parent: 'documents', record: 'id' },
+        },
       },
       {
         // **A configured list, rendered** (FR-RAD-003, FR-RAD-010; #340). The
@@ -130,7 +163,12 @@ export const routes: RouteRecordRaw[] = [
         // `rad:list:read`: that is the *builder's* permission, and gating this
         // on it would mean only a configuration administrator could open a
         // screen built for everybody.
-        meta: { requiresAuth: true, permission: 'document:read', title: 'List' },
+        meta: {
+          requiresAuth: true,
+          permission: 'document:read',
+          title: 'List',
+          breadcrumb: { record: 'listKey' },
+        },
       },
       {
         // What has been sent to the person signed in (FR-NTF-003, #251).
@@ -144,7 +182,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'notifications',
         name: 'notifications',
         component: () => import('@/features/notifications/NotificationCentrePage.vue'),
-        meta: { requiresAuth: true, permission: 'notification:read', title: 'Notifications' },
+        meta: {
+          requiresAuth: true,
+          permission: 'notification:read',
+          title: 'Notifications',
+          breadcrumb: {},
+        },
       },
       {
         // What is waiting for the person signed in — theirs, and their roles'
@@ -156,7 +199,12 @@ export const routes: RouteRecordRaw[] = [
         // The workflow module's own task permission, not one of the inbox's:
         // the inbox reads those rows, and a permission of its own would let a
         // deployment grant the list without granting the task.
-        meta: { requiresAuth: true, permission: 'workflow:task:read', title: 'My tasks' },
+        meta: {
+          requiresAuth: true,
+          permission: 'workflow:task:read',
+          title: 'My tasks',
+          breadcrumb: {},
+        },
       },
       {
         path: 'tasks/:id',
@@ -167,19 +215,34 @@ export const routes: RouteRecordRaw[] = [
         // decision endpoint. A caller who may read tasks and not decide them
         // gets a working screen whose buttons are refused, rather than a route
         // that hides the task they were told about.
-        meta: { requiresAuth: true, permission: 'workflow:task:read', title: 'Task' },
+        meta: {
+          requiresAuth: true,
+          permission: 'workflow:task:read',
+          title: 'Task',
+          breadcrumb: { parent: 'tasks', record: 'id' },
+        },
       },
       {
         path: 'admin/users',
         name: 'admin-users',
         component: () => import('@/features/admin/UserListPage.vue'),
-        meta: { requiresAuth: true, permission: 'identity:user:read', title: 'Users' },
+        meta: {
+          requiresAuth: true,
+          permission: 'identity:user:read',
+          title: 'Users',
+          breadcrumb: ADMINISTRATION,
+        },
       },
       {
         path: 'admin/roles',
         name: 'admin-roles',
         component: () => import('@/features/admin/RoleListPage.vue'),
-        meta: { requiresAuth: true, permission: 'identity:role:read', title: 'Roles' },
+        meta: {
+          requiresAuth: true,
+          permission: 'identity:role:read',
+          title: 'Roles',
+          breadcrumb: ADMINISTRATION,
+        },
       },
       {
         // Delegation windows (FR-IDM-006, #184). Under `admin/` beside users
@@ -195,6 +258,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'identity:delegation:read',
           title: 'Delegations',
+          breadcrumb: ADMINISTRATION,
         },
       },
       {
@@ -210,6 +274,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'organization:tenant:read',
           title: 'Tenants',
+          breadcrumb: ADMINISTRATION,
         },
       },
       {
@@ -228,6 +293,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'document-type:read',
           title: 'Document types',
+          breadcrumb: ADMINISTRATION,
         },
       },
       {
@@ -238,7 +304,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'admin/forms',
         name: 'admin-forms',
         component: () => import('@/features/admin/FormListPage.vue'),
-        meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Forms' },
+        meta: {
+          requiresAuth: true,
+          permission: 'rad:form:read',
+          title: 'Forms',
+          breadcrumb: ADMINISTRATION,
+        },
       },
       {
         // The editor. `rad:form:read` opens it because a published revision is
@@ -247,7 +318,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'admin/forms/:id',
         name: 'admin-form-builder',
         component: () => import('@/features/admin/FormBuilderPage.vue'),
-        meta: { requiresAuth: true, permission: 'rad:form:read', title: 'Form' },
+        meta: {
+          requiresAuth: true,
+          permission: 'rad:form:read',
+          title: 'Form',
+          breadcrumb: { parent: 'admin-forms', record: 'id' },
+        },
       },
       {
         // The list builder (FR-RAD-003/004, #374). `rad_lists` got a renderer
@@ -255,13 +331,23 @@ export const routes: RouteRecordRaw[] = [
         path: 'admin/lists',
         name: 'admin-lists',
         component: () => import('@/features/admin/ListsPage.vue'),
-        meta: { requiresAuth: true, permission: 'rad:list:read', title: 'Lists' },
+        meta: {
+          requiresAuth: true,
+          permission: 'rad:list:read',
+          title: 'Lists',
+          breadcrumb: ADMINISTRATION,
+        },
       },
       {
         path: 'admin/lists/:id',
         name: 'admin-list-builder',
         component: () => import('@/features/admin/ListBuilderPage.vue'),
-        meta: { requiresAuth: true, permission: 'rad:list:read', title: 'List' },
+        meta: {
+          requiresAuth: true,
+          permission: 'rad:list:read',
+          title: 'List',
+          breadcrumb: { parent: 'admin-lists', record: 'id' },
+        },
       },
       {
         // The workflow editor (FR-WF-018, #426). `workflow_definitions` has had
@@ -270,7 +356,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'admin/workflows',
         name: 'admin-workflows',
         component: () => import('@/features/workflow-builder/WorkflowListPage.vue'),
-        meta: { requiresAuth: true, permission: 'workflow:definition:read', title: 'Workflows' },
+        meta: {
+          requiresAuth: true,
+          permission: 'workflow:definition:read',
+          title: 'Workflows',
+          breadcrumb: ADMINISTRATION,
+        },
       },
       {
         // A workflow not yet saved, under the permission that saves it: the
@@ -283,6 +374,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'workflow:definition:create',
           title: 'New workflow',
+          breadcrumb: { parent: 'admin-workflows' },
         },
       },
       {
@@ -291,7 +383,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'admin/workflows/:id',
         name: 'admin-workflow-editor',
         component: () => import('@/features/workflow-builder/WorkflowEditorPage.vue'),
-        meta: { requiresAuth: true, permission: 'workflow:definition:read', title: 'Workflow' },
+        meta: {
+          requiresAuth: true,
+          permission: 'workflow:definition:read',
+          title: 'Workflow',
+          breadcrumb: { parent: 'admin-workflows', record: 'id' },
+        },
       },
       {
         // The configured navigation (FR-RAD-004, #341). `rad_menus` has been in
@@ -299,7 +396,12 @@ export const routes: RouteRecordRaw[] = [
         path: 'admin/menus',
         name: 'admin-menus',
         component: () => import('@/features/admin/MenuListPage.vue'),
-        meta: { requiresAuth: true, permission: 'rad:menu:read', title: 'Navigation' },
+        meta: {
+          requiresAuth: true,
+          permission: 'rad:menu:read',
+          title: 'Navigation',
+          breadcrumb: ADMINISTRATION,
+        },
       },
       {
         // The external system registry (FR-INT-001, #520; architectures/03
@@ -313,6 +415,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'integration:external-system:read',
           title: 'External systems',
+          breadcrumb: ADMINISTRATION,
         },
       },
       {
@@ -323,6 +426,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'integration:external-system:read',
           title: 'External system',
+          breadcrumb: { parent: 'admin-external-systems', record: 'id' },
         },
       },
       {
@@ -338,6 +442,7 @@ export const routes: RouteRecordRaw[] = [
           requiresAuth: true,
           permission: 'integration:log:read',
           title: 'Integration logs',
+          breadcrumb: ADMINISTRATION,
         },
       },
       {

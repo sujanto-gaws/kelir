@@ -14,6 +14,7 @@ import {
 } from '@/lib/testing/fake-backend'
 import { useAuthStore } from '@/stores/auth'
 import type { CurrentUser } from '@/types/auth'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 /**
  * The list builder (#374).
@@ -145,6 +146,12 @@ describe('ListBuilderPage', () => {
 
     return wrapper
   }
+
+  it('publishes the loaded record as its breadcrumb name, under the route param (#968)', async () => {
+    await render()
+
+    expect(useBreadcrumbStore().published).toEqual({ key: LIST_ID, name: 'Purchase requisitions' })
+  })
 
   it('edits a definition, column by column', async () => {
     const wrapper = await render()

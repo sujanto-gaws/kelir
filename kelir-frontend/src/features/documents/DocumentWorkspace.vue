@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import DocumentHeader from './DocumentHeader.vue'
+import { useBreadcrumbName } from '@/composables/useBreadcrumbName'
 import ActivityTab from '@/features/activity/ActivityTab.vue'
 import AttachmentsTab from '@/features/attachments/AttachmentsTab.vue'
 import CommentsTab from '@/features/comments/CommentsTab.vue'
@@ -67,6 +68,8 @@ const route = useRoute()
 const router = useRouter()
 
 const document = ref<Document | null>(null)
+// The trail's name for this record (#968): what was loaded, never the id.
+useBreadcrumbName(() => document.value && { key: document.value.id, name: document.value.title })
 const form = ref<Form | null>(null)
 const history = ref<StatusHistoryEntry[]>([])
 

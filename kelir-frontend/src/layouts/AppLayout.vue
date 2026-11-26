@@ -30,6 +30,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
 import type { MenuEntry } from '@/types/rad'
 
+import AppBreadcrumbs from './AppBreadcrumbs.vue'
 import { menuIcon } from './menuIcon'
 import { mergeNavigation } from './navigation'
 
@@ -395,7 +396,8 @@ async function signOut(): Promise<void> {
         </Button>
       </header>
 
-      <main class="flex-1 p-6">
+      <main class="min-w-0 flex-1 p-6">
+        <AppBreadcrumbs />
         <RouterView />
       </main>
     </div>

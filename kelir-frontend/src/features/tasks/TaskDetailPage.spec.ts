@@ -15,6 +15,7 @@ import {
   type RecordedRequest,
 } from '@/lib/testing/fake-backend'
 import { filler, searchedPage } from '@/lib/testing/searched-page'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 /**
  * One task, and what it is asking (#179 AC4).
@@ -206,6 +207,12 @@ describe('TaskDetailPage', () => {
 
     return wrapper
   }
+
+  it('publishes the loaded record as its breadcrumb name, under the route param (#968)', async () => {
+    await render()
+
+    expect(useBreadcrumbStore().published).toEqual({ key: TASK_ID, name: 'Approve the request' })
+  })
 
   it('says what is being decided, and about which document', async () => {
     // AC4: a task that says only "approve?" is a task its holder cannot
