@@ -227,6 +227,25 @@ describe('TaskDetailPage', () => {
     expect(wrapper.text()).toContain('Manager approval')
   })
 
+  /**
+   * **A long title wraps; it is never cut** (#961, NFR-USE-001). jsdom lays
+   * nothing out, so what is pinned is the pair of classes that let a grid item
+   * shrink below its longest word and break that word, and that the whole
+   * title is still the text on screen. The width itself is the tablet e2e's.
+   */
+  it('keeps a long unbroken document title whole, and lets it wrap', async () => {
+    const title = 'PR-' + 'X'.repeat(160)
+    current = detail({ documentTitle: title })
+
+    const wrapper = await render()
+    const cell = wrapper.get('[data-testid="task-document-title"]')
+
+    expect(cell.text()).toBe(title)
+    expect(cell.classes()).toContain('wrap-anywhere')
+    expect(cell.element.parentElement?.classList).toContain('min-w-0')
+    expect(cell.classes()).not.toContain('truncate')
+  })
+
   it('offers the decisions the definition declares, named by where they lead', async () => {
     const wrapper = await render()
 

@@ -312,7 +312,7 @@ function onChange(values: Record<string, unknown>): void {
         </Button>
       </nav>
 
-      <div v-show="tab === 'form'" class="space-y-4">
+      <div v-show="tab === 'form'" class="space-y-4" data-testid="panel-form">
         <p v-if="!form" class="text-sm text-muted-foreground" data-testid="document-no-form">
           This document's type binds no form, so there is nothing to render.
         </p>

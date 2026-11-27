@@ -1076,6 +1076,41 @@ describe('DashboardPage', () => {
   })
 
   /**
+   * **A long title is cut to one line and read whole on hover** (#961,
+   * NFR-USE-001) — the treatment the task rows above already give their
+   * document titles, so the three lists on the page read alike. jsdom lays
+   * nothing out: what is pinned is `truncate` on a block that may shrink, and
+   * that the full title is both the text and the `title`.
+   */
+  it('cuts a long title to one line and keeps the whole of it in the title', async () => {
+    const title = 'PR-' + 'X'.repeat(160)
+
+    for (const permissions of [
+      ['reporting:dashboard:read', 'document:read'],
+      ['reporting:dashboard:read'],
+    ]) {
+      signIn(permissions)
+      onSummary = () => ({
+        status: 200,
+        body: itemBody(summary({ recentDocuments: [recentDocument({ title })] })),
+      })
+
+      const wrapper = await render()
+      const row = wrapper.get('[data-testid="recent-document"]')
+      const label = row.get(`[title="${title}"]`)
+
+      expect(label.text()).toBe(title)
+      expect(label.classes()).toEqual(expect.arrayContaining(['block', 'truncate']))
+      expect(label.element.parentElement?.classList).toContain('min-w-0')
+      expect(label.element.tagName, permissions.join(' ')).toBe(
+        permissions.includes('document:read') ? 'A' : 'SPAN',
+      )
+
+      wrapper.unmount()
+    }
+  })
+
+  /**
    * **The widget adds no request of its own** (#433 AC1, ADR-0039).
    *
    * The decision this row was most likely to reverse, asserted rather than
