@@ -16,10 +16,17 @@ name: CI
 # base and again after retargeting -- which is the point rather than a waste:
 # rebasing onto a moved base is where composition defects hide, and this
 # project has already lost a release rehearsal to one.
+#
+# `workflow_dispatch` lets a job that never runs on a push or a pull request
+# be started by hand (plan 22 row 17, #962: the one-off Chrome, Edge and
+# Firefox run of D-153). GitHub offers it only once the default branch's
+# workflow carries the trigger, so it lands before the job does. Started by
+# hand, the whole workflow runs, not only that job.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
