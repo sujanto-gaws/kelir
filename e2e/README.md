@@ -98,7 +98,11 @@ specs landed beside it; it is listed in the order the flows were added.
 | A rendered list and a document each show their own name as the last crumb, never the list's key or the document's id, and `/master-data/suppliers` reads *Dashboard › Master data*, so a trail split from the URL would fail. **A second test, at 768 px**, checks a document title that is one unbreakable token is clipped with an ellipsis inside the trail, keeps its full text in a `title`, and does not overflow the trail (`a-record-page-names-its-breadcrumb.spec.ts`) | #968 AC2, AC5, AC8; added in the row 27 `test-engineer` campaign. Seeded over the API: the list and the document |
 | **At 768 × 1024 in Chromium**, set by the spec's own `test.use` and not by a device preset: the dashboard, a rendered list with rows, a document and the task that decides it do not scroll sideways (`scrollWidth - clientWidth` is 0), with the sidebar open and closed, and the breadcrumb trail is visible on each but the dashboard, which has none by #968's design and is checked to have none. On the document page the six section tabs, and on the task page the decision buttons and the reason box, end inside the viewport. Each of the six tabs opens its own panel (`panel-*`, and `document-history` for History). **A document whose title is one unbroken token of more than 160 characters** passes the same checks, and its `document-title` ends at or before 768 px (`the-shell-and-a-document-fit-a-tablet.spec.ts`) | #961 AC1–AC3, AC5–AC7; NFR-USE-001, 003, 004, and the 768 px half of 002; #1026. Seeded over the API: the form, the list, the document type and its workflow, the approver and their role, and the two submits |
 
-**Every flow runs in Chromium except `a-pattern-the-browser-gives-up-on.spec.ts`, which runs in Firefox and only there** ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). It is about a match Firefox throws on. Chromium does not throw on the same match, it keeps matching, so the spec would hold its tab until the test timed out. `playwright.config.ts` holds the split, as two projects.
+**Every flow runs in Chromium except `a-pattern-the-browser-gives-up-on.spec.ts`, which runs in Firefox and only there** ([#496](https://github.com/sujanto-gaws/kelir/issues/496)). It is about a match Firefox throws on. Chromium does not throw on the same match, it keeps matching, so the spec would hold its tab until the test timed out. `playwright.config.ts` holds the split, as two projects. **Two switches widen it, for the one-off compatibility run of D-153** ([#962](https://github.com/sujanto-gaws/kelir/issues/962)). Each is read only as exactly `1`:
+- `KELIR_E2E_BRANDED=1` adds `chrome` (`channel: 'chrome'`) and `edge` (`channel: 'msedge'`), which run what `chromium` runs and need the branded browsers installed.
+- `KELIR_E2E_FIREFOX_ALL=1` widens `firefox` to the whole suite.
+
+With neither set, the harness runs exactly the two projects above. CI's manual job *Browser compatibility (Chrome, Edge, Firefox)* sets both; the [Installation guide](../docs/operations/01.%20Installation%20and%20Deployment.md) §5.1 says how to start it.
 
 The suites seed their rows over the API and assert only through the browser —
 arranging through HTTP is faster and fails where it is meant to, but an
@@ -218,7 +222,11 @@ brings the stack up through `deploy-local.sh` and runs this suite against it, so
 what CI exercises is what a release contains. It is the slowest job in the
 pipeline for exactly that reason. **Since #593 the job's `.env` names the
 overlay above**, so its stack is the release stack and one stand-in system
-beside it.
+beside it. **Chrome, Edge and the whole suite in Firefox run in a second job,
+*Browser compatibility (Chrome, Edge, Firefox)*, only when CI is started by
+hand**: the two switches above say what it sets, and the
+[Installation guide](../docs/operations/01.%20Installation%20and%20Deployment.md)
+§5.1 says how to start it.
 
 **One thing that job does which the command above does not: it narrows apt to
 Ubuntu's own sources before installing the browser**, through

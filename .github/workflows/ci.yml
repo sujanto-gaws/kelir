@@ -444,6 +444,137 @@ jobs:
       - name: Build
         run: cargo build --release
 
+  backend-postgres-17:
+    name: Backend tests (PostgreSQL 17)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kelir-backend
+
+    # NFR-CMP-002, **D-153** (#962): PostgreSQL 16 and 17 are both named, so
+    # the backend's tests run once on each. This is the `backend` job's
+    # database, scanner, store, migrations and `cargo test`, copied, with the
+    # service on 17. The probes, fmt, clippy, the offline cache check and the
+    # release build are left to `backend`: they ask nothing of the server.
+    #
+    # **Not a required check**, by the product owner's ruling (2026-11-27):
+    # 16 is the server merges are gated on. A test that fails here and passes
+    # in `backend` is a breach, filed and named in the release notes.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kelir
+          POSTGRES_PASSWORD: kelir
+          POSTGRES_DB: kelir
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kelir -d kelir"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      clamav:
+        # The same pin and setting as the `backend` job's scanner, which says
+        # why each.
+        image: ghcr.io/sujanto-gaws/clamav:1.5.4
+        env:
+          CLAMD_CONF_StreamMaxLength: 32M
+        ports:
+          - 3310:3310
+
+    env:
+      DATABASE_URL: postgres://kelir:kelir@localhost:5432/kelir
+      KELIR_STORAGE_ENDPOINT: http://localhost:9000
+      KELIR_STORAGE_BUCKET: kelir-test
+      KELIR_STORAGE_ACCESS_KEY: minioadmin
+      KELIR_STORAGE_SECRET_KEY: minioadmin
+      KELIR_CLAMAV_HOST: localhost
+      KELIR_CLAMAV_PORT: 3310
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # All of history and every tag, for the `backend` job's reasons:
+          # `sprint_reports_are_verified.rs` and
+          # `releases_are_independently_verified.rs` read them.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: The server is PostgreSQL 17
+        # AC2: the job proves which server it ran on, first, so a service image
+        # set back to 16 is red in seconds and not after forty minutes of tests
+        # that would pass on 16 as well. The value printed is the server's own.
+        env:
+          KELIR_EXPECTED_POSTGRES_MAJOR: '17'
+        run: |
+          set -euo pipefail
+          version="$(psql "$DATABASE_URL" -X -tA -c 'SHOW server_version')"
+          echo "server_version: ${version}"
+          if [[ ! "${version}" =~ ^${KELIR_EXPECTED_POSTGRES_MAJOR}([.[:space:]]|$) ]]; then
+            echo "::error::server_version is ${version}, not PostgreSQL ${KELIR_EXPECTED_POSTGRES_MAJOR}"
+            exit 1
+          fi
+
+      - name: Wait for the scanner
+        run: |
+          # The `backend` job's socket check, which says why a socket.
+          for i in $(seq 1 120); do
+            if (exec 3<>/dev/tcp/127.0.0.1/3310 \
+                && printf 'zPING\0' >&3 \
+                && head -c 5 <&3 | grep -q PONG) 2>/dev/null; then
+              echo "clamd answered after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "clamd never answered on 3310"
+          exit 1
+
+      - name: Start object storage and create its bucket
+        # The `backend` job's store: the same pins (**D-62**, **D-92**) and
+        # the same development key (#778), whose comments say why each.
+        run: |
+          docker run -d --name minio --network host \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            -e MINIO_KMS_SECRET_KEY=kelir-development:w7GPk50m0UH2qkpB+MZbHBZD4Tcd0+nwJx3VzoopMkk= \
+            ghcr.io/sujanto-gaws/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          docker run --rm --network host --entrypoint sh ghcr.io/sujanto-gaws/mc:RELEASE.2025-08-13T08-35-41Z -c \
+            "until mc alias set ci http://localhost:9000 minioadmin minioadmin; \
+             do sleep 1; done \
+             && mc mb --ignore-existing ci/kelir-test \
+             && mc encrypt set sse-s3 ci/kelir-test"
+
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kelir-backend/target
+          # Its own key: this job builds no clippy or release output, so a
+          # save from here must not become the required `backend` job's cache.
+          # It still restores from `backend`'s, by the prefix.
+          key: cargo-pg17-${{ runner.os }}-${{ hashFiles('kelir-backend/Cargo.lock') }}
+          restore-keys: |
+            cargo-pg17-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      - name: Apply migrations
+        run: |
+          for migration in migrations/*.sql; do
+            echo "applying $migration"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$migration"
+          done
+
+      - name: Tests
+        run: cargo test
+
   frontend:
     name: Frontend (Vue)
     runs-on: ubuntu-latest
@@ -705,6 +836,193 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report
           retention-days: 7
+
+  browser-compatibility:
+    name: Browser compatibility (Chrome, Edge, Firefox)
+    runs-on: ubuntu-latest
+
+    # NFR-CMP-001, **D-153** (#962): the browser suite once in each of Chrome,
+    # Edge and Firefox. **Started by hand and never on a push or a pull
+    # request**, by the product owner's ruling (2026-11-27): it is the one-off
+    # run the release's evidence cites, and three browsers over a release
+    # stack is too slow to put in front of every merge.
+    # `gh workflow run ci.yml --ref <branch>` starts it.
+    #
+    # The `e2e` job's stack, brought up by the `e2e` job's steps, and both of
+    # `playwright.config.ts`'s switches: `KELIR_E2E_BRANDED=1` adds `chrome`
+    # and `edge`, which run what `chromium` runs, and `KELIR_E2E_FIREFOX_ALL=1`
+    # gives `firefox` every flow. `chromium` is left out of the run, because
+    # the `e2e` job runs it in the same workflow.
+    #
+    # **A failure in one browser is a finding** (AC6): filed, named in the
+    # release notes, and not fixed by retrying. The config has no retries.
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 180
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kelir
+          POSTGRES_PASSWORD: ci-only-database-password-6Qb2xR
+          POSTGRES_DB: kelir
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kelir -d kelir"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # The `e2e` job's throwaway values, which say why they are not secrets.
+      KELIR_E2E_USERNAME: admin
+      KELIR_E2E_PASSWORD: ci-only-bootstrap-password-4Tz9wK
+      KELIR_E2E_BASE_URL: http://127.0.0.1:8080
+      KELIR_E2E_UPSTREAM_TOKEN: ci-only-upstream-token-7Wq2nV5c
+      KELIR_E2E_BRANDED: '1'
+      KELIR_E2E_FIREFOX_ALL: '1'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install the harness
+        working-directory: e2e
+        run: npm ci
+
+      - name: Type check
+        working-directory: e2e
+        run: npm run type-check
+
+      - name: Install the browsers
+        working-directory: e2e
+        # Firefox is Playwright's own build, installed as the `e2e` job
+        # installs its browsers, after the same apt narrowing (#408).
+        #
+        # **Chrome and Edge are the installed, branded browsers**, which is
+        # what `channel: 'chrome'` and `channel: 'msedge'` launch. GitHub's
+        # `ubuntu-latest` image carries both, so each is installed only when
+        # it is absent, through Playwright's own installer. Installing over a
+        # present Chrome is refused by that installer, and would change the
+        # browser the image's maintainers chose for nobody's benefit.
+        run: |
+          set -euo pipefail
+
+          sudo "${GITHUB_WORKSPACE}/scripts/narrow-apt-to-ubuntu.sh"
+          sudo apt-get update
+
+          npx playwright install --with-deps firefox
+
+          echo "::group::Every firefox dependency resolved from Ubuntu's sources"
+          npx playwright install-deps --dry-run firefox
+          echo "::endgroup::"
+
+          absent=()
+          google-chrome --version || absent+=(chrome)
+          microsoft-edge --version || absent+=(msedge)
+          if [[ ${#absent[@]} -gt 0 ]]; then
+            echo "not on this runner: ${absent[*]}; installing through Playwright"
+            npx playwright install --with-deps "${absent[@]}"
+          fi
+
+      - name: Record each browser's version
+        id: versions
+        working-directory: e2e
+        # AC4: **first**, before a stack is built, and read from the browsers
+        # themselves. The binaries' own lines, then
+        # `support/compatibility.reporter.ts` over the loaded configuration:
+        # it is red unless `chrome`, `edge` and `firefox` exist on their own
+        # engines and channels with the scope each must have, and unless each
+        # launches through Playwright and reports a version.
+        env:
+          KELIR_E2E_VERSIONS_FILE: browser-versions.txt
+        run: |
+          set -euo pipefail
+          : > browser-versions.txt
+          google-chrome --version | tee -a browser-versions.txt
+          microsoft-edge --version | tee -a browser-versions.txt
+          npx playwright test --list --reporter=./support/compatibility.reporter.ts
+
+      - name: Configure the deployment
+        id: configure
+        # The `e2e` job's `.env`, whose comment says why each line.
+        run: |
+          cat > deploy/staging/.env <<'ENVFILE'
+          KELIR_DB_PASSWORD=ci-only-database-password-6Qb2xR
+          KELIR_DB_APP_PASSWORD=ci-only-app-database-password-8Kp3vW
+          KELIR_JWT_SECRET=ci-only-jwt-secret-Xr4Lm8Qp2ZvT6Ns1
+          KELIR_MINIO_USER=ci-only-minio-user
+          KELIR_MINIO_PASSWORD=ci-only-minio-password-9Hd3Bs
+          KELIR_MINIO_KMS_SECRET_KEY=ci-only-store:QWx3n6S0n1W2pmKqzS5c8vQ1yYxR9mZ3u0dLk4hTfE8=
+          KELIR_BACKUP_AGE_RECIPIENTS=
+          KELIR_TRUSTED_PROXY_HOPS=1
+          KELIR_BOOTSTRAP_ADMIN_USERNAME=admin
+          KELIR_BOOTSTRAP_ADMIN_PASSWORD=ci-only-bootstrap-password-4Tz9wK
+          KELIR_BOOTSTRAP_ADMIN_EMAIL=admin@localhost
+          KELIR_COMPOSE_OVERLAY=docker-compose.e2e.yml
+          KELIR_E2E_UPSTREAM_TOKEN=ci-only-upstream-token-7Wq2nV5c
+          ENVFILE
+
+      - name: Provision the serving role
+        # The `e2e` job's statements (ADR-0051 §2 and §4).
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: kelir
+          PGPASSWORD: ci-only-database-password-6Qb2xR
+          PGDATABASE: kelir
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -q <<'SQL'
+          CREATE ROLE kelir_app WITH LOGIN PASSWORD 'ci-only-app-database-password-8Kp3vW';
+          GRANT CONNECT ON DATABASE kelir TO kelir_app;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          GRANT USAGE ON SCHEMA public TO kelir_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kelir_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE kelir IN SCHEMA public
+              GRANT USAGE, SELECT ON SEQUENCES TO kelir_app;
+          SQL
+
+      - name: Bring the release stack up
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' kelir-backend/Cargo.toml | head -1)"
+          echo "deploying ${version} for the browser flow"
+          cd deploy/staging
+          KELIR_HOST_IP=127.0.0.1 ./deploy-local.sh "${version}" 8080
+
+      - name: Drive the flows in Chrome, Edge and Firefox
+        id: drive
+        working-directory: e2e
+        run: npx playwright test --project=chrome --project=edge --project=firefox
+
+      - name: Stack logs
+        # The `e2e` job's diagnostic, gated by the same rule.
+        if: failure() && steps.configure.outcome == 'success'
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' kelir-backend/Cargo.toml | head -1)"
+          cd deploy/staging
+          KELIR_VERSION="${version}" docker compose -f docker-compose.staging.yml -f docker-compose.e2e.yml logs --tail 200
+
+      - name: Keep the report and the versions
+        # **Kept on a pass as well**: the report is the run's evidence (AC5),
+        # not only a failure's diagnostic. Gated on the versions step having
+        # run, so a failure before it uploads nothing rather than an empty
+        # artifact.
+        if: always() && steps.versions.outcome != 'skipped'
+        uses: actions/upload-artifact@v5
+        with:
+          name: browser-compatibility
+          path: |
+            e2e/playwright-report
+            e2e/browser-versions.txt
+          if-no-files-found: warn
+          retention-days: 90
 
   n-minus-one:
     name: N−1 rehearsal (PostgreSQL ${{ matrix.postgres }})

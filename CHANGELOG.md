@@ -2057,6 +2057,31 @@ While the major version is `0`, the public API may change in any release.
   ([#830](https://github.com/sujanto-gaws/kelir/issues/830)). The refusal shows
   on the component, and the builder offers no way to change the expression;
   the way out is the API. It is unprioritised and unplaced.
+- **PostgreSQL is the only database in `v1.0.0`, and Safari is untested**
+  ([#962](https://github.com/sujanto-gaws/kelir/issues/962), decision
+  **D-153**, NFR-CMP-001 to 003). `v1.0.0` supports PostgreSQL 16 and 17, and
+  Chrome, Edge and Firefox. **MariaDB is not supported.** NFR-CMP-003 says
+  MariaDB support *may* be provided, so its absence is not a breach. **The
+  browser suite was not run in Safari, or in any other WebKit-based
+  browser**, so Safari is untested, not known to fail. No other version or
+  browser is claimed. The
+  [Installation and Deployment guide](docs/operations/01.%20Installation%20and%20Deployment.md)
+  §2 says the same.
+  - **The whole suite's first run in Firefox, on 2026-11-27, failed in three
+    places, each filed and not fixed**, by the product owner's ruling on
+    #962. A failure in one browser is filed and named, not fixed in the
+    compatibility check.
+    - [#1031](https://github.com/sujanto-gaws/kelir/issues/1031): two specs
+      read a zstd-compressed response body as JSON. This is most likely the
+      harness, not Kelir.
+    - [#1032](https://github.com/sujanto-gaws/kelir/issues/1032): a dragged
+      card shows no sortable ghost under Playwright. The cause is not known:
+      it is either the harness or the product.
+    - [#1033](https://github.com/sujanto-gaws/kelir/issues/1033): the workflow
+      graph's timing test measures through the Chrome DevTools Protocol, which
+      only Chromium speaks, so it cannot run in Firefox as written.
+  - **Chrome and Edge are run by CI's manual job**, *Browser compatibility
+    (Chrome, Edge, Firefox)*, and their result is not recorded here.
 
 ## [0.9.0] — 2026-10-09
 
