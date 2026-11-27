@@ -1209,6 +1209,19 @@ While the major version is `0`, the public API may change in any release.
 
 ### Fixed
 
+- **A long unbroken title no longer makes a page scroll sideways at tablet
+  width** ([#1026](https://github.com/sujanto-gaws/kelir/issues/1026),
+  [#961](https://github.com/sujanto-gaws/kelir/issues/961), NFR-USE-001). At
+  768 px, a document title with no spaces pushed the page wider than the
+  screen: the document page by about 1,200 px, the task page by about 950 px
+  and the dashboard by about 725 px. The document page's heading and the task
+  page's title now wrap and keep the whole title; the dashboard's *What you
+  touched last* row cuts it short, as the task rows above it already do, and
+  shows it in full on hover. A browser test at 768 px now covers the
+  dashboard, a list, a document with its six tabs, and the approval on its
+  task, with the sidebar open and closed. The `/documents` list, the task inbox and the
+  notifications are not yet checked at that width with a long title
+  ([#1028](https://github.com/sujanto-gaws/kelir/issues/1028)).
 - **Concurrent audited writes in one tenant no longer fork its audit chain**
   ([#995](https://github.com/sujanto-gaws/kelir/issues/995), ADR-0052,
   FR-AUD-003, NFR-SEC-006). `audit::record` read the tenant's latest row and

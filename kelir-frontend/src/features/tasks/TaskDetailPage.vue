@@ -456,9 +456,13 @@ function openDocument(): void {
             <dt class="text-muted-foreground">Document</dt>
             <dd class="font-medium">{{ task.documentNumber ?? task.documentRef }}</dd>
           </div>
-          <div>
+          <!-- A grid item will not shrink below its longest word either, so the
+               title is let to shrink and to break; it stays whole (#961). -->
+          <div class="min-w-0">
             <dt class="text-muted-foreground">Title</dt>
-            <dd class="font-medium">{{ task.documentTitle }}</dd>
+            <dd class="font-medium wrap-anywhere" data-testid="task-document-title">
+              {{ task.documentTitle }}
+            </dd>
           </div>
           <div v-if="task.dueAt">
             <dt class="text-muted-foreground">Due</dt>

@@ -243,6 +243,64 @@ describe('DocumentWorkspace', () => {
     expect(wrapper.get('[data-testid="document-ref"]').text()).toBe('DOC-2026-000001')
   })
 
+  /**
+   * **A long title wraps inside its row; it is never cut** (#1026,
+   * NFR-USE-001). The `<h1>` is a flex item, which will not shrink below its
+   * longest word, so one unbroken title pushed the page past a tablet's width.
+   * jsdom lays nothing out: what is pinned is the pair of classes that lets it
+   * shrink and break, and that the whole title is the text. The width itself is
+   * `the-shell-and-a-document-fit-a-tablet.spec.ts`'s.
+   */
+  it('keeps a long unbroken title whole, and lets it wrap inside its row', async () => {
+    const title = 'PR-' + 'X'.repeat(160)
+    current = document({ title }) as Record<string, unknown>
+
+    const wrapper = await render()
+    const heading = wrapper.get('[data-testid="document-title"]')
+
+    expect(heading.element.tagName).toBe('H1')
+    expect(heading.text()).toBe(title)
+    expect(heading.classes()).toEqual(expect.arrayContaining(['min-w-0', 'wrap-anywhere']))
+    expect(heading.classes()).not.toContain('truncate')
+  })
+
+  /**
+   * **Every tab opens its own panel** (NFR-USE-003, #961 AC5). One list of all
+   * six, so a seventh tab added without a panel — or a panel left without an
+   * id to find it by — fails here. History keeps `document-history`, the id
+   * two e2e specs already read.
+   */
+  it('opens each of the six tabs onto its own panel, and hides the others', async () => {
+    const panels = {
+      form: 'panel-form',
+      history: 'document-history',
+      workflow: 'panel-workflow',
+      attachments: 'panel-attachments',
+      comments: 'panel-comments',
+      activity: 'panel-activity',
+    } as const
+
+    const wrapper = await render()
+
+    expect(
+      wrapper.findAll('[data-testid^="tab-"]').map((tab) => tab.attributes('data-testid')),
+    ).toEqual(Object.keys(panels).map((key) => `tab-${key}`))
+
+    for (const key of Object.keys(panels)) {
+      await wrapper.get(`[data-testid="tab-${key}"]`).trigger('click')
+
+      for (const [other, otherPanel] of Object.entries(panels)) {
+        // `v-show`'s inline style, read directly: `isVisible()` needs the
+        // wrapper attached to a document, and this one is not.
+        const style = wrapper.get(`[data-testid="${otherPanel}"]`).attributes('style') ?? ''
+
+        expect(!style.includes('display: none'), `with ${key} open, ${other}'s panel`).toBe(
+          other === key,
+        )
+      }
+    }
+  })
+
   it('says a draft has no number yet rather than showing an empty cell', async () => {
     // An empty cell reads as a value that failed to load, which sends somebody
     // looking for a fault that is not there.

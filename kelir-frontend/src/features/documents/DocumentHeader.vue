@@ -77,7 +77,13 @@ const statusVariant = computed(() => {
 <template>
   <header class="space-y-3 border-b border-border pb-4">
     <div class="flex flex-wrap items-center gap-3">
-      <h1 class="text-xl font-semibold" data-testid="document-title">{{ document.title }}</h1>
+      <!-- **The whole title, broken where it must be** (#1026). A flex item will
+           not shrink below its longest word, so one unbroken title pushed the
+           page past a tablet's width. `min-w-0` lets it shrink and
+           `wrap-anywhere` lets the word break; nothing is cut off. -->
+      <h1 class="min-w-0 text-xl font-semibold wrap-anywhere" data-testid="document-title">
+        {{ document.title }}
+      </h1>
       <Badge :variant="statusVariant" data-testid="document-status">
         {{ DOCUMENT_STATUS_LABELS[document.status] }}
       </Badge>

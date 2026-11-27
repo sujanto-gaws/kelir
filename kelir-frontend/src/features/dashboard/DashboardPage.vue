@@ -629,11 +629,16 @@ onMounted(load)
               <RouterLink
                 v-if="canOpenDocuments"
                 :to="`/documents/${document.id}`"
-                class="text-sm font-medium text-primary underline-offset-4 hover:underline"
+                :title="document.title"
+                class="block truncate text-sm font-medium text-primary underline-offset-4 hover:underline"
               >
                 {{ document.title }}
               </RouterLink>
-              <span v-else class="text-sm font-medium">{{ document.title }}</span>
+              <!-- One line per row, as the task rows above keep theirs: a long
+                   title is cut with an ellipsis and read whole from `title`. -->
+              <span v-else :title="document.title" class="block truncate text-sm font-medium">
+                {{ document.title }}
+              </span>
 
               <span class="block truncate text-xs text-muted-foreground">
                 {{ document.documentNumber ?? document.documentRef }} ·
