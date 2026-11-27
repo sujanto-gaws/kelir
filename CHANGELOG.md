@@ -1220,7 +1220,8 @@ While the major version is `0`, the public API may change in any release.
   shows it in full on hover. A browser test at 768 px now covers the
   dashboard, a list, a document with its six tabs, and the approval on its
   task, with the sidebar open and closed. The `/documents` list, the task inbox and the
-  notifications are not yet checked at that width with a long title.
+  notifications are not yet checked at that width with a long title
+  ([#1028](https://github.com/sujanto-gaws/kelir/issues/1028)).
 - **Concurrent audited writes in one tenant no longer fork its audit chain**
   ([#995](https://github.com/sujanto-gaws/kelir/issues/995), ADR-0052,
   FR-AUD-003, NFR-SEC-006). `audit::record` read the tenant's latest row and
