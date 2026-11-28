@@ -6,6 +6,23 @@ import { baseUrl } from './support/env'
 const FIREFOX_ONLY = /a-pattern-the-browser-gives-up-on\.spec\.ts$/
 
 /**
+ * The two one-off switches of the compatibility check (#962, **D-153**,
+ * NFR-CMP-001). Each is read as exactly `1`, so an unset, empty or other value
+ * leaves the configuration as it was before them, and `npm test` and the
+ * `e2e` job run what they ran.
+ *
+ * - `KELIR_E2E_BRANDED=1` adds `chrome` and `edge`: the installed Google Chrome
+ *   and Microsoft Edge, each running exactly what `chromium` runs.
+ * - `KELIR_E2E_FIREFOX_ALL=1` widens `firefox` from its one flow to the whole
+ *   suite.
+ *
+ * CI's `Browser compatibility (Chrome, Edge, Firefox)` job, started by hand,
+ * sets both. Serial, one worker and no retries hold for every project.
+ */
+const BRANDED = process.env.KELIR_E2E_BRANDED === '1'
+const FIREFOX_ALL = process.env.KELIR_E2E_FIREFOX_ALL === '1'
+
+/**
  * The browser-driving harness (decision **D-14**, issue #153).
  *
  * **It drives a deployed stack, never a dev server.** There is no `webServer`
@@ -79,6 +96,11 @@ export default defineConfig({
    * it keeps matching, so the spec is kept out of it: there it would hold the
    * tab until the test timed out. Every other flow stays Chromium-only, as it
    * was.
+   *
+   * The compatibility check's switches, above, add two Chromium-engine
+   * projects with Chromium's scope, and drop Firefox's `testMatch`. Firefox
+   * then runs every flow, its own included; Chrome and Edge never get that one,
+   * for Chromium's reason.
    */
   projects: [
     {
@@ -89,7 +111,21 @@ export default defineConfig({
     {
       name: 'firefox',
       use: { ...devices['Desktop Firefox'] },
-      testMatch: FIREFOX_ONLY,
+      ...(FIREFOX_ALL ? {} : { testMatch: FIREFOX_ONLY }),
     },
+    ...(BRANDED
+      ? [
+          {
+            name: 'chrome',
+            use: { ...devices['Desktop Chrome'], channel: 'chrome' },
+            testIgnore: FIREFOX_ONLY,
+          },
+          {
+            name: 'edge',
+            use: { ...devices['Desktop Edge'], channel: 'msedge' },
+            testIgnore: FIREFOX_ONLY,
+          },
+        ]
+      : []),
   ],
 })
